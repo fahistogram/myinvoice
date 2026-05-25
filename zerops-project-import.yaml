@@ -1,0 +1,69 @@
+#yamlPreprocessor=on
+#
+# MyInvoice.cz — Zerops Project Import
+# https://docs.zerops.io/references/import-yaml
+#
+# Použití:
+#   1) V Zerops dashboardu → „Import a project" → vlož obsah tohoto souboru
+#   2) Nebo přes zCLI:  zcli project project-import zerops-project-import.yaml
+#
+# Tento import vytvoří:
+#   - projekt "myinvoice"
+#   - službu "app"  (php-apache@8.5)  s veřejnou .zerops.app subdoménou + auto SSL
+#   - službu "db"   (mariadb@10.6)    interní, dostupná jen ze 'app'
+#
+# Po importu spusť deploy z této githubové větve (buildFromGit níže).
+# Citlivé hodnoty (pepper, secret_encryption_key, SMTP, Turnstile) se vygenerují
+# jako envSecrets — generateRandomString je yaml-preprocessor direktiva Zerops.
+
+project:
+  name: myinvoice
+  tags:
+    - myinvoice
+    - production
+
+services:
+  - hostname: app
+    type: php-apache@8.5
+    # Public subdoména typu app-{random}.prg1.zerops.app + Let's Encrypt cert.
+    # Pro vlastní doménu nastav v Zerops GUI po importu (CNAME + custom domain).
+    enableSubdomainAccess: true
+    # Build z této GitHub větve. Zerops si pamatuje commit a redeploy nahodíš
+    # buďto z GUI, přes zCLI (`zcli push`), nebo GitHub Actions s ZEROPS_TOKEN.
+    buildFromGit: https://github.com/fahistogram/myinvoice@odra
+    minContainers: 1
+    maxContainers: 1
+    # Persistent volume pro stateful data (log/, storage/, private/dkim/,
+    # cfg.local.php) — odpovídá MYINVOICE_DATA_DIR=/var/www/data v zerops.yaml.
+    # Velikost roste s počtem PDF (vystavené + přijaté). 5 GB je rozumný start
+    # pro malou firmu, navyš podle potřeby v Service Settings.
+    verticalAutoscaling:
+      minDisk: 5
+      maxDisk: 50
+    envSecrets:
+      # MyInvoice app secrets — vygenerují se 1× při importu, zůstanou perzistentní.
+      MYINVOICE_PEPPER: <@generateRandomString(<32>)>
+      MYINVOICE_SECRET_KEY: <@generateRandomString(<32>)>
+
+      # SMTP — DOPLŇ ručně v Zerops GUI po importu (Service Settings → Env vars).
+      # Bez SMTP nepošle aplikace faktury, upomínky ani reset hesel.
+      # MYINVOICE_SMTP_HOST: smtp.tvojedomena.cz
+      # MYINVOICE_SMTP_PORT: "587"
+      # MYINVOICE_SMTP_ENCRYPTION: tls
+      # MYINVOICE_SMTP_AUTH: "true"
+      # MYINVOICE_SMTP_USER: noreply@tvojedomena.cz
+      # MYINVOICE_SMTP_PASS: ...
+      # MYINVOICE_SMTP_FROM_EMAIL: noreply@tvojedomena.cz
+      # MYINVOICE_SMTP_FROM_NAME: MyInvoice
+
+      # Cloudflare Turnstile (CAPTCHA proti brute-force) — DOPLŇ ručně.
+      # Bez nich přepni v cfg.local.php captcha.provider na 'none'.
+      # MYINVOICE_TURNSTILE_SITE_KEY: 0x4AAAAAAA...
+      # MYINVOICE_TURNSTILE_SECRET_KEY: 0x4AAAAAAA...
+
+  - hostname: db
+    type: mariadb@10.6
+    # NON_HA = single instance (úspornější). Pro HA cluster: mode: HA + minContainers 3+.
+    mode: NON_HA
+    # Vyšší priority = boot dříve než app (app na něj čeká).
+    priority: 10
