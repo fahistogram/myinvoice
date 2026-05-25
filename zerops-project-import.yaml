@@ -1,26 +1,17 @@
 #yamlPreprocessor=on
 #
-# MyInvoice.cz — Zerops Project Import
+# MyInvoice.cz — Zerops Service Import
 # https://docs.zerops.io/references/import-yaml
 #
-# Použití:
-#   1) V Zerops dashboardu → „Import a project" → vlož obsah tohoto souboru
-#   2) Nebo přes zCLI:  zcli project project-import zerops-project-import.yaml
+# Použití — „Import services" uvnitř existujícího projektu:
+#   V Zerops dashboardu → projekt → „Import services" → vlož obsah tohoto souboru
 #
-# Tento import vytvoří:
-#   - projekt "myinvoice"
-#   - službu "app"  (php-apache@8.5)  s veřejnou .zerops.app subdoménou + auto SSL
-#   - službu "db"   (mariadb@10.6)    interní, dostupná jen ze 'app'
+# Vytvoří dvě služby:
+#   - "app"  (php-apache@8.5)  s veřejnou .zerops.app subdoménou + auto SSL
+#   - "db"   (mariadb@10.6)    interní, dostupná jen ze 'app'
 #
-# Po importu spusť deploy z této githubové větve (buildFromGit níže).
-# Citlivé hodnoty (pepper, secret_encryption_key, SMTP, Turnstile) se vygenerují
-# jako envSecrets — generateRandomString je yaml-preprocessor direktiva Zerops.
-
-project:
-  name: myinvoice
-  tags:
-    - myinvoice
-    - production
+# Citlivé hodnoty (pepper, secret_encryption_key) se vygenerují náhodně
+# přes yaml-preprocessor direktivu Zerops (<@generateRandomString>).
 
 services:
   - hostname: app
