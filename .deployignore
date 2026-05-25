@@ -1,0 +1,45 @@
+# MyInvoice.cz — co NESMÍ skončit v deploy artefaktu (po build kroku).
+# Syntax = .gitignore (pattern bez / matchne v libovolném adresáři).
+# https://docs.zerops.io/zerops-yaml/specification (.deployignore)
+
+# Frontend build cache — web/dist/ se DEPLOYUJE, node_modules NE.
+web/node_modules/
+
+# Composer dev deps (testy, php-cs-fixer, PHPStan) — vyloučíme i kdyby je
+# composer někdy přibalil; produkční install ostatně volá --no-dev.
+api/.phpunit.cache/
+api/tests/
+
+# Repo housekeeping
+.git/
+.github/
+.gitignore
+.gitattributes
+.dockerignore
+.editorconfig
+
+# Lokální dev konfigy (na image nemají co dělat)
+.env
+.env.*
+.vscode/
+.idea/
+.claude/
+
+# Docker věci — Zerops je nepotřebuje, jen by mátly v runtime image
+Dockerfile
+docker-compose*.yml
+docker-entrypoint.sh
+
+# Vývojářská dokumentace, manuál ZDROJ (HTML/PDF render z build kroku zůstává)
+source/
+manual/*.md
+manual/INDEX.md
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.bak
+*.orig
+*.log
