@@ -118,8 +118,8 @@ zerops:
         httpGet:
           port: 80
           path: /api/health
-        failureTimeout: 60
-        execPeriod: 10
+        failureTimeout: 60s
+        execPeriod: 10s
 
       # Cron skripty z api/bin/cron-*.php — viz README.md sekce „Cron skripty".
       # Bez nich UI v /admin/cron-jobs hlásí *overdue*.
