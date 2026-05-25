@@ -1,4 +1,3 @@
-#yamlPreprocessor=on
 #
 # MyInvoice.cz — Zerops Service Import
 # https://docs.zerops.io/references/import-yaml
@@ -32,9 +31,10 @@ services:
       minDisk: 5
       maxDisk: 50
     envSecrets:
-      # MyInvoice app secrets — vygenerují se 1× při importu, zůstanou perzistentní.
-      MYINVOICE_PEPPER: <@generateRandomString(<32>)>
-      MYINVOICE_SECRET_KEY: <@generateRandomString(<32>)>
+      # DOPLŇ v Zerops GUI po importu: Service → Environment variables
+      # openssl rand -base64 32   (nebo libovolný 32+ znakový random string)
+      MYINVOICE_PEPPER: CHANGE-ME-32-chars-random-string
+      MYINVOICE_SECRET_KEY: CHANGE-ME-32-chars-random-string
 
       # SMTP — DOPLŇ ručně v Zerops GUI po importu (Service Settings → Env vars).
       # Bez SMTP nepošle aplikace faktury, upomínky ani reset hesel.
