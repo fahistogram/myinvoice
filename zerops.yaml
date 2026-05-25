@@ -1,0 +1,163 @@
+# MyInvoice.cz — Zerops build & run pipeline
+# https://docs.zerops.io/zerops-yaml/specification
+#
+# Repo layout (build-time):
+#   api/    PHP backend  (Slim, composer install → api/vendor/)
+#   web/    Vue 3 SPA    (pnpm build → web/dist/)
+#   tools/  CLI skripty  (generateManualHtml.php, exportManualToPdf.php → manual/generated/, manual.pdf)
+#   .htaccess v rootu rewrituje /api/* → api/public/index.php, /assets/* → web/dist/assets/*,
+#   SPA fallback → web/dist/index.html. Apache documentRoot proto musí být root repa ("").
+#
+# Runtime needs (mapping na MyInvoice ENV — viz api/src/Infrastructure/Config/Config.php):
+#   DB              → ${db_*}        (MariaDB service hostname 'db')
+#   Stateful data   → /var/www/data  (MYINVOICE_DATA_DIR — log/, storage/, private/dkim/, cfg.local.php)
+#   Veřejná URL     → ${zeropsSubdomain} pro MYINVOICE_APP_URL (odkazy v e-mailech)
+#
+# Sensitive (pepper, secret_encryption_key, SMTP, Turnstile) doplň přes Project Settings
+# nebo `envSecrets:` v zerops-project-import.yaml — NIKDY do zerops.yaml.
+
+zerops:
+  - setup: app
+
+    build:
+      # Multi-stack: PHP pro composer + Node pro Vite build v jednom kroku.
+      base:
+        - php@8.5
+        - nodejs@24
+      os: alpine
+
+      prepareCommands:
+        # pnpm 10+ via corepack — package.json fixuje verzi Vue/Vite, lockfile je pnpm-lock.
+        - corepack enable
+        - corepack prepare pnpm@latest --activate
+
+      buildCommands:
+        # 1) PHP runtime deps (no-dev, optimalizovaný classmap).
+        - cd api && composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --classmap-authoritative
+        # 2) Frontend bundle.
+        - cd web && pnpm install --frozen-lockfile && pnpm build
+        # 3) HTML manuál (self-contained, bez vendoru).
+        - php tools/generateManualHtml.php
+        # 4) PDF manuál — vyžaduje api/vendor (mPDF), proto až po composer install.
+        - php tools/exportManualToPdf.php
+        # 5) Stub cfg.php — Config::load() throwne pokud cfg.php neexistuje. Reálné
+        #    hodnoty přepisuje ENV (envOverrideMap v Config.php), baselineDefaults
+        #    pokrývá ARES/VIES URL. Stejný trik je v Dockerfile.
+        - test -f cfg.php || printf '<?php return [];' > cfg.php
+
+      # Build cache — composer/pnpm install přeskočí stažení, pokud lockfile nesedí.
+      cache:
+        - api/vendor
+        - api/composer.lock
+        - web/node_modules
+        - web/pnpm-lock.yaml
+
+      # Deploy celý repo — .htaccess v rootu řídí routing. .deployignore níže odfiltruje balast.
+      deployFiles: ./
+
+    run:
+      base: php-apache@8.5
+      os: alpine
+
+      # Apache docroot = root repa, aby .htaccess fungoval (api → /api/public/index.php,
+      # /assets/* → web/dist/assets/*, SPA fallback → web/dist/index.html).
+      documentRoot: ""
+
+      prepareCommands:
+        # cron-backup.php potřebuje mariadb-dump (~20 MB) pro denní DB dump.
+        # Per issue #34: bez něj fail out-of-the-box na fresh deployi.
+        - sudo apk add --no-cache mariadb-client
+
+      initCommands:
+        # Idempotentní migrace na každý rollout (analog docker-entrypoint.sh).
+        # zsc execOnce zajistí, že na multi-container deployi to běží jen 1×.
+        - sudo -E -u zerops -- zsc execOnce ${appVersionId} -- php /var/www/api/bin/migrate.php
+
+      envVariables:
+        TZ: Europe/Prague
+
+        # --- MyInvoice app config (přepisuje cfg.php / cfg.sample.php hodnoty) ---
+        MYINVOICE_APP_ENV: production
+        MYINVOICE_APP_DEBUG: "false"
+        MYINVOICE_APP_URL: ${zeropsSubdomain}
+        MYINVOICE_TIMEZONE: Europe/Prague
+        MYINVOICE_LOCALE: cs
+
+        # Stateful data na jeden persistent volume (log/, storage/, private/dkim/,
+        # cfg.local.php přežije image update — viz Config::applyDataDirOverrides).
+        MYINVOICE_DATA_DIR: /var/www/data
+
+        # Session — Zerops subdomain je HTTPS, __Host- prefix cookie funguje.
+        MYINVOICE_SESSION_COOKIE_SECURE: "true"
+        MYINVOICE_SESSION_SAMESITE: Lax
+
+        # --- DB (service 'db' v zerops-project-import.yaml) ---
+        MYINVOICE_DB_HOST: ${db_hostname}
+        MYINVOICE_DB_PORT: ${db_port}
+        MYINVOICE_DB_NAME: ${db_dbName}
+        MYINVOICE_DB_USER: ${db_user}
+        MYINVOICE_DB_PASS: ${db_password}
+
+        # --- Redis (volitelné) ---
+        # Pokud přidáš službu typu `keydb` / `valkey` s hostname `redis`, odkomentuj:
+        # MYINVOICE_REDIS_ENABLED: "true"
+        # MYINVOICE_REDIS_HOST: ${redis_hostname}
+        # MYINVOICE_REDIS_PORT: ${redis_port}
+        # MYINVOICE_REDIS_AUTH: ${redis_password}
+        # MYINVOICE_REDIS_PREFIX: "myinvoice:prod:"
+
+        # --- SMTP, Cloudflare Turnstile, app.pepper, secret_encryption_key ---
+        # Doplň jako envSecrets přes zerops-project-import.yaml nebo Project Settings:
+        #   MYINVOICE_PEPPER, MYINVOICE_SECRET_KEY,
+        #   MYINVOICE_SMTP_HOST, MYINVOICE_SMTP_PORT, MYINVOICE_SMTP_ENCRYPTION,
+        #   MYINVOICE_SMTP_AUTH, MYINVOICE_SMTP_USER, MYINVOICE_SMTP_PASS,
+        #   MYINVOICE_SMTP_FROM_EMAIL, MYINVOICE_SMTP_FROM_NAME,
+        #   MYINVOICE_TURNSTILE_SITE_KEY, MYINVOICE_TURNSTILE_SECRET_KEY
+
+      healthCheck:
+        httpGet:
+          port: 80
+          path: /api/health
+        failureTimeout: 60
+        execPeriod: 10
+
+      # Cron skripty z api/bin/cron-*.php — viz README.md sekce „Cron skripty".
+      # Bez nich UI v /admin/cron-jobs hlásí *overdue*.
+      crontab:
+        # Denní DB záloha (mariadb-dump; potřebuje mariadb-client v prepareCommands).
+        - command: cd /var/www && php api/bin/cron-backup.php
+          timing: "0 2 * * *"
+          allContainers: false
+        # Denní cleanup (sessions, login_attempts, expirované resety, cache).
+        - command: cd /var/www && php api/bin/cron-cleanup.php
+          timing: "15 3 * * *"
+          allContainers: false
+        # Denní záloha PDF (vystavené + přijaté faktury).
+        - command: cd /var/www && php api/bin/cron-backup-pdf.php
+          timing: "0 4 * * *"
+          allContainers: false
+        # Denní generování opakujících se faktur.
+        - command: cd /var/www && php api/bin/cron-generate-recurring-invoices.php
+          timing: "0 6 * * *"
+          allContainers: false
+        # Denní check GitHub Releases (badge „nová verze" v admin UI).
+        - command: cd /var/www && php api/bin/cron-version-check.php
+          timing: "30 6 * * *"
+          allContainers: false
+        # Denní upomínky po splatnosti.
+        - command: cd /var/www && php api/bin/cron-send-reminders.php
+          timing: "0 8 * * *"
+          allContainers: false
+        # Denní schvalovací upomínky (veřejný link pro zákazníka).
+        - command: cd /var/www && php api/bin/cron-send-approval-reminders.php
+          timing: "30 8 * * *"
+          allContainers: false
+        # Každých 15 min — bank scan (aktivní jen pokud bank_import.scan_root != "").
+        - command: cd /var/www && php api/bin/cron-bank-scan.php
+          timing: "*/15 * * * *"
+          allContainers: false
+        # Každých 10 min — scan inbox pro přijaté faktury (od v4.0.0; aktivní jen
+        # pokud purchase_invoice.inbox_dir != "").
+        - command: cd /var/www && php api/bin/cron-scan-purchase-inbox.php
+          timing: "*/10 * * * *"
+          allContainers: false
