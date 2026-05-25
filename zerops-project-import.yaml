@@ -1,26 +1,16 @@
-#yamlPreprocessor=on
 #
-# MyInvoice.cz — Zerops Project Import
+# MyInvoice.cz — Zerops Service Import
 # https://docs.zerops.io/references/import-yaml
 #
-# Použití:
-#   1) V Zerops dashboardu → „Import a project" → vlož obsah tohoto souboru
-#   2) Nebo přes zCLI:  zcli project project-import zerops-project-import.yaml
+# Použití — „Import services" uvnitř existujícího projektu:
+#   V Zerops dashboardu → projekt → „Import services" → vlož obsah tohoto souboru
 #
-# Tento import vytvoří:
-#   - projekt "myinvoice"
-#   - službu "app"  (php-apache@8.5)  s veřejnou .zerops.app subdoménou + auto SSL
-#   - službu "db"   (mariadb@10.6)    interní, dostupná jen ze 'app'
+# Vytvoří dvě služby:
+#   - "app"  (php-apache@8.5)  s veřejnou .zerops.app subdoménou + auto SSL
+#   - "db"   (mariadb@10.6)    interní, dostupná jen ze 'app'
 #
-# Po importu spusť deploy z této githubové větve (buildFromGit níže).
-# Citlivé hodnoty (pepper, secret_encryption_key, SMTP, Turnstile) se vygenerují
-# jako envSecrets — generateRandomString je yaml-preprocessor direktiva Zerops.
-
-project:
-  name: myinvoice
-  tags:
-    - myinvoice
-    - production
+# Citlivé hodnoty (pepper, secret_encryption_key) se vygenerují náhodně
+# přes yaml-preprocessor direktivu Zerops (<@generateRandomString>).
 
 services:
   - hostname: app
@@ -41,9 +31,10 @@ services:
       minDisk: 5
       maxDisk: 50
     envSecrets:
-      # MyInvoice app secrets — vygenerují se 1× při importu, zůstanou perzistentní.
-      MYINVOICE_PEPPER: <@generateRandomString(<32>)>
-      MYINVOICE_SECRET_KEY: <@generateRandomString(<32>)>
+      # DOPLŇ v Zerops GUI po importu: Service → Environment variables
+      # openssl rand -base64 32   (nebo libovolný 32+ znakový random string)
+      MYINVOICE_PEPPER: CHANGE-ME-32-chars-random-string
+      MYINVOICE_SECRET_KEY: CHANGE-ME-32-chars-random-string
 
       # SMTP — DOPLŇ ručně v Zerops GUI po importu (Service Settings → Env vars).
       # Bez SMTP nepošle aplikace faktury, upomínky ani reset hesel.
