@@ -217,10 +217,50 @@ final class EmailBrandingAction
             'subject'  => $locale === 'en' ? 'Invoice 2026005 — sample preview' : 'Faktura 2026005 — ukázka náhledu',
             'supplier' => $supplier,
         ];
-        // Použijeme inline string template pro sample obsah, dědící z _layout
+        // Inline sample obsah dědící z _layout. Obsahuje částku + tlačítko obarvené
+        // přes {{ accent }}, aby náhled reprezentativně ukázal branding barvu i v těle
+        // (ne jen v hlavičce/patičce) — stejně jako reálný invoice_send.
         $sample = $locale === 'en'
-            ? "{% extends '_layout.html.twig' %}\n{% block content %}\n<p>Hello,</p>\n<p>Please find attached invoice <strong>2026005</strong> for <strong>1&nbsp;000&nbsp;CZK</strong>.</p>\n<p>Due date: <strong>2026-05-21</strong>.</p>\n<p>Thank you,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>\n{% endblock %}"
-            : "{% extends '_layout.html.twig' %}\n{% block content %}\n<p>Dobrý den,</p>\n<p>v příloze posíláme fakturu <strong>2026005</strong> na částku <strong>1&nbsp;000&nbsp;Kč</strong>.</p>\n<p>Splatnost: <strong>21.05.2026</strong>.</p>\n<p>Děkujeme,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>\n{% endblock %}";
+            ? <<<'TWIG'
+{% extends '_layout.html.twig' %}
+{% block content %}
+<p>Hello,</p>
+<p>Please find attached invoice <strong>2026005</strong>.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border:1px solid #E5E0F4;border-radius:8px;">
+  <tr><td style="padding:16px 20px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+      <tr><td style="padding:4px 0;color:#7A748C;">Due date</td><td style="padding:4px 0;font-weight:600;text-align:right;">2026-05-21</td></tr>
+      <tr><td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">Amount due</td>
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;text-align:right;">1,000.00 CZK</td></tr>
+    </table>
+  </td></tr>
+</table>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;"><tr>
+  <td style="border-radius:8px;background:{{ accent }};"><a href="#" style="display:inline-block;padding:12px 24px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">View invoice</a></td>
+</tr></table>
+<p>Thank you,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>
+{% endblock %}
+TWIG
+            : <<<'TWIG'
+{% extends '_layout.html.twig' %}
+{% block content %}
+<p>Dobrý den,</p>
+<p>v příloze posíláme fakturu <strong>2026005</strong>.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border:1px solid #E5E0F4;border-radius:8px;">
+  <tr><td style="padding:16px 20px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+      <tr><td style="padding:4px 0;color:#7A748C;">Splatnost</td><td style="padding:4px 0;font-weight:600;text-align:right;">21.05.2026</td></tr>
+      <tr><td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">K úhradě</td>
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;text-align:right;">1 000,00 Kč</td></tr>
+    </table>
+  </td></tr>
+</table>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;"><tr>
+  <td style="border-radius:8px;background:{{ accent }};"><a href="#" style="display:inline-block;padding:12px 24px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Zobrazit fakturu</a></td>
+</tr></table>
+<p>Děkujeme,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>
+{% endblock %}
+TWIG;
 
         $html = $twig->createTemplate($sample)->render($vars);
 

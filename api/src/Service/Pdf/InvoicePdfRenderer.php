@@ -182,6 +182,8 @@ final class InvoicePdfRenderer
     {
         $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
         $css = is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
+        // Per-supplier branding barva — přebarví fialové akcenty na zvolený odstín.
+        $css .= $this->brandAccentCss($this->resolveSupplier($invoice));
         // Renderuj template BEZ inline <style> bloku — CSS pošleme do mPDF zvlášť
         $body = $this->renderHtml($invoice, includeCss: false, hasIsdocAttachment: $hasIsdocAttachment);
         return ['body' => $body, 'css' => $css];
@@ -219,6 +221,9 @@ final class InvoicePdfRenderer
         $locale = $invoice['language'] ?? 'cs';
         $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
         $css = $includeCss && is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
+        if ($includeCss && $css !== '') {
+            $css .= $this->brandAccentCss($supplierData);
+        }
 
         $twig = $this->twig();
 
@@ -249,6 +254,58 @@ final class InvoicePdfRenderer
             'logo_path'         => $logoPath,
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
         ]);
+    }
+
+    /**
+     * Per-supplier branding accent — přebarví fialové akcenty PDF (#3B2D83 + sekundární
+     * labely #6753AE) na barvu zvolenou dodavatelem (`email_accent_color`). Vrací override
+     * CSS blok připojovaný ZA base invoice.css (vyšší priorita díky pořadí + stejná
+     * specificita).
+     *
+     * Gating stejný jako logo: jen když má dodavatel zapnutý branding toggle
+     * (`email_branding_enabled`) a nedefaultní hex barvu — pro #3B2D83 negenerujeme nic,
+     * ten je už v base CSS.
+     *
+     * Sémantické barvy (dobropis červená .head.credit-note, storno šedá .cancellation,
+     * RC amber, UHRAZENO zelená) NEpřebarvujeme — credit-note/cancellation selektory mají
+     * vyšší specificitu (2 třídy), takže tenhle 1-třídový override je nepřebije.
+     */
+    private function brandAccentCss(array $supplier): string
+    {
+        if (empty($supplier['email_branding_enabled'])) return '';
+        $color = strtoupper(trim((string) ($supplier['email_accent_color'] ?? '')));
+        if (!preg_match('/^#[0-9A-F]{6}$/', $color) || $color === '#3B2D83') return '';
+
+        return "\n/* ─── Branding override (per-supplier accent color) ─── */\n"
+            . ".head { border-bottom-color: {$color}; }\n"
+            . ".brand-name, .doc-type { color: {$color}; }\n"
+            . ".parties h2, td.meta-label, .bank-label, .qr-box .qr-label { color: {$color}; }\n"
+            . "table.items th { background: {$color}; }\n"
+            . "table.totals-table tr.grand td { background: {$color}; }\n"
+            . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; }\n"
+            . "table.czk-recap td.czk-recap-title, table.czk-recap tr.grand td { color: {$color}; }\n"
+            . ".isdoc-badge { color: {$color}; }\n"
+            . ".wr-title, .wr-link { color: {$color}; }\n";
+    }
+
+    /**
+     * Invaliduje cached PDF všech draftů dodavatele — volá se po změně brandingu
+     * (barva/logo/toggle), protože ty se v PDF renderují živě (nejsou ve snapshotu),
+     * ale mtime-based cache je sama od sebe neobnoví. Drafty mažeme bez archive entry
+     * (archive:false) — jsou to jen preview, ne odeslané doklady. Vystavené faktury
+     * regenerují při příští změně šablony/CSS/kódu nebo přes ?regenerate=1.
+     *
+     * Vrací počet invalidovaných draftů.
+     */
+    public function invalidateDraftsBySupplier(int $supplierId): int
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id FROM invoices WHERE supplier_id = ? AND status = "draft"'
+        );
+        $stmt->execute([$supplierId]);
+        $ids = array_map('intval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
+        foreach ($ids as $id) $this->invalidate($id, 'invalidate_branding', archive: false);
+        return count($ids);
     }
 
     private function twig(): Environment

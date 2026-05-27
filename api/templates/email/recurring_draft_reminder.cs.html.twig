@@ -1,0 +1,54 @@
+{% extends '_layout.html.twig' %}
+
+{% block content %}
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:#15131D;">
+  Koncept pravidelné faktury se brzy vystaví
+</h1>
+
+<p style="margin:0 0 12px;">Dobrý den,</p>
+
+<p style="margin:0 0 16px;">
+  koncept pravidelné faktury <strong>{{ template_name }}</strong>{% if client_name %} pro <strong>{{ client_name }}</strong>{% endif %}
+  se automaticky vystaví <strong style="color:#C2410C;">{{ issue_date|date('j.n.Y') }}</strong>.
+  Pokud chcete doplnit vícepráce do výkazu práce, udělejte to prosím do té doby.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:#F4F2FA;border:1px solid #D9D3EC;border-radius:8px;margin:16px 0;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#403B52;">
+        <tr>
+          <td style="padding:4px 0;color:#7A748C;width:48%;">Datum vystavení</td>
+          <td style="padding:4px 0;font-weight:600;color:#15131D;">{{ issue_date|date('j.n.Y') }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;color:#7A748C;">Položek výkazu (vícepráce)</td>
+          <td style="padding:4px 0;font-weight:600;color:#15131D;">{{ work_item_count }}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #D9D3EC;">Aktuálně k úhradě</td>
+          <td style="padding:8px 0 0;border-top:1px solid #D9D3EC;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;">
+            {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+{% if edit_link %}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 8px;">
+  <tr>
+    <td style="border-radius:8px;background:{{ accent }};">
+      <a href="{{ edit_link }}" style="display:inline-block;padding:12px 24px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">
+        Otevřít koncept a doplnit výkaz
+      </a>
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+<p style="margin:24px 0 0;font-size:13px;color:#7A748C;">
+  Pokud nic nedoplníte, faktura se vystaví s aktuálním obsahem.
+</p>
+{% endblock %}

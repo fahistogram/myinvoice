@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { recurringApi, type RecurringTemplate, type RecurringStatus } from '@/api/recurring'
+import { recurringApi, type RecurringTemplate, type RecurringStatus, type RecurringSort, type RecurringSummary } from '@/api/recurring'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 
@@ -14,7 +14,8 @@ const auth = useAuthStore()
 const templates = ref<RecurringTemplate[]>([])
 const loading = ref(false)
 const loadingMore = ref(false)
-const statusFilter = ref<RecurringStatus | ''>('')
+const statusFilter = ref<RecurringStatus | ''>('active')
+const sortBy = ref<RecurringSort>('next_run')
 const busy = ref<number | null>(null)
 
 const total = ref(0)
@@ -23,6 +24,7 @@ const pages = ref(1)
 const statusCounts = ref<{ all: number; active: number; paused: number; expired: number }>({
   all: 0, active: 0, paused: 0, expired: 0,
 })
+const summary = ref<RecurringSummary | null>(null)
 
 // Server-side filtering — frontend žádný extra filter neaplikuje.
 const filtered = computed(() => templates.value)
@@ -38,6 +40,7 @@ async function load(reset = true) {
   try {
     const r = await recurringApi.list({
       status: statusFilter.value || undefined,
+      sort: sortBy.value,
       page: page.value,
     })
     if (reset) {
@@ -48,6 +51,7 @@ async function load(reset = true) {
     total.value = r.meta.total
     pages.value = r.meta.pages
     if (r.meta.status_counts) statusCounts.value = r.meta.status_counts
+    summary.value = r.meta.summary ?? null
   } finally {
     loading.value = false
     loadingMore.value = false
@@ -55,7 +59,7 @@ async function load(reset = true) {
 }
 
 onMounted(() => load(true))
-watch(statusFilter, () => load(true))
+watch([statusFilter, sortBy], () => load(true))
 
 function statusBadgeClass(s: RecurringStatus) {
   return {
@@ -73,6 +77,19 @@ function formatDate(d: string | null): string {
   if (!d) return '—'
   return new Date(d).toLocaleDateString('cs-CZ')
 }
+
+function formatMoney(n: number, ccy: string): string {
+  return n.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + ccy
+}
+
+// Souhrn částek do hlavičky: jedna měna → v ní; více měn → přepočet na CZK.
+const grandTotalLabel = computed<string>(() => {
+  const s = summary.value
+  if (!s || s.by_currency.length === 0) return ''
+  if (s.multi_currency) return formatMoney(s.total_czk, 'CZK')
+  return formatMoney(s.by_currency[0].total, s.by_currency[0].currency)
+})
+const grandTotalIsCzkConversion = computed(() => !!summary.value?.multi_currency)
 
 async function pause(tpl: RecurringTemplate) {
   if (!confirm(t('recurring.pause_confirm', { name: tpl.name }))) return
@@ -144,6 +161,21 @@ function gotoClient(clientId: number) {
           <option value="paused">{{ t('recurring.status.paused') }}</option>
           <option value="expired">{{ t('recurring.status.expired') }}</option>
         </select>
+        <div class="ml-auto flex items-center gap-3">
+          <div v-if="grandTotalLabel" class="flex items-baseline gap-2">
+            <span class="text-sm text-neutral-500">{{ t('recurring.amount_total') }}</span>
+            <span class="font-mono text-base font-semibold text-neutral-900"
+              :title="grandTotalIsCzkConversion ? t('recurring.amount_czk_hint') : ''">
+              {{ grandTotalIsCzkConversion ? '≈ ' : '' }}{{ grandTotalLabel }}
+            </span>
+          </div>
+          <select v-model="sortBy" :title="t('recurring.sort.label')"
+            class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+            <option value="next_run">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.next_run') }}</option>
+            <option value="client">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.client') }}</option>
+            <option value="amount_czk">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.amount_czk') }}</option>
+          </select>
+        </div>
       </div>
     </div>
 
@@ -167,18 +199,28 @@ function gotoClient(clientId: number) {
               <th class="px-4 py-2.5 text-left font-medium">{{ t('recurring.next_run_date') }}</th>
               <th class="px-4 py-2.5 text-left font-medium">Status</th>
               <th class="px-4 py-2.5 text-right font-medium">{{ t('recurring.generated_invoices') }}</th>
-              <th class="px-4 py-2.5"></th>
+              <th class="px-4 py-2.5 text-right font-medium">{{ t('recurring.amount') }}</th>
+              <th class="px-4 py-2.5 text-right font-medium">{{ t('recurring.actions_col') }}</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-neutral-100">
             <tr v-for="tpl in filtered" :key="tpl.id" class="hover:bg-neutral-50/50">
-              <td class="px-4 py-3">
-                <button @click="gotoDetail(tpl.id)" class="cursor-pointer text-primary-700 font-medium hover:underline">
+              <td class="px-4 py-3 align-top">
+                <button @click="gotoDetail(tpl.id)" class="cursor-pointer block text-left text-primary-700 font-medium hover:underline">
                   {{ tpl.name }}
                 </button>
+                <span v-if="tpl.last_error" :title="tpl.last_error"
+                  class="mt-0.5 inline-block text-xs px-1.5 py-0.5 rounded bg-danger-50 text-danger-700 border border-danger-200 whitespace-nowrap">
+                  ⚠ {{ t('recurring.last_error_badge') }}
+                </span>
+                <span v-if="tpl.draft_open_mode === 'period_start'"
+                  :title="t('recurring.draft_open_mode_period_start')"
+                  class="mt-0.5 inline-block text-xs px-1.5 py-0.5 rounded bg-primary-50 text-primary-700 border border-primary-200 whitespace-nowrap">
+                  ↻ {{ t('recurring.draft_open_mode_period_start_badge') }}
+                </span>
               </td>
-              <td class="px-4 py-3">
-                <button @click="gotoClient(tpl.client_id)" class="cursor-pointer text-neutral-700 hover:underline">
+              <td class="px-4 py-3 align-top">
+                <button @click="gotoClient(tpl.client_id)" class="cursor-pointer block text-left text-neutral-700 hover:underline">
                   {{ tpl.client_company_name }}
                 </button>
                 <span v-if="tpl.project_name" class="block text-xs text-neutral-500">{{ tpl.project_name }}</span>
@@ -197,8 +239,11 @@ function gotoClient(clientId: number) {
                   {{ t('recurring.status.' + tpl.status) }}
                 </span>
               </td>
-              <td class="px-4 py-3 text-right text-neutral-700">{{ tpl.invoices_generated_count ?? 0 }}</td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
+              <td class="px-4 py-3 text-right text-neutral-700 align-top">{{ tpl.invoices_generated_count ?? 0 }}</td>
+              <td class="px-4 py-3 text-right font-mono text-neutral-800 align-top whitespace-nowrap">
+                {{ tpl.total_with_vat != null ? formatMoney(tpl.total_with_vat, tpl.currency ?? 'CZK') : '—' }}
+              </td>
+              <td class="px-4 py-3 text-right whitespace-nowrap align-top">
                 <button @click="gotoDetail(tpl.id)"
                   class="cursor-pointer inline-flex items-center gap-1 px-2.5 h-7 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded mr-1.5">
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
@@ -245,11 +290,19 @@ function gotoClient(clientId: number) {
             </button>
             <span v-if="tpl.project_name"> · {{ tpl.project_name }}</span>
           </div>
+          <div v-if="tpl.last_error" class="mt-1 text-xs text-danger-700 truncate" :title="tpl.last_error">
+            ⚠ {{ t('recurring.last_error_badge') }}
+          </div>
           <div class="flex items-baseline justify-between gap-2 mt-1.5 text-xs">
             <span class="text-neutral-600">
               {{ freqLabel(tpl.frequency) }}<span v-if="tpl.end_of_month" class="text-neutral-400"> · EOM</span>
             </span>
             <span class="font-mono text-neutral-600">{{ formatDate(tpl.next_run_date) }}</span>
+          </div>
+          <div v-if="tpl.draft_open_mode === 'period_start'" class="mt-1">
+            <span class="inline-block text-xs px-1.5 py-0.5 rounded bg-primary-50 text-primary-700 border border-primary-200">
+              ↻ {{ t('recurring.draft_open_mode_period_start_badge') }}
+            </span>
           </div>
           <div class="flex items-center justify-between gap-2 mt-1 text-xs text-neutral-500">
             <span v-if="tpl.last_run_date">
@@ -257,6 +310,12 @@ function gotoClient(clientId: number) {
             </span>
             <span v-else class="text-neutral-400">—</span>
             <span class="text-neutral-600">{{ tpl.invoices_generated_count ?? 0 }} faktur</span>
+          </div>
+          <div class="flex items-baseline justify-between gap-2 mt-1 text-xs">
+            <span class="text-neutral-500">{{ t('recurring.amount') }}</span>
+            <span class="font-mono text-neutral-800 font-medium">
+              {{ tpl.total_with_vat != null ? formatMoney(tpl.total_with_vat, tpl.currency ?? 'CZK') : '—' }}
+            </span>
           </div>
           <div class="flex items-center gap-1.5 mt-2.5">
             <button @click.stop="gotoDetail(tpl.id)"

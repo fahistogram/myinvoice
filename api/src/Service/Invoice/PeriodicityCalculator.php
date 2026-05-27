@@ -72,6 +72,25 @@ final class PeriodicityCalculator
     }
 
     /**
+     * Přemapuje DEN data dle pravidla (end_of_month / day_of_month) v rámci JEHO
+     * VLASTNÍHO měsíce — bez posunu cyklu. Použití: uživatel u běžící šablony změní
+     * den vystavení nebo přepne na „konec měsíce", a očekává, že se nejbližší
+     * naplánované vystavení (next_run_date) přemapuje na nový den téhož měsíce.
+     */
+    public static function snapToDayRule(string $date, bool $endOfMonth, ?int $dayOfMonth): string
+    {
+        $base = new \DateTimeImmutable($date);
+        if ($endOfMonth) {
+            return $base->modify('last day of this month')->format('Y-m-d');
+        }
+        $day = $dayOfMonth ?? (int) $base->format('j');
+        $day = max(1, min(28, $day));
+        return $base
+            ->setDate((int) $base->format('Y'), (int) $base->format('n'), $day)
+            ->format('Y-m-d');
+    }
+
+    /**
      * Vrátí konkrétní `issue_date` pro vygenerovanou fakturu z anchor + N cyklů.
      * Používá se např. když potřebujeme spočítat datum N-té faktury bez procházení DB.
      */

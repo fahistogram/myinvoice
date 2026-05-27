@@ -1,0 +1,20 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+RECURRING INVOICE DRAFT WILL BE ISSUED SOON
+=============================================
+
+Hello,
+
+the recurring invoice draft "{{ template_name }}"{% if client_name %} for {{ client_name }}{% endif %}
+will be issued automatically on {{ issue_date|date('j M Y') }}.
+If you want to add extra work to the work report, please do so before then.
+
+Issue date:                    {{ issue_date|date('j M Y') }}
+Work report items (extra work):{{ work_item_count }}
+Current amount due:            {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
+{% if edit_link %}
+Open draft: {{ edit_link }}
+{% endif %}
+If you add nothing, the invoice will be issued with its current contents.
+{% endblock %}

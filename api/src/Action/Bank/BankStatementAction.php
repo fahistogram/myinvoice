@@ -171,6 +171,7 @@ final class BankStatementAction
             "SELECT bs.id, bs.file_name, bs.account_number, bs.currency, bs.statement_date, bs.statement_number,
                     bs.prev_balance, bs.curr_balance, bs.transaction_count, bs.matched_count, bs.imported_at,
                     (bs.file_content IS NOT NULL) AS has_file,
+                    (bs.pdf_content IS NOT NULL) AS has_pdf, bs.pdf_name,
                     (SELECT cur.label FROM currencies cur
                       WHERE cur.supplier_id = ?
                         AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
@@ -197,6 +198,7 @@ final class BankStatementAction
             $r['prev_balance'] = (float) $r['prev_balance'];
             $r['curr_balance'] = (float) $r['curr_balance'];
             $r['has_file'] = (bool) $r['has_file'];
+            $r['has_pdf'] = (bool) $r['has_pdf'];
         }
         return Json::ok($response, $rows);
     }
@@ -303,6 +305,172 @@ final class BankStatementAction
             ->withHeader('X-Content-Type-Options', 'nosniff');
     }
 
+    /**
+     * Ověří, že výpis #$id patří aktuálnímu supplieru (přes account_number →
+     * currencies.supplier_id, stejný normalizovaný match jako list/detail/download).
+     */
+    private function statementOwned(int $id, int $sid): bool
+    {
+        if ($id <= 0 || $sid <= 0) return false;
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT 1 FROM bank_statements bs
+              WHERE bs.id = ?
+                AND EXISTS (
+                  SELECT 1 FROM currencies cur
+                   WHERE cur.supplier_id = ?
+                     AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
+                       = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
+                     AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
+                )
+              LIMIT 1"
+        );
+        $stmt->execute([$id, $sid]);
+        return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * POST /api/bank-statements/{id}/pdf  (multipart file=...)
+     *
+     * Přiloží k existujícímu výpisu PDF verzi (např. oficiální PDF výpis z banky).
+     * Ukládá se jako MEDIUMBLOB do bank_statements.pdf_content (stejně jako GPC).
+     * Admin nebo účetní (write role).
+     */
+    public function uploadPdf(Request $request, Response $response, array $args): Response
+    {
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        if (!in_array(($user['role'] ?? ''), ['admin', 'accountant'], true)) {
+            return Json::error($response, 'forbidden', 'Pouze admin nebo účetní.', 403);
+        }
+
+        $id = (int) ($args['id'] ?? 0);
+        $sid = SupplierGuard::currentId($request);
+        if (!$this->statementOwned($id, $sid)) {
+            return Json::error($response, 'not_found', 'Výpis nenalezen.', 404);
+        }
+
+        $file = $request->getUploadedFiles()['file'] ?? null;
+        if (!$file || $file->getError() !== UPLOAD_ERR_OK) {
+            return Json::error($response, 'no_file', 'Soubor chybí.', 400);
+        }
+
+        // PDF výpisy bývají do pár MB; 10 MiB je bezpečný strop (MEDIUMBLOB zvládá 16 MiB).
+        $maxSize = 10 * 1024 * 1024;
+        if (($file->getSize() ?? 0) > $maxSize) {
+            return Json::error($response, 'file_too_large', 'Soubor je příliš velký (max 10 MiB).', 413);
+        }
+
+        $name = (string) $file->getClientFilename();
+        if (strtolower(pathinfo($name, PATHINFO_EXTENSION)) !== 'pdf') {
+            return Json::error($response, 'invalid_extension', 'Povolené je jen PDF.', 400);
+        }
+
+        $content = (string) $file->getStream()->getContents();
+        // Magic bytes — PDF musí začínat "%PDF-" (případně s BOM/whitespace na začátku).
+        if (!str_starts_with(ltrim($content, "\x00\x09\x0a\x0d\x20\xef\xbb\xbf"), '%PDF-')) {
+            return Json::error($response, 'invalid_pdf', 'Soubor není platné PDF.', 400);
+        }
+        if (function_exists('finfo_buffer')) {
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            if ($finfo !== false) {
+                $mime = (string) finfo_buffer($finfo, $content);
+                if ($mime !== '' && $mime !== 'application/pdf') {
+                    return Json::error($response, 'invalid_mime', 'Soubor není PDF (detekováno: ' . $mime . ').', 400);
+                }
+            }
+        }
+
+        $hash = hash('sha256', $content);
+        $this->db->pdo()->prepare(
+            'UPDATE bank_statements
+                SET pdf_content = ?, pdf_name = ?, pdf_hash = ?, pdf_size_bytes = ?, pdf_uploaded_at = NOW()
+              WHERE id = ?'
+        )->execute([$content, $name, $hash, strlen($content), $id]);
+
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log('bank.pdf_uploaded', $user['id'] ?? null, 'bank_statement', $id, [
+            'pdf_name' => $name,
+            'size'     => strlen($content),
+        ], $ip, $request->getHeaderLine('User-Agent'));
+
+        return Json::ok($response, ['uploaded' => true, 'pdf_name' => $name]);
+    }
+
+    /**
+     * GET /api/bank-statements/{id}/pdf
+     *
+     * Stáhne přiložené PDF (bank_statements.pdf_content). 404 pokud výpis nepatří
+     * supplieru nebo PDF není nahrané.
+     */
+    public function downloadPdf(Request $request, Response $response, array $args): Response
+    {
+        $id = (int) ($args['id'] ?? 0);
+        $sid = SupplierGuard::currentId($request);
+        if (!$this->statementOwned($id, $sid)) {
+            return Json::error($response, 'not_found', 'Výpis nenalezen.', 404);
+        }
+
+        $stmt = $this->db->pdo()->prepare('SELECT pdf_name, pdf_content, account_number FROM bank_statements WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if (!$row || $row['pdf_content'] === null || $row['pdf_content'] === '') {
+            return Json::error($response, 'pdf_unavailable', 'K tomuto výpisu není nahrané PDF.', 404);
+        }
+
+        $fileName = (string) ($row['pdf_name'] ?: ('vypis-' . $id . '.pdf'));
+        // Číslo účtu na začátek názvu, pokud tam ještě není — ať se stažené PDF
+        // z různých účtů nepletou (např. „2026-02.pdf" → „1000000005-2026-02.pdf").
+        // „Už obsahuje" testujeme i podle čistých číslic (formát s lomítkem/pomlčkou).
+        $account = trim((string) ($row['account_number'] ?? ''));
+        if ($account !== '') {
+            $acctDigits = preg_replace('/\D/', '', $account) ?? '';
+            $nameDigits = preg_replace('/\D/', '', $fileName) ?? '';
+            $alreadyHas = str_contains($fileName, $account)
+                || ($acctDigits !== '' && str_contains($nameDigits, $acctDigits));
+            $acctSafe = preg_replace('/[^A-Za-z0-9_-]/', '', $account) ?? '';
+            if (!$alreadyHas && $acctSafe !== '') {
+                $fileName = $acctSafe . '-' . $fileName;
+            }
+        }
+        $safeName = preg_replace('/[\x00-\x1f"\\\\]/', '_', $fileName) ?? $fileName;
+
+        $response->getBody()->write((string) $row['pdf_content']);
+        return $response
+            ->withHeader('Content-Type', 'application/pdf')
+            ->withHeader('Content-Disposition', 'attachment; filename="' . $safeName . '"')
+            ->withHeader('Content-Length', (string) strlen((string) $row['pdf_content']))
+            ->withHeader('X-Content-Type-Options', 'nosniff');
+    }
+
+    /**
+     * DELETE /api/bank-statements/{id}/pdf
+     *
+     * Smaže přiložené PDF (GPC i transakce zůstávají). Admin nebo účetní.
+     */
+    public function deletePdf(Request $request, Response $response, array $args): Response
+    {
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        if (!in_array(($user['role'] ?? ''), ['admin', 'accountant'], true)) {
+            return Json::error($response, 'forbidden', 'Pouze admin nebo účetní.', 403);
+        }
+
+        $id = (int) ($args['id'] ?? 0);
+        $sid = SupplierGuard::currentId($request);
+        if (!$this->statementOwned($id, $sid)) {
+            return Json::error($response, 'not_found', 'Výpis nenalezen.', 404);
+        }
+
+        $this->db->pdo()->prepare(
+            'UPDATE bank_statements
+                SET pdf_content = NULL, pdf_name = NULL, pdf_hash = NULL, pdf_size_bytes = NULL, pdf_uploaded_at = NULL
+              WHERE id = ?'
+        )->execute([$id]);
+
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log('bank.pdf_deleted', $user['id'] ?? null, 'bank_statement', $id, [], $ip, $request->getHeaderLine('User-Agent'));
+
+        return Json::ok($response, ['deleted' => true]);
+    }
+
     public function detail(Request $request, Response $response, array $args): Response
     {
         $id = (int) ($args['id'] ?? 0);
@@ -319,6 +487,7 @@ final class BankStatementAction
                     bs.transaction_count, bs.matched_count,
                     bs.imported_at, bs.imported_by,
                     (bs.file_content IS NOT NULL) AS has_file,
+                    (bs.pdf_content IS NOT NULL) AS has_pdf, bs.pdf_name,
                     (SELECT cur.label FROM currencies cur
                       WHERE cur.supplier_id = ?
                         AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
@@ -360,6 +529,7 @@ final class BankStatementAction
         }
         $s['id'] = (int) $s['id'];
         $s['has_file'] = (bool) ($s['has_file'] ?? false);
+        $s['has_pdf'] = (bool) ($s['has_pdf'] ?? false);
         $s['transactions'] = $transactions;
         return Json::ok($response, $s);
     }

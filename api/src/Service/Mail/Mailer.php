@@ -73,6 +73,20 @@ final class Mailer
             $vars['supplier'] = $this->addLogoDisplaySize($vars['supplier']);
         }
 
+        // QR platba: generátor vrací `data:image/png;base64,…` URI. Gmail, Outlook
+        // a další klienti ale blokují `data:` URI v `<img src>` (issue #51 — QR
+        // se na faktuře v PDF/webu zobrazí, v emailu ne). Řešením je inline CID
+        // attachment — stejně jako supplier logo. Dekódujeme bytes, přepíšeme var
+        // na `cid:qr_payment` (šablony používají `<img src="{{ qr_data_uri }}">`)
+        // a vlastní embed proběhne po vytvoření $email níže.
+        $qrEmbed = null;
+        if (!empty($vars['qr_data_uri']) && is_string($vars['qr_data_uri'])) {
+            $qrEmbed = $this->decodeDataUri($vars['qr_data_uri']);
+            if ($qrEmbed !== null) {
+                $vars['qr_data_uri'] = 'cid:qr_payment';
+            }
+        }
+
         // Pokud je v DB override, vyrenderuj přímo ze stringu (vyšší priorita než file).
         $dbTpl = $this->templates->find($code, $locale)
               ?? $this->templates->find($code, 'cs');
@@ -127,6 +141,11 @@ final class Mailer
             if ($logoAbs !== null) {
                 $email->embedFromPath($logoAbs, 'supplier_logo', 'image/png');
             }
+        }
+
+        // QR platba jako inline CID image (viz výše, issue #51).
+        if ($qrEmbed !== null) {
+            $email->embed($qrEmbed['bytes'], 'qr_payment', $qrEmbed['contentType']);
         }
 
         foreach ($to as $addr)  $email->addTo($addr);
@@ -444,6 +463,26 @@ final class Mailer
         return $supplier;
     }
 
+    /**
+     * Rozparsuje `data:<mime>;base64,<data>` URI na raw bytes + content type
+     * pro inline CID embed. Vrací null pokud URI není base64 data URI nebo
+     * dekódování selže (pak se var ponechá beze změny a `<img>` se nezobrazí —
+     * stejné jako kdyby QR nebylo vygenerováno).
+     *
+     * @return array{bytes:string,contentType:string}|null
+     */
+    private function decodeDataUri(string $uri): ?array
+    {
+        if (!preg_match('#^data:([^;,]+);base64,(.+)$#s', $uri, $m)) {
+            return null;
+        }
+        $bytes = base64_decode($m[2], true);
+        if ($bytes === false || $bytes === '') {
+            return null;
+        }
+        return ['bytes' => $bytes, 'contentType' => $m[1]];
+    }
+
     private function defaultSubject(string $code, string $locale): string
     {
         $subjects = [
@@ -453,6 +492,7 @@ final class Mailer
                 'invoice_send'      => 'Faktura — MyInvoice.cz',
                 'invoice_reminder'  => 'Upomínka — MyInvoice.cz',
                 'proforma_reminder' => 'Připomínka zálohy — MyInvoice.cz',
+                'recurring_draft_reminder' => 'Koncept pravidelné faktury se brzy vystaví — MyInvoice.cz',
             ],
             'en' => [
                 'password_reset'    => 'Password reset — MyInvoice.cz',
@@ -460,6 +500,7 @@ final class Mailer
                 'invoice_send'      => 'Invoice — MyInvoice.cz',
                 'invoice_reminder'  => 'Reminder — MyInvoice.cz',
                 'proforma_reminder' => 'Advance payment reminder — MyInvoice.cz',
+                'recurring_draft_reminder' => 'Recurring invoice draft will be issued soon — MyInvoice.cz',
             ],
         ];
         return $subjects[$locale][$code] ?? ($subjects['cs'][$code] ?? 'MyInvoice.cz');

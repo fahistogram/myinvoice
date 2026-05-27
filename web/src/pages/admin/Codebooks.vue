@@ -1127,57 +1127,59 @@ watch(tab, (newTab) => {
       <div class="bg-white rounded-xl shadow-lg max-w-xl w-full p-5">
         <h3 class="text-lg font-semibold mb-1">{{ t('supplier.create_title') }}</h3>
         <p class="text-xs text-neutral-500 mb-4">{{ t('supplier.create_hint') }}</p>
-        <div class="space-y-3">
-          <div class="bg-primary-50/50 border border-primary-200 rounded-md p-3">
-            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.ares_lookup') }}</label>
-            <div class="flex gap-2">
-              <input v-model="supplierDraft.ic" type="text" placeholder="12345678" maxlength="8"
-                @keydown.enter.prevent="supplierLookupAres"
-                class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-              <button type="button" @click="supplierLookupAres" :disabled="supplierAresLoading"
-                class="cursor-pointer h-10 px-4 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-                <svg v-if="!supplierAresLoading" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
-                <span v-else>…</span>
-                {{ supplierAresLoading ? t('common.loading') : t('supplier.ares_load') }}
-              </button>
+        <form @submit.prevent="saveSupplier">
+          <div class="space-y-3">
+            <div class="bg-primary-50/50 border border-primary-200 rounded-md p-3">
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.ares_lookup') }}</label>
+              <div class="flex gap-2">
+                <input v-model="supplierDraft.ic" type="text" placeholder="12345678" maxlength="8"
+                  @keydown.enter.prevent="supplierLookupAres"
+                  class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                <button type="button" @click="supplierLookupAres" :disabled="supplierAresLoading"
+                  class="cursor-pointer h-10 px-4 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
+                  <svg v-if="!supplierAresLoading" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
+                  <span v-else>…</span>
+                  {{ supplierAresLoading ? t('common.loading') : t('supplier.ares_load') }}
+                </button>
+              </div>
+              <div v-if="supplierAresMessage" class="mt-2 text-xs px-2 py-1 rounded"
+                :class="supplierAresMessage.type === 'success' ? 'bg-success-50 text-success-600' : 'bg-danger-50 text-danger-500'">
+                {{ supplierAresMessage.text }}
+              </div>
             </div>
-            <div v-if="supplierAresMessage" class="mt-2 text-xs px-2 py-1 rounded"
-              :class="supplierAresMessage.type === 'success' ? 'bg-success-50 text-success-600' : 'bg-danger-50 text-danger-500'">
-              {{ supplierAresMessage.text }}
-            </div>
-          </div>
 
-          <div>
-            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.company_name') }} *</label>
-            <input v-model="supplierDraft.company_name" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.dic') }}</label>
-            <input v-model="supplierDraft.dic" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.street') }} *</label>
-            <input v-model="supplierDraft.street" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
-          </div>
-          <div class="grid grid-cols-3 gap-3">
             <div>
-              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.zip') }} *</label>
-              <input v-model="supplierDraft.zip" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.company_name') }} *</label>
+              <input v-model="supplierDraft.company_name" type="text" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             </div>
-            <div class="col-span-2">
-              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.city') }} *</label>
-              <input v-model="supplierDraft.city" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.dic') }}</label>
+              <input v-model="supplierDraft.dic" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.street') }} *</label>
+              <input v-model="supplierDraft.street" type="text" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <div class="grid grid-cols-3 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.zip') }} *</label>
+                <input v-model="supplierDraft.zip" type="text" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              </div>
+              <div class="col-span-2">
+                <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.city') }} *</label>
+                <input v-model="supplierDraft.city" type="text" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.email') }} *</label>
+              <input v-model="supplierDraft.email" type="email" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             </div>
           </div>
-          <div>
-            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.email') }} *</label>
-            <input v-model="supplierDraft.email" type="email" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          <div class="flex justify-end gap-2 pt-4 mt-3 border-t border-neutral-200">
+            <button type="button" @click="supplierCreateOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+            <button type="submit" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.create') }}</button>
           </div>
-        </div>
-        <div class="flex justify-end gap-2 pt-4 mt-3 border-t border-neutral-200">
-          <button @click="supplierCreateOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
-          <button @click="saveSupplier" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.create') }}</button>
-        </div>
+        </form>
       </div>
     </div>
 

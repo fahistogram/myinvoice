@@ -5,8 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ subject|default('MyInvoice.cz') }}</title>
 </head>
-{% set accent = (supplier and supplier.email_accent_color) ? supplier.email_accent_color : '#3B2D83' %}
 {% set branded = (supplier and supplier.email_branding_enabled) %}
+{# Branding barva se propaguje jen když má dodavatel zapnutý branding (konzistentní
+   s PDF i logem). Bez brandingu = default fialová MyInvoice. Tělové šablony používají
+   {{ accent }} pro částky, tlačítka a odkazy — proto je viditelný i v jejich blocích. #}
+{% set accent = (branded and supplier.email_accent_color) ? supplier.email_accent_color : '#3B2D83' %}
 {% set has_logo = (branded and supplier.logo_path) %}
 <body style="margin:0;padding:0;background:#F4F2F8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#15131D;">
 

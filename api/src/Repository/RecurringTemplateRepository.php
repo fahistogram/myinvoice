@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Repository;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\Invoice\PeriodicityCalculator;
 use PDO;
 
 /**
@@ -70,7 +71,13 @@ final class RecurringTemplateRepository
      * @param int $page  1-based, ignored when $perPage<=0
      * @param int $perPage  0 = bez paginace (returns vše, BC)
      */
-    public function list(array $filters = [], int $page = 1, int $perPage = 0): array
+    /**
+     * @param array<string,mixed> $filters
+     * @param string $sort  '' (default: aktivní první + nejbližší vystavení) | 'client' (zákazník A–Z)
+     *                       | 'next_run' (datum příštího vystavení) | 'amount_czk' (částka přepočtená na CZK, sestupně)
+     * @param array<string,float> $czkRates  kód měny → dnešní kurz na CZK (jen pro sort='amount_czk')
+     */
+    public function list(array $filters = [], int $page = 1, int $perPage = 0, string $sort = '', array $czkRates = []): array
     {
         $where = ['1=1'];
         $params = [];
@@ -111,22 +118,30 @@ final class RecurringTemplateRepository
 
         $limitSql = $perPage > 0 ? ' LIMIT ? OFFSET ?' : '';
 
+        // Součet faktury šablony (base + DPH, per-line rounding jako InvoiceCalculator),
+        // respektuje reverse_charge. Korelovaný subselect přes položky šablony.
+        $totalExpr = self::TEMPLATE_TOTAL_SQL;
+
         $sql = "SELECT t.id, t.supplier_id, t.client_id, t.project_id, t.name,
                        t.frequency, t.day_of_month, t.end_of_month,
                        t.anchor_date, t.end_date, t.next_run_date, t.last_run_date,
                        t.invoice_type, t.currency_id, t.language, t.payment_method,
-                       t.payment_due_days, t.auto_issue, t.auto_send_email, t.status,
+                       t.reverse_charge, t.discount_percent,
+                       t.payment_due_days, t.draft_open_mode, t.reminder_days_before,
+                       t.auto_issue, t.auto_send_email, t.status,
+                       t.last_run_date, t.last_error, t.last_error_at,
                        t.created_at, t.updated_at,
                        c.company_name AS client_company_name,
                        p.name AS project_name,
                        cur.code AS currency,
-                       (SELECT COUNT(*) FROM invoices iv WHERE iv.recurring_template_id = t.id) AS invoices_generated_count
+                       (SELECT COUNT(*) FROM invoices iv WHERE iv.recurring_template_id = t.id) AS invoices_generated_count,
+                       $totalExpr AS total_with_vat
                   FROM recurring_invoice_templates t
                   JOIN clients c ON c.id = t.client_id
              LEFT JOIN projects p ON p.id = t.project_id
                   JOIN currencies cur ON cur.id = t.currency_id
                  WHERE $whereSql
-                 ORDER BY t.status = 'active' DESC, t.next_run_date ASC{$limitSql}";
+                 ORDER BY {$this->orderBy($sort, $totalExpr, $czkRates)}{$limitSql}";
 
         $stmt = $this->db->pdo()->prepare($sql);
         $idx = 1;
@@ -138,6 +153,22 @@ final class RecurringTemplateRepository
         }
         $stmt->execute();
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Součet částek per měna přes CELOU filtrovanou množinu (ne jen aktuální stránku) —
+        // pro souhrn v hlavičce. CZK přepočet řeší Action (potřebuje kurzový service).
+        $totStmt = $this->db->pdo()->prepare(
+            "SELECT cur.code AS currency, COALESCE(SUM($totalExpr), 0) AS total
+               FROM recurring_invoice_templates t
+               JOIN currencies cur ON cur.id = t.currency_id
+              WHERE $whereSql
+              GROUP BY cur.code
+              ORDER BY total DESC"
+        );
+        $totStmt->execute($params);
+        $totalsByCurrency = array_map(
+            fn ($r) => ['currency' => (string) $r['currency'], 'total' => (float) $r['total']],
+            $totStmt->fetchAll(PDO::FETCH_ASSOC)
+        );
 
         return [
             'data' => array_map([$this, 'cast'], $rows),
@@ -152,13 +183,91 @@ final class RecurringTemplateRepository
                     'paused'  => (int) $statusCounts['paused'],
                     'expired' => (int) $statusCounts['expired'],
                 ],
+                'totals_by_currency' => $totalsByCurrency,
             ],
         ];
     }
 
     /**
-     * Načte šablony, které mají dnes nebo dříve `next_run_date`, jsou aktivní,
-     * a jejich supplier má zapnutý kill-switch auto_generate_recurring.
+     * Sestaví ORDER BY pro list(). amount_czk přepočítá částku šablony na CZK přes
+     * předané kurzy (ať se nemixuje CZK a cizí měna), ostatní jsou prostá SQL pole.
+     *
+     * @param array<string,float> $czkRates
+     */
+    private function orderBy(string $sort, string $totalExpr, array $czkRates): string
+    {
+        return match ($sort) {
+            'client'     => 'c.company_name ASC, t.next_run_date ASC',
+            'next_run'   => 't.next_run_date ASC, t.id ASC',
+            'amount_czk' => '(' . $totalExpr . ' * ' . $this->czkRateCase($czkRates) . ') DESC, t.next_run_date ASC',
+            default      => "t.status = 'active' DESC, t.next_run_date ASC",
+        };
+    }
+
+    /**
+     * `CASE cur.code WHEN 'EUR' THEN 25.30 ... ELSE 1 END` — bezpečně sestaveno
+     * (kódy whitelist [A-Z]{3}, kurzy jako float literály). CZK i neznámé měny = 1.
+     *
+     * @param array<string,float> $czkRates
+     */
+    private function czkRateCase(array $czkRates): string
+    {
+        $czkRates['CZK'] = 1.0;
+        $parts = [];
+        foreach ($czkRates as $code => $rate) {
+            $code = strtoupper((string) $code);
+            if (!preg_match('/^[A-Z]{3}$/', $code)) continue;
+            $parts[] = "WHEN '{$code}' THEN " . sprintf('%.6f', (float) $rate);
+        }
+        return $parts === [] ? '1' : 'CASE cur.code ' . implode(' ', $parts) . ' ELSE 1 END';
+    }
+
+    /**
+     * Distinct kódy měn šablon pro daný filtr — Action z nich poskládá CZK kurzy
+     * pro sort='amount_czk'.
+     *
+     * @param array<string,mixed> $filters
+     * @return list<string>
+     */
+    public function distinctCurrencyCodes(array $filters = []): array
+    {
+        $where = ['1=1'];
+        $params = [];
+        if (!empty($filters['supplier_id'])) { $where[] = 't.supplier_id = ?'; $params[] = (int) $filters['supplier_id']; }
+        if (!empty($filters['client_id']))   { $where[] = 't.client_id = ?';   $params[] = (int) $filters['client_id']; }
+        if (!empty($filters['status']))      { $where[] = 't.status = ?';      $params[] = (string) $filters['status']; }
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT DISTINCT cur.code
+               FROM recurring_invoice_templates t
+               JOIN currencies cur ON cur.id = t.currency_id
+              WHERE ' . implode(' AND ', $where)
+        );
+        $stmt->execute($params);
+        return array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+
+    /**
+     * SQL výraz: součet faktury šablony `t` (base + DPH, per-line rounding,
+     * respektuje t.reverse_charge). Použit v list() pro per-řádek i agregaci.
+     */
+    private const TEMPLATE_TOTAL_SQL =
+        "((SELECT COALESCE(SUM(
+                    ROUND(ri.quantity * ri.unit_price_without_vat, 2)
+                  + CASE WHEN t.reverse_charge = 1 THEN 0
+                         ELSE ROUND(ROUND(ri.quantity * ri.unit_price_without_vat, 2) * vr.rate_percent / 100, 2) END
+                 ), 0)
+            FROM recurring_invoice_template_items ri
+            JOIN vat_rates vr ON vr.id = ri.vat_rate_id
+           WHERE ri.template_id = t.id) * (100 - t.discount_percent) / 100)";
+
+    /**
+     * Načte šablony, u kterých má dnes cron něco udělat — jsou aktivní a jejich
+     * supplier má zapnutý kill-switch auto_generate_recurring, a navíc buď:
+     *   - next_run_date <= today (čas vystavit / legacy generovat), NEBO
+     *   - draft_open_mode='period_start' A už začalo fakturované období
+     *     (1. den měsíce next_run_date <= today) → čas otevřít koncept.
+     *
+     * Cron pak dle draft_open_mode a datumů rozhodne open vs. issue.
      */
     public function findDue(): array
     {
@@ -167,9 +276,13 @@ final class RecurringTemplateRepository
                FROM recurring_invoice_templates t
                JOIN supplier s ON s.id = t.supplier_id
               WHERE t.status = 'active'
-                AND t.next_run_date <= CURDATE()
                 AND (t.end_date IS NULL OR t.next_run_date <= t.end_date)
                 AND s.auto_generate_recurring = 1
+                AND (
+                      t.next_run_date <= CURDATE()
+                   OR (t.draft_open_mode = 'period_start'
+                       AND DATE_FORMAT(t.next_run_date, '%Y-%m-01') <= CURDATE())
+                )
               ORDER BY t.next_run_date ASC, t.id ASC"
         );
         $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
@@ -181,6 +294,69 @@ final class RecurringTemplateRepository
         return $out;
     }
 
+    /**
+     * Faktura vygenerovaná z této šablony pro dané období (klíč = issue_date,
+     * který se rovná plánovanému next_run_date období). Slouží k idempotenci
+     * openDraft() a k nalezení otevřeného konceptu v issuePeriod().
+     *
+     * @return array{id:int, status:string, varsymbol:?string}|null
+     */
+    public function findPeriodInvoice(int $templateId, string $issueDate): ?array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id, status, varsymbol
+               FROM invoices
+              WHERE recurring_template_id = ? AND issue_date = ?
+              ORDER BY id DESC
+              LIMIT 1'
+        );
+        $stmt->execute([$templateId, $issueDate]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row === false) return null;
+        return [
+            'id'        => (int) $row['id'],
+            'status'    => (string) $row['status'],
+            'varsymbol' => $row['varsymbol'] !== null ? (string) $row['varsymbol'] : null,
+        ];
+    }
+
+    /**
+     * Šablony s otevřeným konceptem, kterým se blíží vystavení (period_start),
+     * a kterým ještě nebyl pro toto období odeslán reminder.
+     *
+     * Okno: 1 ≤ (next_run_date − dnes) ≤ reminder_days_before, reminder_days_before > 0.
+     */
+    public function findReminderDue(): array
+    {
+        $stmt = $this->db->pdo()->query(
+            "SELECT t.id
+               FROM recurring_invoice_templates t
+               JOIN supplier s ON s.id = t.supplier_id
+              WHERE t.status = 'active'
+                AND t.draft_open_mode = 'period_start'
+                AND t.reminder_days_before > 0
+                AND s.auto_generate_recurring = 1
+                AND DATEDIFF(t.next_run_date, CURDATE()) BETWEEN 1 AND t.reminder_days_before
+                AND (t.last_reminder_date IS NULL OR t.last_reminder_date <> t.next_run_date)
+              ORDER BY t.next_run_date ASC, t.id ASC"
+        );
+        $ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+        $out = [];
+        foreach ($ids as $id) {
+            $tpl = $this->find($id);
+            if ($tpl !== null) $out[] = $tpl;
+        }
+        return $out;
+    }
+
+    /** Označí, že reminder pro období (= next_run_date) byl odeslán. */
+    public function markReminderSent(int $id, string $periodDate): void
+    {
+        $this->db->pdo()->prepare(
+            'UPDATE recurring_invoice_templates SET last_reminder_date = ? WHERE id = ?'
+        )->execute([$periodDate, $id]);
+    }
+
     public function create(array $data, int $userId): int
     {
         $pdo = $this->db->pdo();
@@ -188,10 +364,11 @@ final class RecurringTemplateRepository
         $sql = 'INSERT INTO recurring_invoice_templates
             (supplier_id, client_id, project_id, name,
              frequency, day_of_month, end_of_month, anchor_date, end_date, next_run_date,
-             invoice_type, currency_id, language, payment_method, reverse_charge,
-             payment_due_days, tax_date_mode, note_above_items, note_below_items,
+             invoice_type, currency_id, language, payment_method, reverse_charge, discount_percent,
+             payment_due_days, tax_date_mode, draft_open_mode, reminder_days_before,
+             note_above_items, note_below_items,
              increment_month_in_descriptions, auto_issue, auto_send_email, status, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -210,8 +387,11 @@ final class RecurringTemplateRepository
             (string) ($data['language'] ?? 'cs'),
             (string) ($data['payment_method'] ?? 'bank_transfer'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            self::clampDiscountPercent($data['discount_percent'] ?? 0),
             (int) ($data['payment_due_days'] ?? 14),
             self::normalizeTaxDateMode($data['tax_date_mode'] ?? null),
+            self::normalizeDraftOpenMode($data['draft_open_mode'] ?? null),
+            self::normalizeReminderDays($data['reminder_days_before'] ?? null),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
             !empty($data['increment_month_in_descriptions']) ? 1 : 0,
@@ -225,17 +405,40 @@ final class RecurringTemplateRepository
 
     public function update(int $id, array $data): void
     {
-        // Pokud šablona ještě nikdy negenerovala (last_run_date IS NULL),
-        // přepiš next_run_date dle nového anchor_date — uživatel mohl změnit
-        // den/end_of_month/anchor a očekává, že se první generování posune.
-        // U už běžících šablon (last_run_date != NULL) necháme cyklus naplánovaný.
+        $endOfMonth = !empty($data['end_of_month']);
+        $dayOfMonth = $endOfMonth ? null : (isset($data['day_of_month']) && $data['day_of_month'] !== null ? (int) $data['day_of_month'] : null);
+
+        // Přepočet next_run_date:
+        //  - šablona ještě neběžela (last_run_date IS NULL) → next = anchor_date
+        //    (uživatel mění harmonogram před prvním generováním).
+        //  - už běží → přemapuj DEN nejbližšího naplánovaného next_run_date dle
+        //    nového pravidla (end_of_month / day_of_month) v rámci JEHO měsíce —
+        //    bez posunu cyklu. Tím se např. změna „20. v měsíci" → „konec měsíce"
+        //    projeví hned na nejbližším vystavení (20.6. → 30.6.), ne až o cyklus dál.
+        $cur = $this->db->pdo()->prepare(
+            'SELECT last_run_date, next_run_date FROM recurring_invoice_templates WHERE id = ?'
+        );
+        $cur->execute([$id]);
+        $existing = $cur->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        if (empty($existing['last_run_date'])) {
+            $nextRunDate = (string) $data['anchor_date'];
+        } else {
+            $nextRunDate = PeriodicityCalculator::snapToDayRule(
+                (string) $existing['next_run_date'],
+                $endOfMonth,
+                $dayOfMonth,
+            );
+        }
+
         $sql = 'UPDATE recurring_invoice_templates SET
                 client_id = ?, project_id = ?, name = ?,
                 frequency = ?, day_of_month = ?, end_of_month = ?,
                 anchor_date = ?, end_date = ?,
-                next_run_date = CASE WHEN last_run_date IS NULL THEN ? ELSE next_run_date END,
+                next_run_date = ?,
                 invoice_type = ?, currency_id = ?, language = ?, payment_method = ?,
-                reverse_charge = ?, payment_due_days = ?, tax_date_mode = ?,
+                reverse_charge = ?, discount_percent = ?, payment_due_days = ?, tax_date_mode = ?,
+                draft_open_mode = ?, reminder_days_before = ?,
                 note_above_items = ?, note_below_items = ?,
                 increment_month_in_descriptions = ?, auto_issue = ?, auto_send_email = ?
               WHERE id = ?';
@@ -244,18 +447,21 @@ final class RecurringTemplateRepository
             !empty($data['project_id']) ? (int) $data['project_id'] : null,
             (string) $data['name'],
             (string) $data['frequency'],
-            !empty($data['end_of_month']) ? null : (isset($data['day_of_month']) && $data['day_of_month'] !== null ? (int) $data['day_of_month'] : null),
-            !empty($data['end_of_month']) ? 1 : 0,
+            $dayOfMonth,
+            $endOfMonth ? 1 : 0,
             (string) $data['anchor_date'],
             !empty($data['end_date']) ? (string) $data['end_date'] : null,
-            (string) $data['anchor_date'],
+            $nextRunDate,
             (string) ($data['invoice_type'] ?? 'invoice'),
             (int) $data['currency_id'],
             (string) ($data['language'] ?? 'cs'),
             (string) ($data['payment_method'] ?? 'bank_transfer'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            self::clampDiscountPercent($data['discount_percent'] ?? 0),
             (int) ($data['payment_due_days'] ?? 14),
             self::normalizeTaxDateMode($data['tax_date_mode'] ?? null),
+            self::normalizeDraftOpenMode($data['draft_open_mode'] ?? null),
+            self::normalizeReminderDays($data['reminder_days_before'] ?? null),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
             !empty($data['increment_month_in_descriptions']) ? 1 : 0,
@@ -265,10 +471,53 @@ final class RecurringTemplateRepository
         ]);
     }
 
+    private static function clampDiscountPercent(mixed $value): float
+    {
+        $v = is_numeric($value) ? (float) $value : 0.0;
+        return round(max(0.0, min(100.0, $v)), 2);
+    }
+
+    /**
+     * Zaznamená poslední chybu (automatického) generování — zobrazí se jako banner
+     * na detailu šablony. Volá cron při selhání per-šablonu.
+     */
+    public function setLastError(int $id, string $message): void
+    {
+        $msg = mb_substr(trim($message), 0, 500);
+        $this->db->pdo()->prepare(
+            'UPDATE recurring_invoice_templates SET last_error = ?, last_error_at = NOW() WHERE id = ?'
+        )->execute([$msg, $id]);
+    }
+
+    /**
+     * Vynuluje poslední chybu po úspěšném generování (cron i ruční). WHERE guard
+     * zabrání zbytečnému zápisu u zdravých šablon při každém běhu cronu.
+     */
+    public function clearLastError(int $id): void
+    {
+        $this->db->pdo()->prepare(
+            'UPDATE recurring_invoice_templates SET last_error = NULL, last_error_at = NULL
+              WHERE id = ? AND last_error IS NOT NULL'
+        )->execute([$id]);
+    }
+
     private static function normalizeTaxDateMode(mixed $value): string
     {
         $v = is_string($value) ? $value : '';
         return $v === 'previous_month_last_day' ? 'previous_month_last_day' : 'same_as_issue';
+    }
+
+    private static function normalizeDraftOpenMode(mixed $value): string
+    {
+        $v = is_string($value) ? $value : '';
+        return $v === 'period_start' ? 'period_start' : 'at_issue';
+    }
+
+    /** 0 = bez reminderu, jinak 1–14 dní předem. */
+    private static function normalizeReminderDays(mixed $value): int
+    {
+        $n = is_numeric($value) ? (int) $value : 1;
+        return max(0, min(14, $n));
     }
 
     public function replaceItems(int $templateId, array $items): void
@@ -337,8 +586,17 @@ final class RecurringTemplateRepository
         if (array_key_exists('payment_due_days', $row)) {
             $row['payment_due_days'] = (int) $row['payment_due_days'];
         }
+        if (array_key_exists('reminder_days_before', $row)) {
+            $row['reminder_days_before'] = (int) $row['reminder_days_before'];
+        }
         if (array_key_exists('invoices_generated_count', $row)) {
             $row['invoices_generated_count'] = (int) $row['invoices_generated_count'];
+        }
+        if (array_key_exists('total_with_vat', $row)) {
+            $row['total_with_vat'] = (float) $row['total_with_vat'];
+        }
+        if (array_key_exists('discount_percent', $row)) {
+            $row['discount_percent'] = (float) $row['discount_percent'];
         }
         return $row;
     }

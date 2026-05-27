@@ -59,7 +59,7 @@ final class RecurringInvoiceGenerator
     /**
      * @return array{invoice_id:int, varsymbol:?string, issued:bool, sent_to:list<string>, new_next_run_date:?string, template_status:string}
      */
-    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron'): array
+    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false): array
     {
         $template = $this->templates->find($templateId);
         if ($template === null) {
@@ -87,6 +87,7 @@ final class RecurringInvoiceGenerator
             'invoice_type' => (string) ($template['invoice_type'] ?? 'invoice'),
             'advance_paid_amount' => 0,
             'reverse_charge' => !empty($template['reverse_charge']),
+            'discount_percent' => (float) ($template['discount_percent'] ?? 0),
             'items' => $template['items'],
         ], $this->invoices->vatRateMap());
         if ($amountError !== null) {
@@ -97,41 +98,20 @@ final class RecurringInvoiceGenerator
         $this->calc->recompute($invoiceId);
         $this->rateApplier->applyToInvoice($invoiceId);
 
-        $issued = false;
-        $sentTo = [];
-        $varsymbol = null;
-
-        if ($template['auto_issue']) {
-            if ($template['auto_send_email']) {
-                $result = $this->issueAndSend->run($invoiceId, $userId, $ip, $ua);
-                $issued = $result['issued'];
-                $sentTo = $result['sent_to'];
-                $varsymbol = $result['varsymbol'];
-            } else {
-                $varsymbol = $this->issueOnlyWithoutSend($invoiceId, $userId, $ip, $ua);
-                $issued = true;
-            }
+        // forceDraft = ruční „Vygenerovat koncept" — vždy nech draft (i u auto_issue=true),
+        // uživatel ho pak vystaví/upraví ručně. Rozvrh posouváme stejně jako u běžné
+        // generace, aby cron tutéž periodu nevygeneroval podruhé.
+        if ($forceDraft) {
+            $issued = false;
+            $sentTo = [];
+            $varsymbol = null;
+        } else {
+            ['issued' => $issued, 'sent_to' => $sentTo, 'varsymbol' => $varsymbol] =
+                $this->performIssue($invoiceId, $template, $userId, $ip, $ua);
         }
 
-        // Posun next_run_date + případný expire
-        $newNext = PeriodicityCalculator::nextRunDate(
-            $issueDate,
-            (string) $template['frequency'],
-            (bool) $template['end_of_month'],
-            $template['day_of_month'] !== null ? (int) $template['day_of_month'] : null,
-        );
-
-        $newStatus = (string) $template['status'];
-        if (!empty($template['end_date']) && $newNext > (string) $template['end_date']) {
-            $newStatus = 'expired';
-        }
-
-        $this->templates->advanceSchedule(
-            $templateId,
-            $newNext,
-            $issueDate,
-            $newStatus,
-        );
+        ['next' => $newNext, 'status' => $newStatus] =
+            $this->advanceTemplateSchedule($templateId, $template, $issueDate);
 
         $this->logger->log('recurring.generated', $userId, 'recurring_template', $templateId, [
             'invoice_id'  => $invoiceId,
@@ -154,6 +134,203 @@ final class RecurringInvoiceGenerator
     }
 
     /**
+     * Otevře koncept pro AKTUÁLNÍ období (draft_open_mode='period_start') — vytvoří
+     * draft s fixními řádky šablony, ale NEvystaví ho a NEposune next_run_date.
+     * issue_date i tax_date se nastaví na PLÁNOVANÝ konec období (next_run_date),
+     * takže koncept od začátku nese správné datum vystavení i DUZP. Uživatel pak
+     * celý měsíc edituje výkaz práce na tomto konceptu; cron ho v issuePeriod()
+     * v den next_run_date uzavře.
+     *
+     * Idempotentní: pokud už pro období existuje faktura (draft i vystavená),
+     * vrátí ji bez vytvoření nové.
+     *
+     * @return array{invoice_id:int, created:bool}
+     */
+    public function openDraft(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron'): array
+    {
+        $template = $this->templates->find($templateId);
+        if ($template === null) {
+            throw new \RuntimeException("Šablona #$templateId nenalezena");
+        }
+        if (empty($template['items'])) {
+            throw new \DomainException("Šablona #$templateId nemá žádné položky.");
+        }
+        if ($template['status'] === 'expired') {
+            throw new \DomainException('Šablona vypršela (end_date prošel).');
+        }
+
+        $issueDate = (string) $template['next_run_date'];
+        $userId ??= (int) $template['created_by'];
+
+        // Idempotence — koncept (ani vystavená faktura) pro toto období už nesmí existovat.
+        $existing = $this->templates->findPeriodInvoice($templateId, $issueDate);
+        if ($existing !== null) {
+            return ['invoice_id' => (int) $existing['id'], 'created' => false];
+        }
+
+        $amountError = InvoiceAmountPolicy::validatePositiveAmountToPay([
+            'invoice_type' => (string) ($template['invoice_type'] ?? 'invoice'),
+            'advance_paid_amount' => 0,
+            'reverse_charge' => !empty($template['reverse_charge']),
+            'discount_percent' => (float) ($template['discount_percent'] ?? 0),
+            'items' => $template['items'],
+        ], $this->invoices->vatRateMap());
+        if ($amountError !== null) {
+            throw new \DomainException($amountError);
+        }
+
+        $invoiceId = $this->createInvoiceFromTemplate($template, $issueDate, $userId);
+        $this->calc->recompute($invoiceId);
+        $this->rateApplier->applyToInvoice($invoiceId);
+
+        $this->logger->log('recurring.draft_opened', $userId, 'recurring_template', $templateId, [
+            'invoice_id' => $invoiceId,
+            'issue_date' => $issueDate,
+        ], $ip, $ua);
+
+        return ['invoice_id' => $invoiceId, 'created' => true];
+    }
+
+    /**
+     * Uzavře a vystaví koncept pro aktuální období (draft_open_mode='period_start').
+     * Najde otevřený koncept (nebo ho vytvoří, kdyby openDraft neproběhl — např.
+     * cron neběžel 1. dne), přepočítá totály (zachytí položky výkazu doplněné během
+     * měsíce), vystaví a volitelně odešle, pak posune next_run_date.
+     *
+     * Vrací stejný tvar jako generate().
+     *
+     * @return array{invoice_id:int, varsymbol:?string, issued:bool, sent_to:list<string>, new_next_run_date:?string, template_status:string}
+     */
+    public function issuePeriod(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron'): array
+    {
+        $template = $this->templates->find($templateId);
+        if ($template === null) {
+            throw new \RuntimeException("Šablona #$templateId nenalezena");
+        }
+        if (empty($template['items'])) {
+            throw new \DomainException("Šablona #$templateId nemá žádné položky.");
+        }
+        if ($template['status'] === 'expired') {
+            throw new \DomainException('Šablona vypršela (end_date prošel).');
+        }
+
+        $issueDate = (string) $template['next_run_date'];
+        $userId ??= (int) $template['created_by'];
+
+        $existing = $this->templates->findPeriodInvoice($templateId, $issueDate);
+
+        $issued = false;
+        $sentTo = [];
+        $varsymbol = null;
+
+        if ($existing !== null && (string) $existing['status'] !== 'draft') {
+            // Už vystaveno (ručně nebo dřívějším během) — nic neděláme, jen posuneme rozvrh.
+            $invoiceId = (int) $existing['id'];
+            $varsymbol = $existing['varsymbol'] !== null ? (string) $existing['varsymbol'] : null;
+            $issued = true;
+        } else {
+            if ($existing !== null) {
+                // Otevřený koncept — přepočítej (zachytí vícepráce z výkazu) a vystav.
+                $invoiceId = (int) $existing['id'];
+            } else {
+                // openDraft neproběhl — vytvoř fakturu teď (fallback / draft_open_mode přepnut pozdě).
+                $amountError = InvoiceAmountPolicy::validatePositiveAmountToPay([
+                    'invoice_type' => (string) ($template['invoice_type'] ?? 'invoice'),
+                    'advance_paid_amount' => 0,
+                    'reverse_charge' => !empty($template['reverse_charge']),
+                    'discount_percent' => (float) ($template['discount_percent'] ?? 0),
+                    'items' => $template['items'],
+                ], $this->invoices->vatRateMap());
+                if ($amountError !== null) {
+                    throw new \DomainException($amountError);
+                }
+                $invoiceId = $this->createInvoiceFromTemplate($template, $issueDate, $userId);
+            }
+            $this->calc->recompute($invoiceId);
+            $this->rateApplier->applyToInvoice($invoiceId);
+
+            ['issued' => $issued, 'sent_to' => $sentTo, 'varsymbol' => $varsymbol] =
+                $this->performIssue($invoiceId, $template, $userId, $ip, $ua);
+        }
+
+        ['next' => $newNext, 'status' => $newStatus] =
+            $this->advanceTemplateSchedule($templateId, $template, $issueDate);
+
+        $this->logger->log('recurring.generated', $userId, 'recurring_template', $templateId, [
+            'invoice_id'  => $invoiceId,
+            'issue_date'  => $issueDate,
+            'auto_issue'  => $template['auto_issue'],
+            'auto_send'   => $template['auto_send_email'],
+            'sent_to'     => $sentTo,
+            'next_run'    => $newNext,
+            'new_status'  => $newStatus,
+            'from_opened_draft' => $existing !== null,
+        ], $ip, $ua);
+
+        return [
+            'invoice_id'        => $invoiceId,
+            'varsymbol'         => $varsymbol,
+            'issued'            => $issued,
+            'sent_to'           => $sentTo,
+            'new_next_run_date' => $newNext,
+            'template_status'   => $newStatus,
+        ];
+    }
+
+    /**
+     * První den měsíce, ve kterém leží next_run_date — datum, kdy se pro
+     * draft_open_mode='period_start' otevírá koncept (začátek fakturovaného období).
+     */
+    public static function draftOpenDate(string $nextRunDate): string
+    {
+        return (new \DateTimeImmutable($nextRunDate))
+            ->modify('first day of this month')
+            ->format('Y-m-d');
+    }
+
+    /**
+     * Vystaví fakturu dle per-šablona flagů auto_issue / auto_send_email.
+     *
+     * @return array{issued:bool, sent_to:list<string>, varsymbol:?string}
+     */
+    private function performIssue(int $invoiceId, array $template, ?int $userId, string $ip, string $ua): array
+    {
+        if (!$template['auto_issue']) {
+            return ['issued' => false, 'sent_to' => [], 'varsymbol' => null];
+        }
+        if ($template['auto_send_email']) {
+            $r = $this->issueAndSend->run($invoiceId, $userId, $ip, $ua);
+            return ['issued' => $r['issued'], 'sent_to' => $r['sent_to'], 'varsymbol' => $r['varsymbol']];
+        }
+        $varsymbol = $this->issueOnlyWithoutSend($invoiceId, $userId, $ip, $ua);
+        return ['issued' => true, 'sent_to' => [], 'varsymbol' => $varsymbol];
+    }
+
+    /**
+     * Posune next_run_date o jeden cyklus + případně expiruje. Vrací nové hodnoty.
+     *
+     * @return array{next:string, status:string}
+     */
+    private function advanceTemplateSchedule(int $templateId, array $template, string $issueDate): array
+    {
+        $newNext = PeriodicityCalculator::nextRunDate(
+            $issueDate,
+            (string) $template['frequency'],
+            (bool) $template['end_of_month'],
+            $template['day_of_month'] !== null ? (int) $template['day_of_month'] : null,
+        );
+
+        $newStatus = (string) $template['status'];
+        if (!empty($template['end_date']) && $newNext > (string) $template['end_date']) {
+            $newStatus = 'expired';
+        }
+
+        $this->templates->advanceSchedule($templateId, $newNext, $issueDate, $newStatus);
+
+        return ['next' => $newNext, 'status' => $newStatus];
+    }
+
+    /**
      * Insert draft + items. Zachovává payment_method, reverse_charge, language,
      * notes a item description s případným month-increment.
      */
@@ -167,15 +344,24 @@ final class RecurringInvoiceGenerator
             ? null
             : self::computeTaxDate($issueDate, (string) ($template['tax_date_mode'] ?? 'same_as_issue'));
 
+        // Safeguard: přišpendlené sazby šablony musí být platné k DUZP (u proformy k issue).
+        // Brání tichému vystavení se starou sazbou po její změně (nový řádek vat_rates).
+        VatRateValidityGuard::assertValidOn(
+            $pdo,
+            array_map(static fn ($it) => (int) $it['vat_rate_id'], $template['items']),
+            $taxDate ?? $issueDate,
+        );
+
         $pdo->beginTransaction();
         try {
+            $discountPercent = round(max(0.0, min(100.0, (float) ($template['discount_percent'] ?? 0))), 2);
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, client_id, project_id, supplier_id,
                     issue_date, tax_date, due_date, currency_id, reverse_charge, language,
-                    note_above_items, note_below_items, payment_method,
+                    note_above_items, note_below_items, payment_method, discount_percent,
                     recurring_template_id, status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
             );
             $stmt->execute([
                 $type,
@@ -191,6 +377,7 @@ final class RecurringInvoiceGenerator
                 $template['note_above_items'] ?? null,
                 $template['note_below_items'] ?? null,
                 (string) ($template['payment_method'] ?? 'bank_transfer'),
+                $discountPercent,
                 (int) $template['id'],
                 $userId,
             ]);
@@ -203,34 +390,26 @@ final class RecurringInvoiceGenerator
                 ? new \DateTimeImmutable($taxDate ?? $issueDate)
                 : null;
 
-            $itemStmt = $pdo->prepare(
-                'INSERT INTO invoice_items
-                   (invoice_id, description, quantity, unit, unit_price_without_vat,
-                    vat_rate_id, vat_rate_snapshot,
-                    total_without_vat, total_vat, total_with_vat, order_index)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)'
-            );
-
-            // VAT snapshot — pro účely insertu (recompute pak přepočítá z aktuální vat_rates.rate_percent;
-            // sem dáváme rozumný initial 0, calc to přebije). Bez tohoto INSERTu by hodily NOT NULL.
-            // Pozn.: BulkReissue ukládá `vat_rate_snapshot` z položky source faktury — my v šabloně
-            // snapshot nedržíme, takže necháme 0 a recompute si poradí.
+            // Položky vkládáme přes kanonickou InvoiceRepository::replaceItems — ta nastaví
+            // SPRÁVNÝ vat_rate_snapshot (z aktuální vat_rates), vat_classification_code
+            // i zmaterializuje slevovou položku z header discount_percent. Tím se recurring
+            // chová stejně jako běžná faktura (dřív se vkládal snapshot=0 → DPH vycházela 0
+            // a kódy byly NULL).
+            $items = [];
             foreach ($template['items'] as $item) {
                 $description = $syncTarget !== null
                     ? MonthSynchronizer::syncTo((string) $item['description'], $syncTarget)
                     : (string) $item['description'];
-
-                $itemStmt->execute([
-                    $newId,
-                    $description,
-                    (float) $item['quantity'],
-                    (string) $item['unit'],
-                    (float) $item['unit_price_without_vat'],
-                    (int) $item['vat_rate_id'],
-                    0,  // vat_rate_snapshot — recompute() ho přebije z vat_rates.rate_percent
-                    (int) $item['order_index'],
-                ]);
+                $items[] = [
+                    'description'            => $description,
+                    'quantity'               => (float) $item['quantity'],
+                    'unit'                   => (string) $item['unit'],
+                    'unit_price_without_vat' => (float) $item['unit_price_without_vat'],
+                    'vat_rate_id'            => (int) $item['vat_rate_id'],
+                    'order_index'            => (int) $item['order_index'],
+                ];
             }
+            $this->invoices->replaceItems($newId, $items);
 
             $pdo->commit();
             return $newId;

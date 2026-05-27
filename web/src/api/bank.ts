@@ -15,6 +15,10 @@ export interface BankStatement {
   matched_count: number
   imported_at: string
   has_file: boolean
+  /** Je k výpisu přiložené PDF (bank_statements.pdf_content)? */
+  has_pdf: boolean
+  /** Původní název nahraného PDF, pokud je. */
+  pdf_name?: string | null
 }
 
 export type MatchStatus = 'unmatched' | 'auto_exact' | 'auto_partial' | 'manual' | 'ignored'
@@ -115,4 +119,18 @@ export const bankApi = {
     const base = api.defaults.baseURL ?? ''
     return `${base.replace(/\/$/, '')}/bank-statements/${id}/download`
   },
+  /** Download URL přiloženého PDF výpisu (analogie downloadUrl pro GPC). */
+  pdfUrl: (id: number): string => {
+    const base = api.defaults.baseURL ?? ''
+    return `${base.replace(/\/$/, '')}/bank-statements/${id}/pdf`
+  },
+  uploadPdf: (id: number, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<{ uploaded: true; pdf_name: string }>(`/bank-statements/${id}/pdf`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+  deletePdf: (id: number) =>
+    api.delete<{ deleted: true }>(`/bank-statements/${id}/pdf`).then(r => r.data),
 }

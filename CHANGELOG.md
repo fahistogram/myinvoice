@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.2] — 2026-05-27
+
+Řazení seznamu pravidelných faktur, číslo účtu v názvu staženého PDF výpisu a aktualizace OpenAPI specifikace.
+
+### Added
+
+- **Řazení seznamu pravidelných faktur** — vpravo za součtem částek nový přepínač: dle **data vystavení** (výchozí), dle **zákazníka (A–Z)** nebo dle **částky přepočtené na CZK (sestupně)**. Řazení i přepočet na CZK (dnešní kurz ČNB) probíhá server-side, takže funguje napříč stránkováním a **nemixuje měny** (1000 EUR > 20 000 CZK).
+- **Číslo účtu v názvu staženého PDF bankovního výpisu** — pokud název nahraného PDF číslo účtu neobsahuje, předřadí se (např. `2026-02.pdf` → `1000000005-2026-02.pdf`), ať se výpisy z více účtů nepletou.
+
+### Changed
+
+- **Seznam pravidelných faktur** defaultně filtruje stav **„Aktivní"** (dřív „Vše").
+- **OpenAPI specifikace** (`/api/openapi.yaml`) — opraveny názvy polí výkazu víceprací (`work_date`, `total_amount` místo neexistujících `performed_on`/`amount`), doplněno `discount_percent` u faktur i pravidelných fakturací, a chybějící pole pravidelných fakturací (`draft_open_mode`, `tax_date_mode`, `reminder_days_before`, `last_error`). Doplněna i poznámka, že výkaz víceprací je samostatný od položek faktury.
+
+## [4.3.1] — 2026-05-27
+
+Branding barva napříč PDF i e-maily, proklikávací výkaz víceprací v PDF a opravy QR v e-mailech a importu slev z iDokladu.
+
+### Added
+
+- **Proklikávací výkaz víceprací v PDF** — má-li faktura výkaz víceprací, položka „Výkaz víceprací" v tabulce položek je **podtržený odkaz**, který v PDF přeskočí přímo na stránku s výkazem (interní link). Ostatní položky i slevové řádky zůstávají běžným textem.
+
+### Fixed
+
+- **QR kód se nezobrazoval v odeslaných e-mailech** ([#51](https://github.com/radekhulan/myinvoice/issues/51)) — QR se vkládal jako `data:` URI v `<img>`, což Gmail, Outlook a další klienti z bezpečnostních důvodů blokují (na faktuře v PDF fungoval). Nově se vkládá jako **inline CID příloha** (stejně jako logo dodavatele), takže se zobrazí napříč klienty. Týká se odeslání faktury, testovacího e-mailu i upomínek.
+- **Import slevy z iDokladu přes PDF s embedded ISDOC** ([#48](https://github.com/radekhulan/myinvoice/issues/48)) — oprava ve 4.3.0 řešila jen import přes iDoklad API; přes PDF s embedded ISDOC se sleva pořád ignorovala a faktura se naimportovala za plnou (předslevovou) cenu. ISDOC nemá na řádce dedikovaný discount element — sleva se promítá tím, že `LineExtensionAmount` (čistý součet řádku po slevě) je nižší než `UnitPrice × množství`. Parser teď čte efektivní cenu z `LineExtensionAmount`. Týká se vydaných i přijatých faktur.
+- **Branding barva dodavatele se nepromítala do PDF faktury** — `email_accent_color` se používala jen v e-mailech, PDF bylo vždy fialové (ani `regenerate` nepomohl, barva se do PDF vůbec nevkládala). Nově se akcent barva aplikuje na akcenty PDF (linka pod hlavičkou, hlavička tabulky položek, řádky „Celkem" / „K úhradě", labely, popisky QR/banky, nadpis a odkaz výkazu) — gated na zapnutý branding. Sémantické barvy (dobropis, storno, „po splatnosti") zůstávají.
+- **Branding barva se nepromítala do těla e-mailů** — velké částky, tlačítka a odkazy v těle byly natvrdo fialové. Nově používají akcent barvu dodavatele (gated na branding). Zelené tlačítko „Schválit vícepráce", „Uhrazeno" a oranžová „po splatnosti" zůstávají sémantické.
+
+### Changed
+
+- **Náhled e-mailu** v nastavení brandingu nově ukazuje akcent barvu i v těle (box „K úhradě" + tlačítko „Zobrazit fakturu"), ne jen v hlavičce a patičce — náhled tak věrněji odpovídá reálnému e-mailu.
+
+## [4.3.0] — 2026-05-26
+
+Procentuální **sleva na celou fakturu** + oprava importu slev z iDokladu, rozšíření na **pravidelné fakturace** a robustnější generování konceptů.
+
+### Added
+
+- **Procentuální sleva z celkové částky faktury** ([#50](https://github.com/radekhulan/myinvoice/issues/50)) — u vydaných faktur lze zadat slevu v % na úrovni celého dokladu (pole „Sleva z celé faktury"). Sleva se při uložení materializuje jako **záporná položka „Sleva X %"** — účetně nejčistší varianta: rozpadne se **na každou sazbu DPH zvlášť** (správné DPH i u smíšených sazeb) a díky tomu se automaticky promítne do totals, rozpisu DPH i do výkazů (Kniha DPH / EPO DPHDP3 / Kontrolní hlášení). Sleva je vidět v editoru, detailu i v PDF. Přenáší se i při klonování a při vystavení finální faktury k proformě.
+- **Sleva i u pravidelných fakturací** — šablona drží `discount_percent`; vygenerovaná faktura ho zdědí a slevová položka se dopočítá stejně. Sleva je vidět ve formuláři i na detailu šablony.
+- **„Vygenerovat koncept"** u pravidelné fakturace — vedle „Vygenerovat teď" (které respektuje `auto_issue`) lze vytvořit koncept ručně i u šablony s automatickým vystavením. U režimu „koncept na začátku období" volá stejnou idempotentní cestu jako cron (neposouvá rozvrh).
+
+### Fixed
+
+- **Import slevy z iDokladu** ([#48](https://github.com/radekhulan/myinvoice/issues/48)) — faktury (vydané i přijaté) se slevou se importovaly za plnou, předslevovou částku, protože se pole slevy z iDoklad API vůbec nečetlo. Nově se mapuje sleva na úrovni dokladu (`DiscountType=OnDocument`) i položková sleva: u vydaných na `discount_percent`, u přijatých jako záporná položka „Sleva X %" po sazbách. Importovaná částka teď odpovídá iDokladu.
+- **Chybné DPH (0 %) u pravidelných fakturací** — generátor vkládal položky mimo standardní cestu a ukládal `vat_rate_snapshot = 0`, takže vygenerovaná faktura měla nulové DPH a prázdnou klasifikaci pro výkazy. Generátor teď používá kanonickou cestu (správná sazba z `vat_rates` + klasifikační kód).
+- **Rychlá editace výkazu** v seznamu faktur (tlačítko „Výkaz") u faktury se slevou — vynulovávala slevu a zamrazila slevovou položku. Modal teď slevu zachová.
+
+### Changed
+
+- **Tlačítko „Výkaz"** v seznamu faktur je nově dostupné i pro koncepty vygenerované z pravidelné fakturace (dřív jen když už výkaz existoval nebo to vyžadoval projekt).
+- **Ochrana proti vypršelé sazbě DPH** — při generování pravidelné faktury i při klonování se ověří, že přišpendlené sazby jsou platné k datu plnění. Po změně sazby (nový řádek `vat_rates` + `valid_to` na starém) se tak nevystaví doklad se starou sazbou; místo toho přijde jasná chyba.
+- **Banner o selhání generování** na detailu/v seznamu pravidelné fakturace — když cron fakturu nevygeneruje (např. kvůli vypršelé sazbě), uloží se poslední chyba a uživatel ji uvidí přímo u šablony (dřív jen v admin logu jako počet).
+
 ## [4.2.5] — 2026-05-25
 
 Oprava souhrnu v **Knize DPH**.

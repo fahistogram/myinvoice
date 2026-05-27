@@ -283,6 +283,12 @@ final class SettingsAction
         $params[] = $id;
         $sql = 'UPDATE supplier SET ' . implode(', ', $sets) . ' WHERE id = ?';
         $this->db->pdo()->prepare($sql)->execute($params);
+        // Branding (barva/toggle) se v PDF renderuje živě → po změně invaliduj cached
+        // draft PDF dodavatele, ať se přegenerují s novou barvou (mtime cache je sama
+        // od sebe neobnoví). Vystavené regenerují přes ?regenerate=1.
+        if (array_key_exists('email_accent_color', $body) || array_key_exists('email_branding_enabled', $body)) {
+            $this->pdf->invalidateDraftsBySupplier($id);
+        }
         $this->log($request, 'supplier.updated', $id, ['fields' => array_keys(array_intersect_key($body, array_flip($allowed)))]);
         return $this->respondSupplier($response, $id);
     }

@@ -1,0 +1,20 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+KONCEPT PRAVIDELNÉ FAKTURY SE BRZY VYSTAVÍ
+============================================
+
+Dobrý den,
+
+koncept pravidelné faktury "{{ template_name }}"{% if client_name %} pro {{ client_name }}{% endif %}
+se automaticky vystaví {{ issue_date|date('j.n.Y') }}.
+Pokud chcete doplnit vícepráce do výkazu práce, udělejte to prosím do té doby.
+
+Datum vystavení:             {{ issue_date|date('j.n.Y') }}
+Položek výkazu (vícepráce):  {{ work_item_count }}
+Aktuálně k úhradě:           {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
+{% if edit_link %}
+Otevřít koncept: {{ edit_link }}
+{% endif %}
+Pokud nic nedoplníte, faktura se vystaví s aktuálním obsahem.
+{% endblock %}

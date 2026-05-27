@@ -177,7 +177,7 @@ async function onFileSelected(e: Event) {
             <th class="px-3 py-2 text-right font-medium">{{ t('bank.balance') }}</th>
             <th class="px-3 py-2 text-center font-medium">Transakce</th>
             <th class="px-3 py-2 text-center font-medium">{{ t('bank.matched') }}</th>
-            <th class="px-3 py-2 text-center font-medium w-24"></th>
+            <th class="px-3 py-2 text-right font-medium"></th>
           </tr>
         </thead>
         <tbody v-for="group in groupedStatements" :key="group.month" class="divide-y divide-neutral-100">
@@ -206,17 +206,26 @@ async function onFileSelected(e: Event) {
                 {{ s.matched_count }} / {{ s.transaction_count }}
               </span>
             </td>
-            <td class="px-3 py-2 text-center whitespace-nowrap">
-              <a v-if="s.has_file" :href="bankApi.downloadUrl(s.id)" @click.stop
-                 :title="t('bank.download')"
-                 class="inline-flex w-7 h-7 items-center justify-center text-neutral-400 hover:text-primary-600 hover:bg-primary-50 rounded">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-              </a>
-              <button v-if="isAdmin" type="button" @click="onDelete(s, $event)"
-                 :title="t('bank.delete')"
-                 class="cursor-pointer inline-flex w-7 h-7 items-center justify-center text-neutral-400 hover:text-danger-500 hover:bg-danger-50 rounded">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/></svg>
-              </button>
+            <td class="px-3 py-2 text-right whitespace-nowrap">
+              <div class="inline-flex items-center gap-1.5">
+                <a v-if="s.has_file" :href="bankApi.downloadUrl(s.id)" @click.stop
+                   :title="t('bank.download_gpc')"
+                   class="inline-flex items-center gap-1 px-2 h-7 text-xs border border-neutral-200 text-neutral-700 hover:bg-neutral-50 rounded">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                  GPC
+                </a>
+                <a v-if="s.has_pdf" :href="bankApi.pdfUrl(s.id)" @click.stop
+                   :title="t('bank.download_pdf')"
+                   class="inline-flex items-center gap-1 px-2 h-7 text-xs border border-neutral-200 text-neutral-700 hover:bg-neutral-50 rounded">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                  PDF
+                </a>
+                <button v-if="isAdmin" type="button" @click="onDelete(s, $event)"
+                   :title="t('bank.delete')"
+                   class="cursor-pointer inline-flex w-7 h-7 items-center justify-center text-neutral-400 hover:text-danger-500 hover:bg-danger-50 border border-transparent hover:border-danger-200 rounded">
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/></svg>
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -254,7 +263,12 @@ async function onFileSelected(e: Event) {
             <a v-if="s.has_file" :href="bankApi.downloadUrl(s.id)" @click.stop
                class="inline-flex items-center gap-1 px-2 h-7 text-xs border border-neutral-200 text-neutral-700 hover:bg-neutral-50 rounded">
               <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-              {{ t('bank.download') }}
+              GPC
+            </a>
+            <a v-if="s.has_pdf" :href="bankApi.pdfUrl(s.id)" @click.stop
+               class="inline-flex items-center gap-1 px-2 h-7 text-xs border border-neutral-200 text-neutral-700 hover:bg-neutral-50 rounded">
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              PDF
             </a>
             <button v-if="isAdmin" type="button" @click="onDelete(s, $event)"
                class="cursor-pointer inline-flex items-center gap-1 px-2 h-7 text-xs border border-danger-500/40 text-danger-600 hover:bg-danger-50 rounded">

@@ -80,6 +80,38 @@ async function load() {
 }
 onMounted(load)
 
+// --- PDF příloha (nahrání / smazání) ---
+const uploadingPdf = ref(false)
+
+async function onPdfSelected(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !statement.value) return
+  uploadingPdf.value = true
+  try {
+    await bankApi.uploadPdf(statement.value.id, file)
+    toast.success(t('bank.pdf_uploaded'))
+    await load()
+  } catch (err) {
+    toast.error(apiErrorMessage(err, t('bank.pdf_upload_failed')))
+  } finally {
+    uploadingPdf.value = false
+    if (input) input.value = ''
+  }
+}
+
+async function onDeletePdf() {
+  if (!statement.value) return
+  if (!confirm(t('bank.pdf_delete_confirm'))) return
+  try {
+    await bankApi.deletePdf(statement.value.id)
+    toast.success(t('bank.pdf_deleted'))
+    await load()
+  } catch (err) {
+    toast.error(apiErrorMessage(err, t('bank.pdf_delete_failed')))
+  }
+}
+
 function statusBadge(s: string): string {
   if (s === 'auto_exact') return 'bg-success-50 text-success-600'
   if (s === 'auto_partial') return 'bg-warning-50 text-warning-600'
@@ -218,11 +250,30 @@ async function rematchStatement() {
             <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ statusLabel(s) }}</option>
           </select>
           <a v-if="statement.has_file" :href="bankApi.downloadUrl(statement.id)"
-             :title="t('bank.download_hint')"
+             :title="t('bank.download_gpc')"
              class="cursor-pointer h-8 px-3 text-xs border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md font-medium inline-flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-            {{ t('bank.download') }}
+            GPC
           </a>
+          <a v-if="statement.has_pdf" :href="bankApi.pdfUrl(statement.id)"
+             :title="statement.pdf_name ?? t('bank.download_pdf')"
+             class="cursor-pointer h-8 px-3 text-xs border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md font-medium inline-flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+            PDF
+          </a>
+          <label v-if="auth.canWrite && !statement.has_pdf"
+             :title="t('bank.pdf_upload_hint')"
+             class="cursor-pointer h-8 px-3 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md font-medium inline-flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+            {{ uploadingPdf ? '…' : t('bank.pdf_upload') }}
+            <input type="file" accept=".pdf,application/pdf" class="hidden" @change="onPdfSelected" />
+          </label>
+          <button v-if="auth.canWrite && statement.has_pdf" type="button" @click="onDeletePdf"
+             :title="t('bank.pdf_delete')"
+             class="cursor-pointer h-8 px-3 text-xs border border-danger-500/40 text-danger-600 hover:bg-danger-50 rounded-md font-medium inline-flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"/></svg>
+            {{ t('bank.pdf_delete') }}
+          </button>
           <button v-if="auth.canWrite" type="button" @click="rematchStatement" :disabled="rematching"
             class="cursor-pointer h-8 px-3 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 disabled:opacity-50 rounded-md font-medium inline-flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5" :class="{ 'animate-spin': rematching }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

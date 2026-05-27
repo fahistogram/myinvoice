@@ -32,7 +32,7 @@
         </tr>
         <tr>
           <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">Amount</td>
-          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:#3B2D83;font-family:monospace;">
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;">
             {{ work_report.total_amount|number_format(2, '.', ',') }} {{ invoice.currency }}
           </td>
         </tr>
@@ -60,7 +60,7 @@
 
 <p style="margin:24px 0 8px;font-size:13px;color:#7A748C;text-align:center;">
   Or copy this link into your browser:<br>
-  <a href="{{ approval_url }}" style="color:#3B2D83;word-break:break-all;font-family:monospace;font-size:12px;">{{ approval_url }}</a>
+  <a href="{{ approval_url }}" style="color:{{ accent }};word-break:break-all;font-family:monospace;font-size:12px;">{{ approval_url }}</a>
 </p>
 
 <p style="margin:16px 0;font-size:13px;color:#5A5470;">

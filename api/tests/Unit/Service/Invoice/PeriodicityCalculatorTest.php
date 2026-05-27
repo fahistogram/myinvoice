@@ -128,4 +128,53 @@ final class PeriodicityCalculatorTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         PeriodicityCalculator::monthsFor('weekly');
     }
+
+    // --- snapToDayRule: přemapování dne ve VLASTNÍM měsíci (bez posunu cyklu) ---
+
+    public function testSnapToEndOfMonthKeepsMonth(): void
+    {
+        // Změna „20." → „konec měsíce" se projeví hned na nejbližším vystavení (červen).
+        self::assertSame(
+            '2026-06-30',
+            PeriodicityCalculator::snapToDayRule('2026-06-20', true, null),
+        );
+    }
+
+    public function testSnapToDayOfMonthKeepsMonth(): void
+    {
+        // Změna „konec měsíce" → „10." přemapuje 30.6. na 10.6.
+        self::assertSame(
+            '2026-06-10',
+            PeriodicityCalculator::snapToDayRule('2026-06-30', false, 10),
+        );
+    }
+
+    public function testSnapSameRuleIsIdempotent(): void
+    {
+        // Re-aplikace stejného pravidla na stejné datum nic nemění.
+        self::assertSame(
+            '2026-06-20',
+            PeriodicityCalculator::snapToDayRule('2026-06-20', false, 20),
+        );
+        self::assertSame(
+            '2026-02-28',
+            PeriodicityCalculator::snapToDayRule('2026-02-28', true, null),
+        );
+    }
+
+    public function testSnapDayCappedAt28(): void
+    {
+        self::assertSame(
+            '2026-02-28',
+            PeriodicityCalculator::snapToDayRule('2026-02-15', false, 31),
+        );
+    }
+
+    public function testSnapNullDayUsesExistingDay(): void
+    {
+        self::assertSame(
+            '2026-06-20',
+            PeriodicityCalculator::snapToDayRule('2026-06-20', false, null),
+        );
+    }
 }

@@ -3,7 +3,9 @@ import type { PaymentMethod } from './invoices'
 
 export type Frequency = 'monthly' | 'quarterly' | 'semi_annually' | 'annually'
 export type RecurringStatus = 'active' | 'paused' | 'expired'
+export type RecurringSort = 'client' | 'next_run' | 'amount_czk'
 export type TaxDateMode = 'same_as_issue' | 'previous_month_last_day'
+export type DraftOpenMode = 'at_issue' | 'period_start'
 
 export interface RecurringTemplateItem {
   id?: number
@@ -40,8 +42,11 @@ export interface RecurringTemplate {
   language: 'cs' | 'en'
   payment_method: PaymentMethod
   reverse_charge: boolean
+  discount_percent: number
   payment_due_days: number
   tax_date_mode: TaxDateMode
+  draft_open_mode: DraftOpenMode
+  reminder_days_before: number
   note_above_items: string | null
   note_below_items: string | null
   increment_month_in_descriptions: boolean
@@ -51,6 +56,11 @@ export interface RecurringTemplate {
   status: RecurringStatus
 
   invoices_generated_count?: number
+  /** Poslední chyba (automatického) generování — banner na detailu/seznamu. */
+  last_error?: string | null
+  last_error_at?: string | null
+  /** Součet faktury šablony (base + DPH, respektuje reverse_charge) — vrací list(). */
+  total_with_vat?: number
   created_at: string
   updated_at: string
 
@@ -71,8 +81,11 @@ export interface RecurringTemplatePayload {
   language?: 'cs' | 'en'
   payment_method?: PaymentMethod
   reverse_charge?: boolean
+  discount_percent?: number
   payment_due_days?: number
   tax_date_mode?: TaxDateMode
+  draft_open_mode?: DraftOpenMode
+  reminder_days_before?: number
   note_above_items?: string | null
   note_below_items?: string | null
   increment_month_in_descriptions?: boolean
@@ -110,12 +123,29 @@ export interface GeneratedInvoiceRow {
   currency: string
 }
 
+export interface RecurringCurrencyTotal {
+  currency: string
+  total: number
+}
+
+export interface RecurringSummary {
+  by_currency: RecurringCurrencyTotal[]
+  /** Je ve filtru více měn? Pak se v hlavičce zobrazí total_czk. */
+  multi_currency: boolean
+  /** Součet všech částek převedený na CZK (dnešní ČNB kurz). */
+  total_czk: number
+  /** false = u některé měny nebyl dostupný kurz (CZK součet je neúplný). */
+  rates_complete: boolean
+}
+
 export interface RecurringListMeta {
   total: number
   page: number
   per_page: number
   pages: number
   status_counts?: { all: number; active: number; paused: number; expired: number }
+  totals_by_currency?: RecurringCurrencyTotal[]
+  summary?: RecurringSummary
 }
 
 export interface RecurringListResponse {
@@ -124,12 +154,13 @@ export interface RecurringListResponse {
 }
 
 export const recurringApi = {
-  list: (filters: { client_id?: number; status?: RecurringStatus; page?: number; per_page?: number } = {}) => {
+  list: (filters: { client_id?: number; status?: RecurringStatus; page?: number; per_page?: number; sort?: RecurringSort } = {}) => {
     const params: Record<string, string | number> = {}
     if (filters.client_id) params.client_id = filters.client_id
     if (filters.status)    params.status = filters.status
     if (filters.page)      params.page = filters.page
     if (filters.per_page)  params.per_page = filters.per_page
+    if (filters.sort)      params.sort = filters.sort
     return api.get<RecurringListResponse>('/recurring', { params }).then(r => r.data)
   },
   get:    (id: number) => api.get<RecurringTemplate>(`/recurring/${id}`).then(r => r.data),
@@ -143,6 +174,9 @@ export const recurringApi = {
     api.delete<{ deleted: true }>(`/recurring/${id}`).then(r => r.data),
   pause:  (id: number) => api.post<RecurringTemplate>(`/recurring/${id}/pause`).then(r => r.data),
   resume: (id: number) => api.post<RecurringTemplate>(`/recurring/${id}/resume`).then(r => r.data),
-  runNow: (id: number, issueDate?: string) =>
-    api.post<RunNowResult>(`/recurring/${id}/run-now`, issueDate ? { issue_date: issueDate } : {}).then(r => r.data),
+  runNow: (id: number, issueDate?: string, draft = false) =>
+    api.post<RunNowResult>(`/recurring/${id}/run-now`, {
+      ...(issueDate ? { issue_date: issueDate } : {}),
+      ...(draft ? { draft: true } : {}),
+    }).then(r => r.data),
 }

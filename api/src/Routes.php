@@ -414,6 +414,9 @@ final class Routes
         $app->get  ('/api/bank-statements',                  [BankStatementAction::class, 'list']);
         $app->get  ('/api/bank-statements/{id:[0-9]+}',      [BankStatementAction::class, 'detail']);
         $app->get  ('/api/bank-statements/{id:[0-9]+}/download', [BankStatementAction::class, 'download']);
+        $app->post ('/api/bank-statements/{id:[0-9]+}/pdf',  [BankStatementAction::class, 'uploadPdf']);
+        $app->get  ('/api/bank-statements/{id:[0-9]+}/pdf',  [BankStatementAction::class, 'downloadPdf']);
+        $app->delete('/api/bank-statements/{id:[0-9]+}/pdf', [BankStatementAction::class, 'deletePdf']);
         $app->delete('/api/bank-statements/{id:[0-9]+}',     [BankStatementAction::class, 'delete']);
         $app->post ('/api/bank-statements/{id:[0-9]+}/rematch', [BankStatementAction::class, 'rematch']);
         $app->get  ('/api/bank-transactions/{id:[0-9]+}/match-candidates', [BankStatementAction::class, 'matchCandidates']);
