@@ -88,8 +88,11 @@ final class PdfBranding
         return "\n/* ─── Branding override (per-supplier accent color) ─── */\n"
             . ".head { border-bottom-color: {$color}; }\n"
             . ".brand-name, .doc-type { color: {$color}; }\n"
-            . ".parties h2, td.meta-label, .bank-label, .qr-box .qr-label { color: {$color}; }\n"
-            . "table.items th { background: {$color}; }\n"
+            . ".parties h2, td.meta-label, .bank-label, .qr-box .qr-label, .sum-k { color: {$color}; }\n"
+            . ".summary-total { background: {$color}; }\n"
+            . ".thanks { color: {$color}; }\n"
+            // Lehká hlavička tabulky — barví se text + spodní linka (ne plná výplň).
+            . "table.items th { color: {$color}; border-bottom-color: {$color}; }\n"
             . "table.totals-table tr.grand td { background: {$color}; }\n"
             . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; background: {$bgSoft}; }\n"
             . "table.totals-table tr.subtotal td { border-top-color: {$lineSoft}; }\n"

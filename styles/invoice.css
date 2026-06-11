@@ -2,7 +2,7 @@
 /* @page se NEPOUŽÍVÁ — A4 + margins jsou nastaveny v Mpdf konstruktoru. */
 
 body {
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 10pt;
     color: #15131D;
     line-height: 1.4;
@@ -63,7 +63,8 @@ td.meta { width: 45%; text-align: right; }
     letter-spacing: -0.2pt;
 }
 .doc-type {
-    font-size: 11pt;
+    font-family: 'Inter SemiBold', sans-serif;
+    font-size: 13pt;
     font-weight: bold;
     color: #3B2D83;
     margin-bottom: 1mm;
@@ -106,12 +107,18 @@ td.meta { width: 45%; text-align: right; }
 .parties td {
     width: 50%;
     vertical-align: top;
-    padding: 4mm;
-    border: 0.5pt solid #E7E3EE;
-    background: #FBFAFD;
+    padding: 0 6mm 0 0;
+    border: none;
+    background: transparent;
+}
+/* Vzdušné sloupce (styl Websupport) — místo orámovaných boxů jen tenká dělící linka. */
+.parties td.party-right {
+    padding: 0 0 0 6mm;
+    border-left: 0.5pt solid #E7E3EE;
 }
 .parties h2 {
     margin: 0 0 4mm;
+    font-family: 'Inter SemiBold', sans-serif;
     font-size: 9pt;
     text-transform: uppercase;
     letter-spacing: 1pt;
@@ -162,6 +169,54 @@ td.meta-value {
 }
 td.meta-value.mono { font-family: 'DejaVu Sans Mono', monospace; }
 
+/* ─── SHRNUTÍ (klíčová data + hero celková částka, styl Websupport) ─── */
+.summary {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 5mm;
+}
+.summary-facts, .summary-total { vertical-align: middle; }
+.summary-facts { width: 60%; padding-right: 6mm; }
+.summary-dates { width: 100%; border-collapse: collapse; }
+.summary-dates td { vertical-align: top; padding-right: 7mm; }
+.sum-k {
+    font-family: 'Inter SemiBold', sans-serif;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.6pt;
+    color: #6753AE;
+    font-weight: bold;
+}
+.sum-v {
+    font-size: 11pt;
+    font-weight: bold;
+    color: #15131D;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+/* Hero celková částka — plná modrá plocha vpravo (přebarvuje branding accent). */
+.summary-total {
+    width: 40%;
+    background: #3B2D83;
+    padding: 4mm;
+    text-align: right;
+}
+.sum-total-k {
+    font-family: 'Inter SemiBold', sans-serif;
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.8pt;
+    color: #FFFFFF;
+    font-weight: bold;
+}
+.sum-total-v {
+    font-size: 16pt;
+    font-weight: bold;
+    color: #FFFFFF;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
 /* Univerzální — zákaz wrap pro číselné buňky */
 .nowrap { white-space: nowrap; }
 
@@ -179,15 +234,18 @@ table.items {
     margin-bottom: 5mm;
     font-size: 9pt;
 }
+/* Lehká hlavička tabulky (styl Websupport) — modrý text na modré lince, bez plné výplně. */
 table.items th {
-    background: #3B2D83;
-    color: #FFFFFF;
-    font-size: 8.5pt;
+    background: #FFFFFF;
+    color: #3B2D83;
+    font-family: 'Inter SemiBold', sans-serif;
+    font-size: 8pt;
     text-transform: uppercase;
-    letter-spacing: 0.5pt;
-    padding: 2.8mm 2.5mm;
+    letter-spacing: 0.6pt;
+    padding: 2.5mm 2.5mm;
     text-align: left;
     font-weight: 700;
+    border-bottom: 1.2pt solid #3B2D83;
 }
 table.items td {
     padding: 2.8mm 2.5mm;
@@ -374,6 +432,17 @@ table.bank-frame td {
     font-weight: 600;
 }
 
+/* Poděkování (styl Websupport) */
+.thanks {
+    margin-top: 7mm;
+    text-align: center;
+    font-family: 'Inter SemiBold', sans-serif;
+    font-size: 12pt;
+    font-weight: bold;
+    letter-spacing: 0.3pt;
+    color: #3B2D83;
+}
+
 /* Footer */
 .commercial-register {
     margin-top: 6mm;
@@ -381,7 +450,7 @@ table.bank-frame td {
     text-align: center;
     font-size: 8pt;
     color: #7A748C;
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'Inter', sans-serif;
 }
 .footer {
     margin-top: 6mm;
@@ -390,14 +459,14 @@ table.bank-frame td {
     text-align: center;
     font-size: 8pt;
     color: #A7A0BA;
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'Inter', sans-serif;
 }
 /* mPDF htmlpagefooter — attribution na patě KAŽDÉ stránky */
 .page-attribution {
     text-align: center;
     font-size: 7pt;
     color: #C5BFD3;
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'Inter', sans-serif;
 }
 .page-attribution a {
     color: #A7A0BA;
