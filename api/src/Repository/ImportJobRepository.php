@@ -82,6 +82,15 @@ final class ImportJobRepository
         return $row === false ? null : $this->cast($row);
     }
 
+    /** Worker kontext — načte job napříč tenanty (supplier_id je v řádku). */
+    public function findById(int $id): ?array
+    {
+        $stmt = $this->db->pdo()->prepare('SELECT * FROM import_jobs WHERE id = ?');
+        $stmt->execute([$id]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row === false ? null : $this->cast($row);
+    }
+
     /**
      * List jobs pro tenant.
      *
@@ -167,6 +176,17 @@ final class ImportJobRepository
         $this->db->pdo()->prepare(
             'UPDATE import_jobs SET log_text = CONCAT(COALESCE(log_text, ""), ?) WHERE id = ?'
         )->execute([$entry, $id]);
+    }
+
+    /**
+     * Ulož výsledný soubor jobu (jen export joby — result_path je relativní v rámci
+     * storage/monthly-exports). Import joby tohle nepoužívají.
+     */
+    public function setResult(int $id, string $relPath, string $name, int $size, string $mime): void
+    {
+        $this->db->pdo()->prepare(
+            'UPDATE import_jobs SET result_path = ?, result_name = ?, result_size = ?, result_mime = ? WHERE id = ?'
+        )->execute([$relPath, $name, $size, $mime, $id]);
     }
 
     public function markCompleted(int $id): void
@@ -256,6 +276,9 @@ final class ImportJobRepository
         $row['failed_count']  = (int) $row['failed_count'];
         $row['cancel_requested'] = (bool) $row['cancel_requested'];
         if ($row['total_items'] !== null) $row['total_items'] = (int) $row['total_items'];
+        if (array_key_exists('result_size', $row) && $row['result_size'] !== null) {
+            $row['result_size'] = (int) $row['result_size'];
+        }
         if ($row['params'] !== null) {
             $decoded = json_decode((string) $row['params'], true);
             $row['params'] = is_array($decoded) ? $decoded : null;

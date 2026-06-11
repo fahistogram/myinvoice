@@ -52,4 +52,55 @@ final class AccountNumberNormalizerTest extends TestCase
         self::assertTrue(AccountNumberNormalizer::equals('', ''));
         self::assertTrue(AccountNumberNormalizer::equals('0000', ''));
     }
+
+    // ── IBAN podpora (#109 — EUR účty evidované jen IBANem vs GPC výpis) ──
+
+    #[DataProvider('ibanAccountPartCases')]
+    public function testCzechIbanAccountPart(string $iban, ?string $expected): void
+    {
+        self::assertSame($expected, AccountNumberNormalizer::czechIbanAccountPart($iban));
+    }
+
+    /** @return iterable<string, array{string, ?string}> */
+    public static function ibanAccountPartCases(): iterable
+    {
+        yield 'CZ IBAN compact'   => ['CZ6508000000192000145399', '0000192000145399'];
+        yield 'CZ IBAN spaces'    => ['CZ65 0800 0000 1920 0014 5399', '0000192000145399'];
+        yield 'CZ IBAN lowercase' => ['cz6508000000192000145399', '0000192000145399'];
+        yield 'non-CZ IBAN'       => ['DE89370400440532013000', null];
+        yield 'plain account'     => ['192000145399', null];
+        yield 'too short'         => ['CZ650800019200014539', null];
+        yield 'empty'             => ['', null];
+    }
+
+    public function testCzechIbanBankCode(): void
+    {
+        self::assertSame('0800', AccountNumberNormalizer::czechIbanBankCode('CZ6508000000192000145399'));
+        self::assertSame('0800', AccountNumberNormalizer::czechIbanBankCode('CZ65 0800 0000 1920 0014 5399'));
+        self::assertNull(AccountNumberNormalizer::czechIbanBankCode('DE89370400440532013000'));
+        self::assertNull(AccountNumberNormalizer::czechIbanBankCode(''));
+    }
+
+    public function testMatchesAnyViaAccountNumber(): void
+    {
+        self::assertTrue(AccountNumberNormalizer::matchesAny('0000192000145399', '19-2000145399', null));
+    }
+
+    public function testMatchesAnyViaIbanOnly(): void
+    {
+        // EUR účet evidovaný jen IBANem — GPC výpis nese domácí číslo (#109).
+        self::assertTrue(AccountNumberNormalizer::matchesAny('0000192000145399', null, 'CZ6508000000192000145399'));
+        self::assertTrue(AccountNumberNormalizer::matchesAny('192000145399', '', 'CZ65 0800 0000 1920 0014 5399'));
+    }
+
+    public function testMatchesAnyIbanPastedIntoAccountNumberField(): void
+    {
+        self::assertTrue(AccountNumberNormalizer::matchesAny('0000192000145399', 'CZ6508000000192000145399', null));
+    }
+
+    public function testMatchesAnyRejectsDifferentAccount(): void
+    {
+        self::assertFalse(AccountNumberNormalizer::matchesAny('1000000005', '1000000006', 'CZ6508000000192000145399'));
+        self::assertFalse(AccountNumberNormalizer::matchesAny('1000000005', null, null));
+    }
 }

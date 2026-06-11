@@ -54,7 +54,7 @@ php api/bin/reset-2fa.php tvuj@email.cz
 ```
 
 Po resetu se přihlásíš jen s heslem a 2FA si znovu aktivuješ na novém telefonu.
-Detail viz [§ 20.2.3](20_Bezpecnost.md).
+Detail viz [§ 37.2.3](37_Bezpecnost.md).
 
 Pokud nemáš shell přístup ke kontejneru/serveru, použij legacy SQL fallback:
 
@@ -64,7 +64,7 @@ UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE email = 'tvuj@email.
 
 ### Varování `secret_encryption_key` (špatná délka klíče)
 
-Od v3.1.0 backend vrací v `GET /api/health` pole `warnings[]` a admin vidí
+Backend vrací v `GET /api/health` pole `warnings[]` a admin vidí
 upozornění i v UI (**Systém → Aktualizace**), pokud je problém s
 `app.secret_encryption_key` (typicky omyl: 24B místo 32B).
 
@@ -129,7 +129,7 @@ v názvu firmy), použij **Editovat (force)** s admin rolí.
 
 ### DKIM podpis se nedaří aktivovat
 
-1. Vygeneruj klíče: viz [20. Bezpečnost § 20.8](20_Bezpecnost.md).
+1. Vygeneruj klíče: viz [37. Bezpečnost § 37.8](37_Bezpecnost.md).
 2. Publikuj DNS TXT — počkej 5–60 minut na propagaci.
 3. Ověř DKIM přes [mxtoolbox.com](https://mxtoolbox.com/dkim.aspx).
 4. Až DNS funguje, zapni v `cfg.php → smtp.dkim.enabled => true`.

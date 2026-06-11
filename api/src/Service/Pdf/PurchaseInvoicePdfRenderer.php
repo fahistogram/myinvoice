@@ -57,15 +57,31 @@ final class PurchaseInvoicePdfRenderer
             'with_vat'    => $invoice['total_with_vat'] ?? 0,
         ];
 
+        // Režim „ceny s DPH": unit_price_without_vat nese BRUTTO (kvůli haléřově přesnému
+        // výpočtu DPH koeficientem). Jednotkovou cenu zobrazujeme vždy jako NETTO (dopočtenou
+        // z řádkového základu), ale řádkový SOUČET ukazujeme S DPH — řádek je tak standardní
+        // (cena/j bez DPH + sazba + celkem s DPH) a odráží, že jde o doklad s cenami vč. DPH.
+        $pricesIncludeVat = !empty($invoice['prices_include_vat']);
+
         // Map items na shape co Twig očekává
-        $itemsNorm = array_map(fn ($it) => [
-            'description'            => $it['description'] ?? '',
-            'quantity'               => (float) ($it['quantity'] ?? 1),
-            'unit'                   => $it['unit'] ?? 'ks',
-            'unit_price_without_vat' => (float) ($it['unit_price_without_vat'] ?? 0),
-            'vat_rate'               => (float) ($it['vat_rate_snapshot'] ?? $it['vat_rate'] ?? 0),
-            'total_without_vat'      => (float) ($it['total_without_vat'] ?? 0),
-        ], $items);
+        $itemsNorm = array_map(function ($it) use ($pricesIncludeVat) {
+            $qty   = (float) ($it['quantity'] ?? 1);
+            $base  = (float) ($it['total_without_vat'] ?? 0);
+            $gross = (float) ($it['total_with_vat'] ?? 0);
+            $rawUnit = (float) ($it['unit_price_without_vat'] ?? 0); // v režimu s DPH = brutto/ks
+            $unitNet = ($pricesIncludeVat && $qty != 0.0) ? round($base / $qty, 2) : $rawUnit;
+            return [
+                'description'            => $it['description'] ?? '',
+                'quantity'               => $qty,
+                'unit'                   => $it['unit'] ?? 'ks',
+                'unit_price_without_vat' => $unitNet, // vždy netto
+                'vat_rate'               => (float) ($it['vat_rate_snapshot'] ?? $it['vat_rate'] ?? 0),
+                'total_without_vat'      => $base,
+                'total_with_vat'         => $gross,
+                // Řádkový součet zobrazovaný na dokladu (s DPH → brutto, jinak netto).
+                'line_total'             => $pricesIncludeVat ? $gross : $base,
+            ];
+        }, $items);
 
         $locale = $invoice['language'] ?? 'cs';
         $docTypeLabel = $this->docTypeLabel($invoice['document_kind'] ?? 'invoice', $locale);
@@ -92,7 +108,7 @@ final class PurchaseInvoicePdfRenderer
             'margin_top' => 15,
             'margin_bottom' => 18,
             'default_font' => 'dejavusans',
-            'tempDir' => Bootstrap::rootDir() . '/storage/mpdf-temp',
+            'tempDir' => \MyInvoice\Infrastructure\Config\RuntimePaths::storage('mpdf-temp'),
         ]);
         $mpdf->SetTitle(($docTypeLabel ?: 'Faktura') . ' ' . ($invoice['vendor_invoice_number'] ?? '#' . $invoice['id']));
         $mpdf->SetCreator('MyInvoice.cz');

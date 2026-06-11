@@ -35,8 +35,9 @@ final class ProjectRepository
     {
         $stmt = $this->db->pdo()->prepare(
             'SELECT p.id, p.name, p.status, p.currency_id, cur.code AS currency,
-                    p.hourly_rate, p.payment_due_days, p.project_number,
-                    p.contract_number, p.budget_total, p.budget_yearly, p.budget_monthly, p.archived_at
+                    p.hourly_rate, p.payment_due_days, p.payment_due_unit, p.project_number,
+                    p.contract_number, p.budget_total, p.budget_yearly, p.budget_monthly,
+                    p.default_revenue_category_id, p.billing_emails_mode, p.archived_at
                FROM projects p
                JOIN currencies cur ON cur.id = p.currency_id
               WHERE p.client_id = ?
@@ -136,15 +137,16 @@ final class ProjectRepository
         $pdo->beginTransaction();
         try {
             $sql = 'INSERT INTO projects
-                (client_id, name, payment_due_days, project_number, contract_number,
+                (client_id, name, payment_due_days, payment_due_unit, project_number, contract_number,
                  budget_total, budget_yearly, budget_monthly, hourly_rate, currency_id, status,
-                 requires_work_report_approval, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+                 requires_work_report_approval, note, default_revenue_category_id, billing_emails_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
             $stmt = $pdo->prepare($sql);
             $stmt->execute([
                 $clientId,
                 (string) $data['name'],
                 (int) ($data['payment_due_days'] ?? 7),
+                $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
                 $this->nullable($data, 'project_number'),
                 $this->nullable($data, 'contract_number'),
                 $this->nullableNumber($data, 'budget_total'),
@@ -155,6 +157,8 @@ final class ProjectRepository
                 (string) ($data['status'] ?? 'active'),
                 !empty($data['requires_work_report_approval']) ? 1 : 0,
                 $this->nullable($data, 'note'),
+                $this->resolveRevenueCategoryId($data, $supplierId),
+                $this->billingEmailsMode($data),
             ]);
             $id = (int) $pdo->lastInsertId();
 
@@ -168,25 +172,40 @@ final class ProjectRepository
         }
     }
 
-    public function update(int $id, array $data): void
+    /**
+     * Vrací počet vydaných faktur, do kterých byla doplněna výchozí kategorie tržby
+     * (backfill při nastavení/změně default_revenue_category_id). 0 = žádný backfill.
+     */
+    public function update(int $id, array $data): int
     {
         $pdo = $this->db->pdo();
-        // Supplier lookup pro currency scope (přes client projektu — nemění se)
-        $stmt = $pdo->prepare('SELECT c.supplier_id FROM projects p JOIN clients c ON c.id = p.client_id WHERE p.id = ?');
+        // Supplier lookup pro currency scope + aktuální default kategorie tržby (přes client projektu — nemění se)
+        $stmt = $pdo->prepare('SELECT c.supplier_id, p.default_revenue_category_id
+                                 FROM projects p JOIN clients c ON c.id = p.client_id WHERE p.id = ?');
         $stmt->execute([$id]);
-        $supplierId = (int) $stmt->fetchColumn();
+        $cur = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $supplierId = (int) ($cur['supplier_id'] ?? 0);
+        $oldDefaultRevenueCategory = ($cur['default_revenue_category_id'] ?? null) !== null
+            ? (int) $cur['default_revenue_category_id']
+            : null;
+        // Pokud klíč v payloadu chybí, zachovat aktuální (BC).
+        $newDefaultRevenueCategory = array_key_exists('default_revenue_category_id', $data)
+            ? $this->resolveRevenueCategoryId($data, $supplierId)
+            : $oldDefaultRevenueCategory;
 
         $pdo->beginTransaction();
         try {
             $sql = 'UPDATE projects SET
-                    name = ?, payment_due_days = ?, project_number = ?, contract_number = ?,
+                    name = ?, payment_due_days = ?, payment_due_unit = ?, project_number = ?, contract_number = ?,
                     budget_total = ?, budget_yearly = ?, budget_monthly = ?, hourly_rate = ?,
-                    currency_id = ?, status = ?, requires_work_report_approval = ?, note = ?
+                    currency_id = ?, status = ?, requires_work_report_approval = ?, note = ?,
+                    default_revenue_category_id = ?, billing_emails_mode = ?
                     WHERE id = ?';
             $stmt = $pdo->prepare($sql);
             $stmt->execute([
                 (string) $data['name'],
                 (int) ($data['payment_due_days'] ?? 7),
+                $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
                 $this->nullable($data, 'project_number'),
                 $this->nullable($data, 'contract_number'),
                 $this->nullableNumber($data, 'budget_total'),
@@ -197,12 +216,27 @@ final class ProjectRepository
                 (string) ($data['status'] ?? 'active'),
                 !empty($data['requires_work_report_approval']) ? 1 : 0,
                 $this->nullable($data, 'note'),
+                $newDefaultRevenueCategory,
+                $this->billingEmailsMode($data),
                 $id,
             ]);
 
             $this->saveBillingEmails($id, $data['billing_emails'] ?? []);
 
+            // Backfill: doplnit nově nastavenou kategorii do vydaných faktur zakázky,
+            // které kategorii nemají vyplněnou (revenue_category_id IS NULL).
+            $backfilled = 0;
+            if ($newDefaultRevenueCategory !== null && $newDefaultRevenueCategory !== $oldDefaultRevenueCategory) {
+                $bf = $pdo->prepare(
+                    'UPDATE invoices SET revenue_category_id = ?
+                      WHERE project_id = ? AND revenue_category_id IS NULL'
+                );
+                $bf->execute([$newDefaultRevenueCategory, $id]);
+                $backfilled = $bf->rowCount();
+            }
+
             $pdo->commit();
+            return $backfilled;
         } catch (\Throwable $e) {
             $pdo->rollBack();
             throw $e;
@@ -217,7 +251,7 @@ final class ProjectRepository
     public function billingEmailsFor(int $projectId): array
     {
         $stmt = $this->db->pdo()->prepare(
-            'SELECT position, email, label FROM project_billing_emails WHERE project_id = ? ORDER BY position'
+            'SELECT position, email, label, usages FROM project_billing_emails WHERE project_id = ? ORDER BY position'
         );
         $stmt->execute([$projectId]);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -225,6 +259,7 @@ final class ProjectRepository
             'position' => (int) $r['position'],
             'email'    => $r['email'],
             'label'    => $r['label'],
+            'usages'   => $this->decodeUsages($r['usages'] ?? null),
         ], $rows);
     }
 
@@ -237,7 +272,7 @@ final class ProjectRepository
         if (!$projectIds) return [];
         $placeholders = implode(',', array_fill(0, count($projectIds), '?'));
         $stmt = $this->db->pdo()->prepare(
-            "SELECT project_id, position, email, label
+            "SELECT project_id, position, email, label, usages
                FROM project_billing_emails
               WHERE project_id IN ($placeholders)
               ORDER BY project_id, position"
@@ -250,9 +285,24 @@ final class ProjectRepository
                 'position' => (int) $r['position'],
                 'email'    => $r['email'],
                 'label'    => $r['label'],
+                'usages'   => $this->decodeUsages($r['usages'] ?? null),
             ];
         }
         return $out;
+    }
+
+    /**
+     * Účely e-mailu zakázky (#86): NULL = všechny typy zpráv (default).
+     * V API reprezentujeme NULL — frontend zobrazí vše zaškrtnuté.
+     *
+     * @return list<string>|null
+     */
+    private function decodeUsages(mixed $raw): ?array
+    {
+        if ($raw === null || $raw === '') return null;
+        $decoded = json_decode((string) $raw, true);
+        if (!is_array($decoded) || $decoded === []) return null;
+        return array_values(array_filter(array_map('strval', $decoded), static fn ($u) => $u !== ''));
     }
 
     private function saveBillingEmails(int $projectId, array $emails): void
@@ -261,8 +311,9 @@ final class ProjectRepository
         $pdo->prepare('DELETE FROM project_billing_emails WHERE project_id = ?')->execute([$projectId]);
 
         $stmt = $pdo->prepare(
-            'INSERT INTO project_billing_emails (project_id, position, email, label) VALUES (?, ?, ?, ?)'
+            'INSERT INTO project_billing_emails (project_id, position, email, label, usages) VALUES (?, ?, ?, ?, ?)'
         );
+        $validUsages = ['documents', 'reminders', 'approvals'];
         foreach ($emails as $entry) {
             if (!is_array($entry)) continue;
             $email = trim((string) ($entry['email'] ?? ''));
@@ -270,7 +321,18 @@ final class ProjectRepository
             if ($email === '' || $position < 1 || $position > 3) continue;
             if (!filter_var($email, FILTER_VALIDATE_EMAIL)) continue;
             $label = trim((string) ($entry['label'] ?? '')) ?: null;
-            $stmt->execute([$projectId, $position, $email, $label]);
+            // Účely (#86): pole stringů; NULL / prázdné / všechny tři = NULL (všechny typy).
+            $usages = null;
+            if (isset($entry['usages']) && is_array($entry['usages'])) {
+                $filtered = array_values(array_unique(array_filter(
+                    array_map(static fn ($u) => trim((string) $u), $entry['usages']),
+                    static fn ($u) => in_array($u, $validUsages, true),
+                )));
+                if ($filtered !== [] && count($filtered) < count($validUsages)) {
+                    $usages = json_encode($filtered, JSON_UNESCAPED_UNICODE);
+                }
+            }
+            $stmt->execute([$projectId, $position, $email, $label, $usages]);
         }
     }
 
@@ -296,7 +358,37 @@ final class ProjectRepository
         if (array_key_exists('last_invoice_date', $row)) {
             $row['last_invoice_date'] = $row['last_invoice_date'] ?: null;
         }
+        if (array_key_exists('default_revenue_category_id', $row)) {
+            $row['default_revenue_category_id'] = $row['default_revenue_category_id'] !== null
+                ? (int) $row['default_revenue_category_id']
+                : null;
+        }
         return $row;
+    }
+
+    /**
+     * Validace výchozí kategorie tržby z payloadu. Vrací int id nebo null.
+     * NULL / 0 / prázdné → null. Jinak ověří, že kategorie patří danému tenantovi.
+     * Symetrie k ClientRepository::resolveRevenueCategoryId.
+     */
+    private function resolveRevenueCategoryId(array $data, int $supplierId): ?int
+    {
+        if (!array_key_exists('default_revenue_category_id', $data)) {
+            return null;
+        }
+        $raw = $data['default_revenue_category_id'];
+        if ($raw === null || $raw === '' || (int) $raw === 0) {
+            return null;
+        }
+        $catId = (int) $raw;
+        $check = $this->db->pdo()->prepare(
+            'SELECT 1 FROM revenue_categories WHERE id = ? AND supplier_id = ?'
+        );
+        $check->execute([$catId, $supplierId]);
+        if (!$check->fetchColumn()) {
+            throw new \InvalidArgumentException("Kategorie tržby #$catId nepatří tomuto tenantovi.");
+        }
+        return $catId;
     }
 
     /**
@@ -340,5 +432,30 @@ final class ProjectRepository
         $v = $data[$key] ?? null;
         if ($v === null || $v === '') return null;
         return (float) $v;
+    }
+
+    /** Splatnost zakázky unit. NULL = dny (BC). Validuje 'days'|'month'. */
+    private function nullablePaymentDueUnit(array $data, string $key): ?string
+    {
+        $v = $this->nullable($data, $key);
+        if ($v === null) return null;
+        if (!in_array($v, ['days', 'month'], true)) {
+            throw new \InvalidArgumentException("{$key} musí být 'days' nebo 'month'.");
+        }
+        return $v;
+    }
+
+    /**
+     * Režim kombinace e-mailů zakázky s kontakty klienta (#86).
+     * Default 'auto' = dosavadní per-typ chování (viz RecipientResolver).
+     */
+    private function billingEmailsMode(array $data): string
+    {
+        $v = trim((string) ($data['billing_emails_mode'] ?? 'auto'));
+        if ($v === '') return 'auto';
+        if (!in_array($v, ['auto', 'append', 'replace'], true)) {
+            throw new \InvalidArgumentException("billing_emails_mode musí být 'auto', 'append' nebo 'replace'.");
+        }
+        return $v;
     }
 }

@@ -142,6 +142,25 @@ final class IncomeTaxVatBaseTest extends TestCase
             $expectedGrossRevenue - $expectedGrossCosts, $non['profit_orientacni'], 0.01);
     }
 
+    /**
+     * Daňově neuznatelný náklad (tax_deductible=0, např. reprezentace) se NEzahrne
+     * do nákladů v dani z příjmů. Nezávislé na DPH.
+     */
+    public function testNonDeductibleCostExcludedFromIncomeTax(): void
+    {
+        $this->customerId = $this->client('Odběratel ND', customer: true);
+        $this->vendorId   = $this->client('Dodavatel ND', vendor: true);
+        $d = fn (int $m) => sprintf('%04d-%02d-15', self::YEAR, $m);
+
+        $this->purchase('P-2098-10', $this->vendorId, $d(3), [[30000, 6300, 21]]);                       // uznatelný
+        $this->purchase('P-2098-11', $this->vendorId, $d(4), [[5000, 1050, 21]], taxDeductible: false);  // neuznatelný
+
+        $this->setVatPayer(true);
+        $sum = $this->builder->build($this->supplierId, self::YEAR, 'fo')['summary'];
+        $this->assertEqualsWithDelta(30000.0, $sum['costs_orientacni'], 0.01,
+            'Daňově neuznatelný náklad (tax_deductible=0) se nezahrne do nákladů daně z příjmů');
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private function setVatPayer(bool $payer): void
@@ -194,19 +213,19 @@ final class IncomeTaxVatBaseTest extends TestCase
     /**
      * @param list<array{0:float,1:float,2:float}> $items [base, vat, vat_rate_snapshot]
      */
-    private function purchase(string $number, int $vendorId, string $date, array $items): void
+    private function purchase(string $number, int $vendorId, string $date, array $items, bool $taxDeductible = true): void
     {
         [$base, $vat, $with] = $this->sumItems($items);
         $stmt = $this->db->pdo()->prepare(
             'INSERT INTO purchase_invoices
                 (supplier_id, vendor_id, vendor_invoice_number, document_kind, issue_date, tax_date,
                  due_date, received_at, currency_id, reverse_charge, vendor_snapshot,
-                 total_without_vat, total_vat, total_with_vat, status, created_by)
-             VALUES (?, ?, ?, "invoice", ?, ?, ?, ?, ?, 0, "{}", ?, ?, ?, "received", ?)'
+                 total_without_vat, total_vat, total_with_vat, status, tax_deductible, created_by)
+             VALUES (?, ?, ?, "invoice", ?, ?, ?, ?, ?, 0, "{}", ?, ?, ?, "received", ?, ?)'
         );
         $stmt->execute([
             $this->supplierId, $vendorId, $number, $date, $date, $date, $date,
-            $this->currencyId, $base, $vat, $with, $this->userId,
+            $this->currencyId, $base, $vat, $with, $taxDeductible ? 1 : 0, $this->userId,
         ]);
         $id = (int) $this->db->pdo()->lastInsertId();
         $this->purchaseIds[] = $id;

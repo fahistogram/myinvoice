@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace MyInvoice;
 
 use MyInvoice\Action\AresVies\AresLookupAction;
+use MyInvoice\Action\AresVies\CrpDphLookupAction;
 use MyInvoice\Action\AresVies\ViesLookupAction;
 use MyInvoice\Action\Auth\ChangePasswordAction;
 use MyInvoice\Action\Client\ArchiveClientAction;
 use MyInvoice\Action\Client\CreateClientAction;
 use MyInvoice\Action\Client\DeleteClientAction;
 use MyInvoice\Action\Client\GetClientAction;
+use MyInvoice\Action\Client\ClientVatStatusAction;
 use MyInvoice\Action\Client\ListClientsAction;
 use MyInvoice\Action\Client\UpdateClientAction;
 use MyInvoice\Action\Codebook\CodebookAction;
@@ -35,17 +37,24 @@ use MyInvoice\Action\Crm\CrmDashboardAction;
 use MyInvoice\Action\Report\DphPriznaniAction;
 use MyInvoice\Action\Report\KontrolniHlaseniAction;
 use MyInvoice\Action\Report\DphBookAction;
+use MyInvoice\Action\Report\MonthlyExportAction;
 use MyInvoice\Action\Report\SouhrnneHlaseniAction;
 use MyInvoice\Action\Report\IncomeTaxAction;
 use MyInvoice\Action\Admin\InvoicesZipAction;
 use MyInvoice\Action\Admin\CronJobsAction;
 use MyInvoice\Action\Admin\RunCronJobAction;
 use MyInvoice\Action\Admin\ListActivityLogAction;
+use MyInvoice\Action\Admin\ListSentEmailsAction;
 use MyInvoice\Action\Admin\UserAdminAction;
 use MyInvoice\Action\Settings\EmailBrandingAction;
+use MyInvoice\Action\Settings\PdfSigningDiagnosticsAction;
 use MyInvoice\Action\Settings\SettingsAction;
+use MyInvoice\Action\Settings\SignatureDocumentSelectionAction;
+use MyInvoice\Action\Settings\SigningProfilesAction;
+use MyInvoice\Action\Bank\BankEmailNoticeAction;
 use MyInvoice\Action\Bank\BankStatementAction;
 use MyInvoice\Action\Dashboard\SummaryAction;
+use MyInvoice\Action\Dashboard\PurchaseSummaryAction;
 use MyInvoice\Action\Invoice\CancelInvoiceAction;
 use MyInvoice\Action\Invoice\CreateInvoiceAction;
 use MyInvoice\Action\Invoice\DeleteInvoiceAction;
@@ -59,15 +68,21 @@ use MyInvoice\Action\Invoice\MarkPaidAction;
 use MyInvoice\Action\Invoice\UnmarkPaidAction;
 use MyInvoice\Action\Invoice\BulkReissueAction;
 use MyInvoice\Action\Invoice\CloneInvoiceAction;
+use MyInvoice\Action\PurchaseInvoice\AdvanceCandidatesAction;
+use MyInvoice\Action\PurchaseInvoice\SettlementCandidatesAction;
 use MyInvoice\Action\PurchaseInvoice\CreatePurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\DeletePurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\DeletePurchaseInvoicePdfAction;
+use MyInvoice\Action\PurchaseInvoice\DismissAdvanceSuggestionAction;
 use MyInvoice\Action\PurchaseInvoice\DismissExtractionWarningAction;
+use MyInvoice\Action\PurchaseInvoice\LinkAdvancePurchaseInvoiceAction;
+use MyInvoice\Action\PurchaseInvoice\UnlinkAdvancePurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\DownloadPurchaseInvoicePdfAction;
 use MyInvoice\Action\PurchaseInvoice\OurPdfPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\GetPurchaseInvoiceAction;
+use MyInvoice\Action\PurchaseInvoice\PaymentQrAction;
 use MyInvoice\Action\PurchaseInvoice\ListPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\PurchaseInvoiceActivityAction;
 use MyInvoice\Action\PurchaseInvoice\ScanInboxAction;
@@ -78,6 +93,10 @@ use MyInvoice\Action\PurchaseInvoice\UpdatePurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\UploadPurchaseInvoicePdfAction;
 use MyInvoice\Action\Recurring\RecurringTemplateAction;
 use MyInvoice\Action\Invoice\IssueFinalFromProformaAction;
+use MyInvoice\Action\Invoice\AdvanceCandidatesAction as InvoiceAdvanceCandidatesAction;
+use MyInvoice\Action\Invoice\FinalCandidatesAction;
+use MyInvoice\Action\Invoice\LinkAdvanceAction as LinkInvoiceAdvanceAction;
+use MyInvoice\Action\Invoice\UnlinkAdvanceAction as UnlinkInvoiceAdvanceAction;
 use MyInvoice\Action\Invoice\PdfAction;
 use MyInvoice\Action\Invoice\ListPdfsAction;
 use MyInvoice\Action\Invoice\DownloadArchivedPdfAction;
@@ -85,6 +104,7 @@ use MyInvoice\Action\Invoice\Attachment\ListAttachmentsAction;
 use MyInvoice\Action\Invoice\Attachment\UploadAttachmentAction;
 use MyInvoice\Action\Invoice\Attachment\DeleteAttachmentAction;
 use MyInvoice\Action\Invoice\Attachment\DownloadAttachmentAction;
+use MyInvoice\Action\Invoice\GetRecipientsAction;
 use MyInvoice\Action\Invoice\SendEmailAction;
 use MyInvoice\Action\Invoice\SendReminderAction;
 use MyInvoice\Action\Invoice\BulkSendRemindersAction;
@@ -109,12 +129,19 @@ use MyInvoice\Action\Auth\MeAction;
 use MyInvoice\Action\Auth\ResetPasswordAction;
 use MyInvoice\Action\Auth\SetupAction;
 use MyInvoice\Action\Auth\SetupAresLookupAction;
+use MyInvoice\Action\Auth\SetupCrpDphLookupAction;
 use MyInvoice\Action\Auth\SetupSampleAction;
 use MyInvoice\Action\Auth\SetupStatusAction;
 use MyInvoice\Action\Auth\Tokens\CreateTokenAction;
 use MyInvoice\Action\Auth\Tokens\ListTokensAction;
 use MyInvoice\Action\Auth\Tokens\RevokeTokenAction;
 use MyInvoice\Action\Auth\TotpAction;
+use MyInvoice\Action\Document\FoldersAction;
+use MyInvoice\Action\Document\DocumentsAction;
+use MyInvoice\Action\Document\UploadDocumentAction;
+use MyInvoice\Action\Document\DocumentFileAction;
+use MyInvoice\Action\Document\LinkSearchAction;
+use MyInvoice\Action\Document\DocumentJobsAction;
 use MyInvoice\Action\System\HealthAction;
 use MyInvoice\Action\System\OpenApiAction;
 use MyInvoice\Action\System\VersionAction;
@@ -137,11 +164,13 @@ final class Routes
         $app->get  ('/api/admin/update/status',  [UpdateAction::class, 'status']);
         $app->post ('/api/admin/update/refresh', [UpdateAction::class, 'refresh']);
         $app->post ('/api/admin/update/trigger', [UpdateAction::class, 'trigger']);
+        $app->post ('/api/admin/update/cancel',  [UpdateAction::class, 'cancel']);
 
         $app->group('/api/auth', function ($g) {
             $g->get ('/setup-status',    SetupStatusAction::class);
             $g->post('/setup',           SetupAction::class);
             $g->post('/setup-ares-lookup', SetupAresLookupAction::class);  // public ARES proxy během setup wizardu
+            $g->post('/setup-crpdph-lookup', SetupCrpDphLookupAction::class);  // public proxy do registru plátců DPH (účty z DIČ)
             $g->post('/setup-sample',    SetupSampleAction::class);         // public sample data generator (jen pokud nejsou data)
             $g->post('/login',           LoginAction::class);
             $g->post('/logout',          LogoutAction::class);
@@ -163,6 +192,10 @@ final class Routes
         // ARES + VIES lookups (vyžadují auth)
         $app->post('/api/clients/lookup-ares', AresLookupAction::class);
         $app->post('/api/clients/lookup-vies', ViesLookupAction::class);
+        $app->post('/api/clients/lookup-bank', CrpDphLookupAction::class);  // účty z DIČ přes registr plátců DPH
+
+        // Globální vyhledávač pro sidebar (klienti/dodavatelé + vydané/přijaté faktury)
+        $app->get('/api/search', \MyInvoice\Action\Search\GlobalSearchAction::class);
 
         // Codebooks
         $app->get('/api/codebooks/countries',  [CodebookAction::class, 'countries']);
@@ -178,6 +211,17 @@ final class Routes
         $app->put   ('/api/expense-categories/{id:[0-9]+}',      [\MyInvoice\Action\Codebook\ExpenseCategoriesAction::class, 'update']);
         $app->delete('/api/expense-categories/{id:[0-9]+}',      [\MyInvoice\Action\Codebook\ExpenseCategoriesAction::class, 'delete']);
 
+        // Revenue categories (pro rozpad tržeb v CRM dashboardu + Stats)
+        $app->get   ('/api/revenue-categories',                  [\MyInvoice\Action\Codebook\RevenueCategoriesAction::class, 'list']);
+        $app->post  ('/api/revenue-categories',                  [\MyInvoice\Action\Codebook\RevenueCategoriesAction::class, 'create']);
+        $app->put   ('/api/revenue-categories/{id:[0-9]+}',      [\MyInvoice\Action\Codebook\RevenueCategoriesAction::class, 'update']);
+        $app->delete('/api/revenue-categories/{id:[0-9]+}',      [\MyInvoice\Action\Codebook\RevenueCategoriesAction::class, 'delete']);
+
+        // Roční daňové konstanty (globální číselník, override defaultů z TaxConstants; migrace 0079)
+        $app->get   ('/api/codebooks/tax-constants',                [\MyInvoice\Action\Codebook\TaxConstantsAction::class, 'list']);
+        $app->put   ('/api/codebooks/tax-constants/{year:[0-9]+}',  [\MyInvoice\Action\Codebook\TaxConstantsAction::class, 'update']);
+        $app->delete('/api/codebooks/tax-constants/{year:[0-9]+}',  [\MyInvoice\Action\Codebook\TaxConstantsAction::class, 'reset']);
+
         // VAT klasifikační kódy (pro DPHDP3 + KH)
         $app->get   ('/api/vat-classifications',                 [\MyInvoice\Action\Codebook\VatClassificationsAction::class, 'list']);
         $app->post  ('/api/vat-classifications',                 [\MyInvoice\Action\Codebook\VatClassificationsAction::class, 'create']);
@@ -188,6 +232,7 @@ final class Routes
         $app->get   ('/api/clients',                 ListClientsAction::class);
         $app->post  ('/api/clients',                 CreateClientAction::class);
         $app->get   ('/api/clients/{id:[0-9]+}',     GetClientAction::class);
+        $app->get   ('/api/clients/{id:[0-9]+}/vat-status', ClientVatStatusAction::class);  // online ARES/VIES plátcovství
         $app->put   ('/api/clients/{id:[0-9]+}',     UpdateClientAction::class);
         $app->post  ('/api/clients/{id:[0-9]+}/archive',   ArchiveClientAction::class);
         $app->post  ('/api/clients/{id:[0-9]+}/unarchive', ArchiveClientAction::class);
@@ -223,14 +268,23 @@ final class Routes
         $app->post   ('/api/invoices/{id:[0-9]+}/attachments', UploadAttachmentAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/attachments/{attId:[0-9]+}', DownloadAttachmentAction::class);
         $app->delete ('/api/invoices/{id:[0-9]+}/attachments/{attId:[0-9]+}', DeleteAttachmentAction::class);
+        $app->get    ('/api/invoices/{id:[0-9]+}/recipients', GetRecipientsAction::class);  // #86 vyřešení příjemců pro modal
         $app->post   ('/api/invoices/{id:[0-9]+}/send',      SendEmailAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/send-test', SendTestEmailAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/reminder',  SendReminderAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/reminder-test', SendTestReminderAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/issue-final', IssueFinalFromProformaAction::class);
+        // Zpětné propojení daňového dokladu se zálohovou fakturou (proforma)
+        $app->get    ('/api/invoices/{id:[0-9]+}/advance-candidates', InvoiceAdvanceCandidatesAction::class);
+        $app->get    ('/api/invoices/{id:[0-9]+}/final-candidates',   FinalCandidatesAction::class);
+        $app->post   ('/api/invoices/{id:[0-9]+}/link-advance',       LinkInvoiceAdvanceAction::class);
+        $app->delete ('/api/invoices/{id:[0-9]+}/link-advance',       UnlinkInvoiceAdvanceAction::class);
         $app->post   ('/api/invoices/bulk-reissue',          BulkReissueAction::class);
         $app->post   ('/api/invoices/bulk-reminder',         BulkSendRemindersAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/clone',     CloneInvoiceAction::class);
+        $app->get    ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'get']);
+        $app->put    ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'put']);
+        $app->delete ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'delete']);
 
         // Přijaté faktury (purchase invoices) — fáze 1 integrace forku.
         // Všechny chráněné AuthMiddleware + SupplierScopeMiddleware (skrz globální group).
@@ -246,6 +300,12 @@ final class Routes
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/exchange-rate', SetPurchaseInvoiceExchangeRateAction::class);
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/transition',     TransitionPurchaseInvoiceStatusAction::class);
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/dismiss-extraction-warning', DismissExtractionWarningAction::class);
+        // Propojení se zálohovou fakturou (advance) — proti dvojímu započtení nákladu
+        $app->get    ('/api/purchase-invoices/{id:[0-9]+}/advance-candidates', AdvanceCandidatesAction::class);
+        $app->get    ('/api/purchase-invoices/{id:[0-9]+}/settlement-candidates', SettlementCandidatesAction::class);
+        $app->post   ('/api/purchase-invoices/{id:[0-9]+}/link-advance',     LinkAdvancePurchaseInvoiceAction::class);
+        $app->delete ('/api/purchase-invoices/{id:[0-9]+}/link-advance',     UnlinkAdvancePurchaseInvoiceAction::class);
+        $app->delete ('/api/purchase-invoices/{id:[0-9]+}/advance-suggestion', DismissAdvanceSuggestionAction::class);
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/pdf',            UploadPurchaseInvoicePdfAction::class);
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/pdf',            DownloadPurchaseInvoicePdfAction::class);
         $app->delete ('/api/purchase-invoices/{id:[0-9]+}/pdf',            DeletePurchaseInvoicePdfAction::class);
@@ -254,6 +314,11 @@ final class Routes
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/isdoc',          [ExportPurchaseInvoiceAction::class, 'isdoc']);
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/pohoda',         [ExportPurchaseInvoiceAction::class, 'pohoda']);
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/activity',       PurchaseInvoiceActivityAction::class);
+        // „Zaplatit pomocí QR" — QR z uloženého účtu (GET, read), jednorázové lazy
+        // doplnění účtu z ISDOC/AI (POST, write), ruční editace účtu (PUT, write).
+        $app->get    ('/api/purchase-invoices/{id:[0-9]+}/payment-qr',     PaymentQrAction::class);
+        $app->post   ('/api/purchase-invoices/{id:[0-9]+}/payment-qr/extract-account', [PaymentQrAction::class, 'extractAccount']);
+        $app->put    ('/api/purchase-invoices/{id:[0-9]+}/payment-account', [PaymentQrAction::class, 'updateAccount']);
 
         // Pravidelné fakturace (recurring templates)
         $app->get    ('/api/recurring',                       [RecurringTemplateAction::class, 'list']);
@@ -281,14 +346,19 @@ final class Routes
         $app->post   ('/api/public/approval/{token:[a-f0-9]{32,128}}/decide',   PublicApprovalDecideAction::class);
 
         // Dashboard
-        $app->get ('/api/dashboard/summary',        SummaryAction::class);
+        $app->get ('/api/dashboard/summary',          SummaryAction::class);
+        $app->get ('/api/dashboard/purchase-summary', PurchaseSummaryAction::class);
 
         // Admin (M6)
         $app->get    ('/api/admin/activity-log',    ListActivityLogAction::class);
+        $app->get    ('/api/admin/sent-emails',     ListSentEmailsAction::class);
+        $app->get    ('/api/admin/smtp-log-analysis', \MyInvoice\Action\Admin\SmtpLogAnalysisAction::class);
+        $app->get    ('/api/admin/smtp-log-analysis/status', [\MyInvoice\Action\Admin\InvoiceSmtpLogAction::class, 'status']);
+        $app->get    ('/api/admin/invoices/{id:[0-9]+}/smtp-log', [\MyInvoice\Action\Admin\InvoiceSmtpLogAction::class, 'forInvoice']);
         $app->get    ('/api/admin/cron-jobs',       CronJobsAction::class);
         $app->post   ('/api/admin/cron-jobs/{script:cron-[a-z0-9-]+}/run', RunCronJobAction::class);
         $app->get    ('/api/admin/invoices-zip',    InvoicesZipAction::class);  // legacy — drží se kvůli historickým bookmark URL
-        $app->get    ('/api/admin/export',          ExportAction::class);       // generic export (?format=pdf-zip|isdoc|pohoda&month=YYYY-MM)
+        $app->get    ('/api/admin/export',          ExportAction::class);       // generic export (?format=pdf-zip|isdoc|pohoda|stereo&month=YYYY-MM nebo period=quarterly)
         $app->post   ('/api/admin/import',          ImportAction::class);       // import vystavených faktur z Pohoda XML / ISDOC (single nebo ZIP)
 
         // iDoklad API import (fáze 2a) — credentials + background job lifecycle
@@ -320,7 +390,10 @@ final class Routes
         $app->get    ('/api/crm/dso',               [CrmDashboardAction::class, 'dso']);
         $app->get    ('/api/crm/payment-punctuality', [CrmDashboardAction::class, 'punctuality']);
         $app->get    ('/api/crm/concentration',     [CrmDashboardAction::class, 'concentration']);
+        $app->get    ('/api/crm/vendor-concentration', [CrmDashboardAction::class, 'vendorConcentration']);
+        $app->get    ('/api/crm/dpo',               [CrmDashboardAction::class, 'dpo']);
         $app->get    ('/api/crm/expense-breakdown', [CrmDashboardAction::class, 'expenseBreakdown']);
+        $app->get    ('/api/crm/revenue-breakdown', [CrmDashboardAction::class, 'revenueBreakdown']);
         $app->get    ('/api/crm/churn-risk',        [CrmDashboardAction::class, 'churnRisk']);
         $app->get    ('/api/crm/action-items',      [CrmDashboardAction::class, 'actionItems']);
         $app->post   ('/api/crm/action-items/dismiss', [CrmDashboardAction::class, 'dismissActionItem']);
@@ -344,6 +417,15 @@ final class Routes
         // Kniha DPH (interní VAT žurnál — NE EPO podání, vždy měsíční)
         $app->get    ('/api/reports/dph-book/preview', [DphBookAction::class, 'preview']);
         $app->get    ('/api/reports/dph-book',         [DphBookAction::class, 'download']);
+        // Měsíční export — background job: jeden ZIP s vybranými exporty za měsíc
+        // (VF/PF PDF+ISDOC, výpisy PDF+GPC, Kniha DPH). Běží na pozadí (import_jobs).
+        $app->get    ('/api/reports/monthly-export/preview',                  [MonthlyExportAction::class, 'preview']);
+        $app->post   ('/api/reports/monthly-export/start',                    [MonthlyExportAction::class, 'start']);
+        $app->get    ('/api/reports/monthly-export/jobs',                     [MonthlyExportAction::class, 'list']);
+        $app->get    ('/api/reports/monthly-export/jobs/{id:[0-9]+}',          [MonthlyExportAction::class, 'jobStatus']);
+        $app->get    ('/api/reports/monthly-export/jobs/{id:[0-9]+}/download', [MonthlyExportAction::class, 'download']);
+        $app->post   ('/api/reports/monthly-export/jobs/{id:[0-9]+}/cancel',   [MonthlyExportAction::class, 'cancel']);
+        $app->delete ('/api/reports/monthly-export/jobs/{id:[0-9]+}',          [MonthlyExportAction::class, 'delete']);
         // Souhrnné hlášení DPHSHV (EU dodání, měsíční — podávají i identifikované osoby)
         $app->get    ('/api/reports/dphshv/preview',  [SouhrnneHlaseniAction::class, 'preview']);
         $app->get    ('/api/reports/dphshv',          [SouhrnneHlaseniAction::class, 'download']);
@@ -383,10 +465,44 @@ final class Routes
         // Settings (M6) — aktuální supplier (z X-Supplier-Id)
         $app->get ('/api/settings/supplier',                [SettingsAction::class, 'getSupplier']);
         $app->put ('/api/settings/supplier',                [SettingsAction::class, 'updateSupplier']);
+        $app->get    ('/api/settings/pdf-signing/diagnostics', PdfSigningDiagnosticsAction::class);
+        $app->get    ('/api/settings/pdf-signing',          [SigningProfilesAction::class, 'pdfSettings']);
+        $app->post   ('/api/settings/pdf-signing/test',     [SigningProfilesAction::class, 'testPdfSigning']);
+        $app->put    ('/api/settings/pdf-signing/output-settings/{output_type:[a-z_]+}', [SigningProfilesAction::class, 'updatePdfOutputSetting']);
+        $app->get    ('/api/settings/pdf-signing/user-defaults', [SigningProfilesAction::class, 'userDefaults']);
+        $app->put    ('/api/settings/pdf-signing/user-defaults/{output_type:[a-z_]+}', [SigningProfilesAction::class, 'updateUserDefault']);
+        $app->get    ('/api/settings/signing',              [SigningProfilesAction::class, 'settings']);
+        $app->put    ('/api/settings/signing',              [SigningProfilesAction::class, 'updateSettings']);
+        $app->get    ('/api/settings/signing/profiles',              [SigningProfilesAction::class, 'listProfiles']);
+        $app->post   ('/api/settings/signing/profiles',              [SigningProfilesAction::class, 'createProfile']);
+        $app->get    ('/api/settings/signing/profiles/{id:[0-9]+}/credentials/certificate', [SigningProfilesAction::class, 'credentialCertificate']);
+        $app->post   ('/api/settings/signing/profiles/{id:[0-9]+}/credentials/certificate', [SigningProfilesAction::class, 'uploadCredentialCertificate']);
+        $app->put    ('/api/settings/signing/profiles/{id:[0-9]+}/credentials/certificate', [SigningProfilesAction::class, 'updateCredentialCertificate']);
+        $app->delete ('/api/settings/signing/profiles/{id:[0-9]+}/credentials/certificate', [SigningProfilesAction::class, 'deleteCredentialCertificate']);
+        $app->get    ('/api/settings/signing/profiles/{id:[0-9]+}', [SigningProfilesAction::class, 'getProfile']);
+        $app->put    ('/api/settings/signing/profiles/{id:[0-9]+}', [SigningProfilesAction::class, 'updateProfile']);
+        $app->delete ('/api/settings/signing/profiles/{id:[0-9]+}', [SigningProfilesAction::class, 'deleteProfile']);
         $app->get    ('/api/settings/currencies',                     [SettingsAction::class, 'listCurrencies']);
         $app->post   ('/api/settings/currencies',                     [SettingsAction::class, 'createCurrency']);
         $app->put    ('/api/settings/currencies/{id:[0-9]+}',         [SettingsAction::class, 'updateCurrency']);
         $app->delete ('/api/settings/currencies/{id:[0-9]+}',         [SettingsAction::class, 'deleteCurrency']);
+        $app->get    ('/api/settings/bank-email-notices',             [BankEmailNoticeAction::class, 'overview']);
+        $app->put    ('/api/settings/bank-email-notices/imap',        [BankEmailNoticeAction::class, 'updateImap']);
+        $app->post   ('/api/settings/bank-email-notices/imap/test',   [BankEmailNoticeAction::class, 'testImap']);
+        $app->post   ('/api/settings/bank-email-notices/imap-accounts', [BankEmailNoticeAction::class, 'createImapAccount']);
+        $app->post   ('/api/settings/bank-email-notices/imap-accounts/folders', [BankEmailNoticeAction::class, 'browseImapFolders']);
+        $app->put    ('/api/settings/bank-email-notices/imap-accounts/{id:[0-9]+}', [BankEmailNoticeAction::class, 'updateImapAccount']);
+        $app->delete ('/api/settings/bank-email-notices/imap-accounts/{id:[0-9]+}', [BankEmailNoticeAction::class, 'deleteImapAccount']);
+        $app->post   ('/api/settings/bank-email-notices/imap-accounts/{id:[0-9]+}/test', [BankEmailNoticeAction::class, 'testImapAccount']);
+        $app->post   ('/api/settings/bank-email-notices/imap-accounts/{id:[0-9]+}/folders', [BankEmailNoticeAction::class, 'browseImapFolders']);
+        $app->post   ('/api/settings/bank-email-notices/providers',   [BankEmailNoticeAction::class, 'createProvider']);
+        $app->put    ('/api/settings/bank-email-notices/providers/{id:[0-9]+}', [BankEmailNoticeAction::class, 'updateProvider']);
+        $app->delete ('/api/settings/bank-email-notices/providers/{id:[0-9]+}', [BankEmailNoticeAction::class, 'deleteProvider']);
+        $app->put    ('/api/settings/bank-email-notices/mappings',    [BankEmailNoticeAction::class, 'updateMappings']);
+        $app->post   ('/api/settings/bank-email-notices/parser/test', [BankEmailNoticeAction::class, 'testParser']);
+        $app->post   ('/api/settings/bank-email-notices/scan',        [BankEmailNoticeAction::class, 'scan']);
+        $app->get    ('/api/settings/bank-email-notices/messages',    [BankEmailNoticeAction::class, 'messages']);
+        $app->delete ('/api/settings/bank-email-notices/messages/{id:[0-9]+}', [BankEmailNoticeAction::class, 'deleteMessage']);
 
         $app->get    ('/api/settings/vat-rates',                      [SettingsAction::class, 'listVatRates']);
         $app->post   ('/api/settings/vat-rates',                      [SettingsAction::class, 'createVatRate']);
@@ -408,6 +524,10 @@ final class Routes
         $app->put    ('/api/settings/units/{id:[0-9]+}',              [SettingsAction::class, 'updateUnit']);
         $app->delete ('/api/settings/units/{id:[0-9]+}',              [SettingsAction::class, 'deleteUnit']);
 
+        // Tax optimizer — daňový optimalizátor (srovnání režimů + predikce limitů)
+        $app->get ('/api/tax/analysis',  [\MyInvoice\Action\Tax\TaxAction::class, 'analysis']);
+        $app->put ('/api/tax/profile',   [\MyInvoice\Action\Tax\TaxAction::class, 'updateProfile']);
+
         // Bank statements (M5b)
         $app->post ('/api/bank-statements/upload',           [BankStatementAction::class, 'upload']);
         $app->post ('/api/bank-statements/scan',             [BankStatementAction::class, 'scan']);
@@ -424,6 +544,49 @@ final class Routes
         $app->post ('/api/bank-transactions/{id:[0-9]+}/unmatch', [BankStatementAction::class, 'unmatch']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/ignore',  [BankStatementAction::class, 'ignore']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/create-purchase-invoice', [BankStatementAction::class, 'createPurchaseInvoice']);
+
+        // Dokumenty (sekce Dokumenty — plán source/11)
+        // Specifické cesty PŘED {id:[0-9]+}, aby je fast-route nepohltil.
+        $app->get   ('/api/document-folders',                     [FoldersAction::class, 'list']);
+        $app->post  ('/api/document-folders',                     [FoldersAction::class, 'create']);
+        $app->patch ('/api/document-folders/{id:[0-9]+}',         [FoldersAction::class, 'rename']);
+        $app->post  ('/api/document-folders/{id:[0-9]+}/move',    [FoldersAction::class, 'move']);
+        $app->post  ('/api/document-folders/{id:[0-9]+}/restore', [FoldersAction::class, 'restore']);
+        $app->delete('/api/document-folders/{id:[0-9]+}',         [FoldersAction::class, 'delete']);
+
+        $app->get   ('/api/documents/search',         [DocumentsAction::class, 'search']);
+        $app->get   ('/api/documents/link-search',    LinkSearchAction::class);
+        // Background joby (rozbalení ZIP importu / ZIP export)
+        $app->post  ('/api/documents/zip-import',     [DocumentJobsAction::class, 'zipImport']);
+        $app->post  ('/api/documents/export',         [DocumentJobsAction::class, 'export']);
+        // Chunkovaný upload (obchází PHP post_max_size) — velký ZIP / složka / velký soubor
+        $app->post  ('/api/documents/upload/start',       [DocumentJobsAction::class, 'uploadStart']);
+        $app->post  ('/api/documents/upload/chunk-bytes', [DocumentJobsAction::class, 'uploadChunkBytes']);
+        $app->post  ('/api/documents/upload/chunk-files', [DocumentJobsAction::class, 'uploadChunkFiles']);
+        $app->post  ('/api/documents/upload/finish',      [DocumentJobsAction::class, 'uploadFinish']);
+        $app->get   ('/api/documents/jobs',           [DocumentJobsAction::class, 'list']);
+        $app->get   ('/api/documents/jobs/{id:[0-9]+}',          [DocumentJobsAction::class, 'status']);
+        $app->get   ('/api/documents/jobs/{id:[0-9]+}/download', [DocumentJobsAction::class, 'download']);
+        $app->post  ('/api/documents/jobs/{id:[0-9]+}/cancel',   [DocumentJobsAction::class, 'cancel']);
+        $app->delete('/api/documents/jobs/{id:[0-9]+}',          [DocumentJobsAction::class, 'delete']);
+        $app->get   ('/api/documents/tags',           [DocumentsAction::class, 'listTags']);
+        $app->get   ('/api/documents/trash',          [DocumentsAction::class, 'trash']);
+        $app->post  ('/api/documents/trash/empty',    [DocumentsAction::class, 'emptyTrash']);
+        $app->post  ('/api/documents/bulk',           [DocumentsAction::class, 'bulk']);
+        $app->get   ('/api/documents/bulk-download',  [DocumentFileAction::class, 'bulkDownload']);
+        $app->get   ('/api/documents/by-entity/{type:[a-z_]+}/{id:[0-9]+}', [DocumentsAction::class, 'byEntity']);
+        $app->get   ('/api/documents',                [DocumentsAction::class, 'list']);
+        $app->post  ('/api/documents',                UploadDocumentAction::class);
+        $app->get   ('/api/documents/{id:[0-9]+}',            [DocumentsAction::class, 'get']);
+        $app->patch ('/api/documents/{id:[0-9]+}',            [DocumentsAction::class, 'update']);
+        $app->post  ('/api/documents/{id:[0-9]+}/move',       [DocumentsAction::class, 'move']);
+        $app->post  ('/api/documents/{id:[0-9]+}/restore',    [DocumentsAction::class, 'restore']);
+        $app->post  ('/api/documents/{id:[0-9]+}/links',      [DocumentsAction::class, 'addLink']);
+        $app->delete('/api/documents/{id:[0-9]+}/links',      [DocumentsAction::class, 'removeLink']);
+        $app->delete('/api/documents/{id:[0-9]+}',            [DocumentsAction::class, 'delete']);
+        $app->get   ('/api/documents/{id:[0-9]+}/download',   [DocumentFileAction::class, 'download']);
+        $app->get   ('/api/documents/{id:[0-9]+}/preview',    [DocumentFileAction::class, 'preview']);
+        $app->get   ('/api/documents/{id:[0-9]+}/thumb',      [DocumentFileAction::class, 'thumb']);
 
         // 404 fallback pro /api/*
         $app->any('/api/{path:.*}', function ($req, $res) {

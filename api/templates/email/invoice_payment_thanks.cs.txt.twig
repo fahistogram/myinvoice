@@ -1,0 +1,21 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+{% if is_test %}[TEST] {% endif %}Děkujeme za úhradu
+------------
+
+{% if is_proforma %}Potvrzujeme přijetí zálohy k zálohové faktuře č. {{ invoice.varsymbol }}. Děkujeme!{% else %}Potvrzujeme přijetí úhrady faktury č. {{ invoice.varsymbol }}. Děkujeme!{% endif %}
+
+Variabilní symbol: {{ invoice.varsymbol }}
+Datum úhrady:      {{ paid_at|date('j.n.Y') }}
+{% if payment_method == 'card' %}Způsob platby:     platební karta
+{% elseif payment_method == 'cash' %}Způsob platby:     hotovost
+{% endif %}Uhrazeno:          {{ amount_paid|number_format(2, ',', ' ') }} {{ currency }} ✓
+{% if is_proforma %}
+>>> Záloha byla přijata. Navazující daňový doklad vám zašleme zvlášť podle dohody.
+{% endif %}
+{% if not is_test %}
+Vážíme si vaší platby i spolupráce.
+{% else %}
+=== TEST EMAIL — klient ho nedostal. ==={% endif %}
+{% endblock %}

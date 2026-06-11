@@ -30,4 +30,51 @@ final class AccountNumberNormalizer
     {
         return self::normalize($a) === self::normalize($b);
     }
+
+    /**
+     * Domácí část (předčíslí+číslo, 16 cifer) z českého IBANu — porovnatelná
+     * s GPC account_number. Vrací NULL, pokud vstup není validně tvarovaný CZ IBAN.
+     *
+     * CZ IBAN: CZkk BBBB PPPPPP NNNNNNNNNN (kontrolní 2, banka 4, předčíslí 6, číslo 10).
+     * Pozn.: kontrolní číslice neověřujeme — vstup je vlastní uložený účet, ne user input.
+     */
+    public static function czechIbanAccountPart(string $iban): ?string
+    {
+        $compact = strtoupper((string) preg_replace('/\s+/', '', $iban));
+        if (preg_match('/^CZ\d{2}\d{4}(\d{6}\d{10})$/', $compact, $m) !== 1) {
+            return null;
+        }
+        return $m[1];
+    }
+
+    /** Kód banky (4 cifry) z českého IBANu, NULL pokud vstup není CZ IBAN. */
+    public static function czechIbanBankCode(string $iban): ?string
+    {
+        $compact = strtoupper((string) preg_replace('/\s+/', '', $iban));
+        if (preg_match('/^CZ\d{2}(\d{4})\d{16}$/', $compact, $m) !== 1) {
+            return null;
+        }
+        return $m[1];
+    }
+
+    /**
+     * True pokud účet z výpisu odpovídá uloženému účtu — buď přes `account_number`,
+     * nebo přes domácí část `iban` (issue #109: EUR účty bývají evidované jen IBANem,
+     * GPC ale nese domácí číslo účtu → bez tohohle se EUR výpis nikdy nespároval).
+     */
+    public static function matchesAny(string $statementAccount, ?string $accountNumber, ?string $iban = null): bool
+    {
+        if (is_string($accountNumber) && trim($accountNumber) !== '') {
+            if (self::equals($accountNumber, $statementAccount)) {
+                return true;
+            }
+            // Defenzivně: IBAN vepsaný do pole account_number porovnej přes domácí část.
+            $part = self::czechIbanAccountPart($accountNumber);
+            if ($part !== null && self::equals($part, $statementAccount)) {
+                return true;
+            }
+        }
+        $ibanPart = is_string($iban) ? self::czechIbanAccountPart($iban) : null;
+        return $ibanPart !== null && self::equals($ibanPart, $statementAccount);
+    }
 }

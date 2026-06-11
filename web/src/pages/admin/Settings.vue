@@ -1,23 +1,78 @@
 <script setup lang="ts">
-import { ref, onMounted, reactive, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type Supplier, type CurrencyAccount } from '@/api/settings'
-import { useHotkey } from '@/composables/useHotkey'
+import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode } from '@/api/settings'
+import { clientsApi } from '@/api/clients'
+import { useSupplierStore } from '@/stores/supplier'
 import { useToast } from '@/composables/useToast'
 import { renderVarsymbolTemplate, hasCounterPlaceholder } from '@/utils/varsymbol'
 
 const { t } = useI18n()
 const toast = useToast()
+const supplierStore = useSupplierStore()
+
+// Po uložení propsat změny do supplier store (brief z /me) — jinak editor faktur
+// čte stale is_vat_payer/defaulty až do hard refreshe (issue #94).
+function syncSupplierStore(s: Supplier) {
+  supplierStore.patchSupplier(s.id, {
+    company_name: s.company_name,
+    ic: s.ic,
+    is_vat_payer: s.is_vat_payer,
+    is_identified: s.is_identified ?? false,
+    taxpayer_type: s.taxpayer_type ?? null,
+    default_payment_due_days: s.default_payment_due_days,
+    default_payment_due_unit: s.default_payment_due_unit,
+    default_prices_include_vat: s.default_prices_include_vat,
+    auto_send_reminders: s.auto_send_reminders,
+    payment_thanks_enabled: s.payment_thanks_enabled,
+    payment_thanks_default_checked: s.payment_thanks_default_checked,
+  })
+}
 
 const supplier = ref<Supplier | null>(null)
-const currencies = ref<CurrencyAccount[]>([])
 const loading = ref(true)
 
-const editingCurrency = ref<number | null>(null)
-const editingCurrencyLabel = ref<string>('')
-const currencyDraft = reactive<Partial<CurrencyAccount>>({})
+// Práh dní pro první upomínku — preset (3 / týden / měsíc) + „vlastní". Stejný „sticky custom"
+// idiom jako dueSelectValue níže: flag drží „vlastní" i když hodnota náhodou odpovídá presetu,
+// jinak by getter spadl zpět na preset a číselný input by se nikdy neukázal.
+const REMINDER_DAYS_PRESETS = [3, 7, 30]
+const reminderCustom = ref(false)
+const reminderDaysSelect = computed<number | 'custom'>({
+  get() {
+    if (reminderCustom.value) return 'custom'
+    const d = supplier.value?.reminder_days_after_due ?? 3
+    return REMINDER_DAYS_PRESETS.includes(d) ? d : 'custom'
+  },
+  set(v) {
+    reminderCustom.value = (v === 'custom')
+    if (v !== 'custom' && supplier.value) supplier.value.reminder_days_after_due = v
+  },
+})
 
-useHotkey('escape', () => { if (editingCurrency.value !== null) editingCurrency.value = null })
+// ARES → spisová značka (commercial_register) podle IČ
+const crLoading = ref(false)
+async function loadCommercialRegister() {
+  const ic = (supplier.value?.ic || '').replace(/\D/g, '')
+  if (!/^\d{8}$/.test(ic)) { toast.error(t('supplier.ares_invalid_ic')); return }
+  crLoading.value = true
+  try {
+    const r = await clientsApi.lookupAres(ic)
+    if (r.found && r.data?.commercial_register && supplier.value) {
+      supplier.value.commercial_register = r.data.commercial_register
+      toast.success(t('settings.commercial_register_loaded'))
+    } else if (r.found && r.data?.taxpayer_type === 'fo') {
+      // OSVČ (fyzická osoba) není v obchodním rejstříku → spisová značka neexistuje.
+      // Není to chyba (issue #76), jen neutrální info.
+      toast.info(t('settings.commercial_register_none_fo'))
+    } else {
+      toast.error(t('settings.commercial_register_not_found'))
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('supplier.ares_failed'))
+  } finally {
+    crLoading.value = false
+  }
+}
 
 // Live preview pro číslování faktur — okamžitá zpětná vazba pod každým polem.
 // Chybějící counter → červený error; jinak „Náhled: JD2026-01".
@@ -27,20 +82,87 @@ function validateAndPreview(template: string | null) {
   if (!hasCounterPlaceholder(tmpl)) return { error: t('settings.numbering_must_have_counter'), preview: '' }
   return { error: '', preview: renderVarsymbolTemplate(tmpl, new Date(), 1) }
 }
+// Výchozí splatnost — UI preset ('7' / '14' / 'month' / 'custom') je odvozen z dvojice
+// (default_payment_due_days, default_payment_due_unit). 'month' znamená přesně 1 kalendářní
+// měsíc (days=1, unit='month'); 'custom' nechá volný číselný input v dnech.
+type DuePreset = '7' | '14' | 'month' | 'custom'
+// 'custom' musí být „sticky" i když hodnota náhodou odpovídá presetu (7/14) — jinak
+// by getter spadl zpět na preset a číselný input by se nikdy neukázal.
+const dueCustom = ref(false)
+const dueSelectValue = computed<DuePreset>({
+  get() {
+    if (!supplier.value) return '7'
+    if (dueCustom.value) return 'custom'
+    const d = supplier.value.default_payment_due_days
+    const u = supplier.value.default_payment_due_unit
+    if (u === 'month' && d === 1) return 'month'
+    if (u === 'days' && d === 7)  return '7'
+    if (u === 'days' && d === 14) return '14'
+    return 'custom'
+  },
+  set(v: DuePreset) {
+    if (!supplier.value) return
+    dueCustom.value = (v === 'custom')
+    if (v === '7') {
+      supplier.value.default_payment_due_days = 7
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === '14') {
+      supplier.value.default_payment_due_days = 14
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === 'month') {
+      supplier.value.default_payment_due_days = 1
+      supplier.value.default_payment_due_unit = 'month'
+    } else {
+      supplier.value.default_payment_due_unit = 'days'
+      // days zachovat — pokud byl 7/14 user dostane editovatelnou hodnotu k úpravě
+    }
+  },
+})
+
 const invoicePreview        = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).preview)
 const invoiceFormatError    = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).error)
 const proformaPreview       = computed(() => validateAndPreview(supplier.value?.proforma_number_format ?? null).preview)
 const proformaFormatError   = computed(() => validateAndPreview(supplier.value?.proforma_number_format ?? null).error)
 const creditNotePreview     = computed(() => validateAndPreview(supplier.value?.credit_note_number_format ?? null).preview)
 const creditNoteFormatError = computed(() => validateAndPreview(supplier.value?.credit_note_number_format ?? null).error)
+const purchasePreview       = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).preview)
+const purchaseFormatError   = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).error)
+
+// Kopie odchozích e-mailů dodavateli (migrace 0102) — UI stav 'inherit' znamená
+// „klíč v self_copy chybí" = živý fallback na cfg flagy (vzor číslování faktur).
+// Explicitní volba klíč zapíše; zpět na 'inherit' ho smaže. Prázdný objekt → null.
+function selfCopyComputed(ct: SelfCopyType) {
+  return computed<SelfCopyMode | 'inherit'>({
+    get: () => supplier.value?.self_copy?.[ct] ?? 'inherit',
+    set: (v) => {
+      if (!supplier.value) return
+      const sc = { ...(supplier.value.self_copy ?? {}) }
+      if (v === 'inherit') delete sc[ct]
+      else sc[ct] = v
+      supplier.value.self_copy = Object.keys(sc).length ? sc : null
+    },
+  })
+}
+const selfCopyDocuments = selfCopyComputed('documents')
+const selfCopyReminders = selfCopyComputed('reminders')
+const selfCopyApprovals = selfCopyComputed('approvals')
+
+/** Efektivní cfg hodnota pro volbu „dle konfigurace" — u schvalování může mít
+ *  žádost a upomínka v cfg různé flagy, pak ukážeme obě. */
+function selfCopyFallbackLabel(ct: SelfCopyType): string {
+  const fb = supplier.value?.cfg_self_copy_fallback
+  if (!fb) return ''
+  const lbl = (m: SelfCopyMode) => m === 'off' ? t('settings.self_copy.mode_off') : m.toUpperCase()
+  if (ct === 'approvals' && fb.approvals !== fb.approval_reminders) {
+    return t('settings.self_copy.inherit_split', { request: lbl(fb.approvals), reminder: lbl(fb.approval_reminders) })
+  }
+  return lbl(fb[ct])
+}
 
 async function load() {
   loading.value = true
   try {
-    [supplier.value, currencies.value] = await Promise.all([
-      settingsApi.getSupplier(),
-      settingsApi.listCurrencies(),
-    ])
+    supplier.value = await settingsApi.getSupplier()
     // První render preview hned po loadu supplier
     bumpPreview()
   } finally { loading.value = false }
@@ -67,14 +189,23 @@ async function saveSupplier() {
       ic: supplier.value.ic,
       dic: supplier.value.dic,
       is_vat_payer: supplier.value.is_vat_payer,
+      is_identified: supplier.value.is_identified ?? false,
       email: supplier.value.email,
       phone: supplier.value.phone,
       web: supplier.value.web,
       tagline: supplier.value.tagline,
       commercial_register: supplier.value.commercial_register,
       default_payment_due_days: supplier.value.default_payment_due_days,
+      default_payment_due_unit: supplier.value.default_payment_due_unit,
+      default_prices_include_vat: supplier.value.default_prices_include_vat,
       default_hourly_rate: supplier.value.default_hourly_rate,
       auto_send_reminders: supplier.value.auto_send_reminders,
+      reminder_days_after_due: supplier.value.reminder_days_after_due,
+      payment_thanks_enabled: supplier.value.payment_thanks_enabled,
+      payment_thanks_auto_send: supplier.value.payment_thanks_auto_send,
+      payment_thanks_default_checked: supplier.value.payment_thanks_default_checked,
+      payment_thanks_attach_paid_pdf: supplier.value.payment_thanks_attach_paid_pdf,
+      self_copy: supplier.value.self_copy ?? null,
       auto_generate_recurring: supplier.value.auto_generate_recurring,
       embed_isdoc: supplier.value.embed_isdoc,
       pohoda_account_code: supplier.value.pohoda_account_code,
@@ -84,12 +215,14 @@ async function saveSupplier() {
       invoice_number_format: supplier.value.invoice_number_format,
       proforma_number_format: supplier.value.proforma_number_format,
       credit_note_number_format: supplier.value.credit_note_number_format,
+      purchase_invoice_number_format: supplier.value.purchase_invoice_number_format,
       invoice_number_period: supplier.value.invoice_number_period,
       email_branding_enabled: supplier.value.email_branding_enabled,
       email_accent_color: supplier.value.email_accent_color,
       // Tax settings (EPO výkazy DPH/KH)
       taxpayer_type: (supplier.value as any).taxpayer_type ?? null,
       vat_period: (supplier.value as any).vat_period ?? null,
+      flat_tax_band: (supplier.value as any).flat_tax_band ?? 'none',
       financial_office_code: (supplier.value as any).financial_office_code ?? null,
       workplace_code: (supplier.value as any).workplace_code ?? null,
       cz_nace_code: (supplier.value as any).cz_nace_code ?? null,
@@ -107,6 +240,7 @@ async function saveSupplier() {
       opr_prijmeni: (supplier.value as any).opr_prijmeni ?? null,
       opr_postaveni: (supplier.value as any).opr_postaveni ?? null,
     })
+    syncSupplierStore(supplier.value)
     toast.success(t('common.saved'))
     bumpPreview()
   } catch (e: any) {
@@ -139,9 +273,11 @@ async function saveBranding(silent = false) {
     const updated = await settingsApi.updateSupplier({
       email_branding_enabled: supplier.value.email_branding_enabled,
       email_accent_color: supplier.value.email_accent_color,
+      pdf_logo_show_name: supplier.value.pdf_logo_show_name,
     })
     // Merge response do reactive supplier (zachová local-only fields jako has_email_logo)
     supplier.value = { ...supplier.value, ...updated }
+    syncSupplierStore(supplier.value)
     if (!silent) toast.success(t('common.saved'))
     bumpPreview()
   } catch (e: any) {
@@ -163,6 +299,7 @@ watch(supplier, () => {
 
 let colorTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => supplier.value?.email_branding_enabled, () => { if (watching) saveBranding(true) })
+watch(() => supplier.value?.pdf_logo_show_name, () => { if (watching) saveBranding(true) })
 watch(() => supplier.value?.email_accent_color, () => {
   if (!watching) return
   if (colorTimer) clearTimeout(colorTimer)
@@ -207,55 +344,6 @@ async function removeLogo() {
   }
 }
 
-function startEditCurrency(c: CurrencyAccount) {
-  editingCurrency.value = c.id
-  editingCurrencyLabel.value = c.label
-  Object.assign(currencyDraft, { ...c })
-}
-
-async function saveCurrency() {
-  if (editingCurrency.value === null) return
-  try {
-    const updated = await settingsApi.updateCurrency(editingCurrency.value, {
-      label: currencyDraft.label,
-      is_active: currencyDraft.is_active,
-      is_default: currencyDraft.is_default,
-      account_number: currencyDraft.account_number || null,
-      bank_code: currencyDraft.bank_code || null,
-      bank_name: currencyDraft.bank_name || null,
-      iban: currencyDraft.iban || null,
-      bic: currencyDraft.bic || null,
-    })
-    currencies.value = await settingsApi.listCurrencies()
-    editingCurrency.value = null
-    toast.success(`${updated.code} (${updated.label}) — ${t('common.saved')}`)
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
-}
-
-async function addCurrencyAccount(code: string) {
-  const label = window.prompt(t('settings.add_account_prompt', { code }), t('settings.add_account_default_label', { code }))
-  if (!label) return
-  try {
-    await settingsApi.createCurrency({ code, label, is_active: true })
-    currencies.value = await settingsApi.listCurrencies()
-    toast.success(`${label} — ${t('common.saved')}`)
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
-}
-
-async function removeCurrency(c: CurrencyAccount) {
-  if (!window.confirm(t('settings.delete_account_confirm', { label: c.label }))) return
-  try {
-    await settingsApi.deleteCurrency(c.id)
-    currencies.value = await settingsApi.listCurrencies()
-    toast.success(`${c.label} — ${t('common.deleted')}`)
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
-}
 </script>
 
 <template>
@@ -269,7 +357,7 @@ async function removeCurrency(c: CurrencyAccount) {
 
     <div v-else-if="supplier" class="space-y-6">
       <!-- Supplier -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.supplier') }}</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
@@ -304,9 +392,18 @@ async function removeCurrency(c: CurrencyAccount) {
           </div>
           <div>
             <label class="flex items-center gap-2 text-sm mt-7">
-              <input v-model="supplier.is_vat_payer" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <input v-model="supplier.is_vat_payer" type="checkbox" class="rounded border-neutral-300 text-primary-600"
+                @change="supplier.is_vat_payer && (((supplier as any).flat_tax_band = 'none'), (supplier.is_identified = false))" />
               {{ t('settings.is_vat_payer') }}
             </label>
+            <!-- Identifikovaná osoba (§ 6g–6l ZDPH, #94) — jen pro neplátce; plátce ji vypne. -->
+            <label v-if="!supplier.is_vat_payer" class="flex items-center gap-2 text-sm mt-2">
+              <input v-model="supplier.is_identified" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              {{ t('settings.is_identified') }}
+            </label>
+            <p v-if="!supplier.is_vat_payer && supplier.is_identified" class="text-xs text-neutral-500 mt-1 ml-6">
+              {{ t('settings.is_identified_hint') }}
+            </p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.email') }} *</label>
@@ -325,15 +422,40 @@ async function removeCurrency(c: CurrencyAccount) {
             <input v-model="supplier.tagline" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
           <div class="md:col-span-2">
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.commercial_register') }}</label>
+            <div class="flex items-center justify-between mb-1 gap-2">
+              <label class="block text-sm font-medium text-neutral-700">{{ t('settings.commercial_register') }}</label>
+              <button type="button" @click="loadCommercialRegister" :disabled="crLoading || !supplier.ic"
+                class="cursor-pointer h-7 px-2.5 text-xs bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 disabled:opacity-50 shrink-0">
+                {{ crLoading ? '…' : t('settings.commercial_register_load_ares') }}
+              </button>
+            </div>
             <input v-model="supplier.commercial_register" type="text"
               :placeholder="t('settings.commercial_register_placeholder')"
               class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             <p class="text-xs text-neutral-500 mt-1">{{ t('settings.commercial_register_hint') }}</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due') }}</label>
-            <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due_label') }}</label>
+            <div class="flex gap-2">
+              <select v-model="dueSelectValue" class="h-10 px-2 border border-neutral-300 rounded-md text-sm bg-surface" :class="dueSelectValue === 'custom' ? 'w-40' : 'w-full'">
+                <option value="7">{{ t('settings.default_due_preset_7') }}</option>
+                <option value="14">{{ t('settings.default_due_preset_14') }}</option>
+                <option value="month">{{ t('settings.default_due_preset_month') }}</option>
+                <option value="custom">{{ t('settings.default_due_preset_custom') }}</option>
+              </select>
+              <div v-if="dueSelectValue === 'custom'" class="flex items-center gap-2 flex-1">
+                <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-24 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                <span class="text-sm text-neutral-500">{{ t('settings.default_due_custom_days_suffix') }}</span>
+              </div>
+            </div>
+            <p v-if="dueSelectValue === 'month'" class="text-xs text-neutral-500 mt-1">{{ t('settings.default_due_month_hint') }}</p>
+          </div>
+          <div v-if="supplier.is_vat_payer" class="md:col-span-2">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="supplier.default_prices_include_vat" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span class="font-medium">{{ t('settings.default_prices_include_vat') }}</span>
+            </label>
+            <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.default_prices_include_vat_hint') }}</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_hourly_rate') }} ({{ supplier.default_currency }})</label>
@@ -345,6 +467,78 @@ async function removeCurrency(c: CurrencyAccount) {
               {{ t('settings.auto_send_reminders') }}
             </label>
             <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.auto_send_reminders_hint') }}</p>
+          </div>
+          <div class="md:col-span-2" v-if="supplier.auto_send_reminders">
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.reminder_days_after_due') }}</label>
+            <div class="flex items-center gap-2 flex-wrap">
+              <select v-model="reminderDaysSelect" class="h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                <option :value="3">{{ t('settings.reminder_days_preset.d3') }}</option>
+                <option :value="7">{{ t('settings.reminder_days_preset.week') }}</option>
+                <option :value="30">{{ t('settings.reminder_days_preset.month') }}</option>
+                <option value="custom">{{ t('settings.reminder_days_preset.custom') }}</option>
+              </select>
+              <template v-if="reminderDaysSelect === 'custom'">
+                <input v-model.number="supplier.reminder_days_after_due" type="number" min="1" max="365"
+                       class="w-24 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                <span class="text-sm text-neutral-500">{{ t('settings.reminder_days_unit') }}</span>
+              </template>
+            </div>
+            <p class="text-xs text-neutral-500 mt-1">{{ t('settings.reminder_days_after_due_hint') }}</p>
+          </div>
+          <div class="md:col-span-2 border-t border-neutral-200 pt-3">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="supplier.payment_thanks_enabled" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span class="font-medium">{{ t('settings.payment_thanks_enabled') }}</span>
+            </label>
+            <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.payment_thanks_enabled_hint') }}</p>
+            <div v-if="supplier.payment_thanks_enabled" class="ml-6 mt-2 space-y-2">
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_auto_send" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_auto_send') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_default_checked" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_default_checked') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_attach_paid_pdf" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_attach_paid_pdf') }}
+              </label>
+            </div>
+          </div>
+          <div class="md:col-span-2 border-t border-neutral-200 pt-3">
+            <p class="text-sm font-medium text-neutral-700">{{ t('settings.self_copy.title') }}</p>
+            <p class="text-xs text-neutral-500 mt-1">{{ t('settings.self_copy.hint', { email: supplier.email }) }}</p>
+            <div class="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.self_copy.type_documents') }}</label>
+                <select v-model="selfCopyDocuments" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                  <option value="inherit">{{ t('settings.self_copy.inherit', { value: selfCopyFallbackLabel('documents') }) }}</option>
+                  <option value="off">{{ t('settings.self_copy.mode_off') }}</option>
+                  <option value="cc">{{ t('settings.self_copy.mode_cc') }}</option>
+                  <option value="bcc">{{ t('settings.self_copy.mode_bcc') }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.self_copy.type_reminders') }}</label>
+                <select v-model="selfCopyReminders" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                  <option value="inherit">{{ t('settings.self_copy.inherit', { value: selfCopyFallbackLabel('reminders') }) }}</option>
+                  <option value="off">{{ t('settings.self_copy.mode_off') }}</option>
+                  <option value="cc">{{ t('settings.self_copy.mode_cc') }}</option>
+                  <option value="bcc">{{ t('settings.self_copy.mode_bcc') }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.self_copy.type_approvals') }}</label>
+                <select v-model="selfCopyApprovals" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                  <option value="inherit">{{ t('settings.self_copy.inherit', { value: selfCopyFallbackLabel('approvals') }) }}</option>
+                  <option value="off">{{ t('settings.self_copy.mode_off') }}</option>
+                  <option value="cc">{{ t('settings.self_copy.mode_cc') }}</option>
+                  <option value="bcc">{{ t('settings.self_copy.mode_bcc') }}</option>
+                </select>
+              </div>
+            </div>
+            <p class="text-xs text-neutral-500 mt-1">{{ t('settings.self_copy.approvals_note') }}</p>
           </div>
           <div class="md:col-span-2">
             <label class="flex items-center gap-2 text-sm">
@@ -365,7 +559,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Číslování faktur — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.numbering_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.numbering_section') }}</h3>
@@ -375,6 +569,7 @@ async function removeCurrency(c: CurrencyAccount) {
             <li><code class="bg-neutral-100 px-1 rounded">{YY}</code> &mdash; {{ t('settings.numbering_hint_yy') }} <span class="text-neutral-400">(26)</span></li>
             <li><code class="bg-neutral-100 px-1 rounded">{MM}</code> &mdash; {{ t('settings.numbering_hint_mm') }} <span class="text-neutral-400">(05)</span></li>
             <li><code class="bg-neutral-100 px-1 rounded">{CC}</code>, <code class="bg-neutral-100 px-1 rounded">{CCC}</code>&hellip; &mdash; {{ t('settings.numbering_hint_c') }} <span class="text-neutral-400">(01, 001…)</span></li>
+            <li><code class="bg-neutral-100 px-1 rounded">{PP}</code> &mdash; {{ t('settings.numbering_hint_pp') }} <span class="text-neutral-400">(PF/PN/KU/KN/NU/NN)</span></li>
           </ul>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
@@ -422,13 +617,26 @@ async function removeCurrency(c: CurrencyAccount) {
               </p>
               <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
             </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.purchase_invoice_number_format') }}</label>
+              <input v-model="supplier.purchase_invoice_number_format" type="text"
+                :placeholder="supplier.cfg_varsymbol_fallback?.purchase || '{PP}{YY}{MM}{CCC}'" maxlength="60"
+                class="w-full h-9 px-3 border rounded-md text-sm font-mono"
+                :class="purchaseFormatError ? 'border-danger-500 bg-danger-50' : 'border-neutral-300'" />
+              <p v-if="purchaseFormatError" class="text-xs text-danger-500 mt-1">{{ purchaseFormatError }}</p>
+              <p v-else-if="purchasePreview" class="text-xs text-success-600 mt-1">
+                {{ t('settings.numbering_preview') }}: <code class="font-mono font-semibold">{{ purchasePreview }}</code>
+              </p>
+              <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
+              <p class="text-xs text-neutral-400 mt-1">{{ t('settings.purchase_invoice_number_format_hint') }}</p>
+            </div>
           </div>
         </div>
 
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.tax_section') }}</h3>
@@ -436,7 +644,7 @@ async function removeCurrency(c: CurrencyAccount) {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.taxpayer_type') }}</label>
-              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="fo">{{ t('settings.taxpayer_fo') }}</option>
                 <option value="po">{{ t('settings.taxpayer_po') }}</option>
@@ -444,12 +652,22 @@ async function removeCurrency(c: CurrencyAccount) {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.vat_period') }}</label>
-              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="monthly">{{ t('settings.vat_monthly') }}</option>
                 <option value="quarterly">{{ t('settings.vat_quarterly') }}</option>
               </select>
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.vat_period_hint') }}</p>
+            </div>
+            <div v-if="!supplier.is_vat_payer">
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.flat_tax_band') }}</label>
+              <select v-model="(supplier as any).flat_tax_band" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                <option value="none">{{ t('settings.flat_tax_none') }}</option>
+                <option value="band1">{{ t('settings.flat_tax_band1') }}</option>
+                <option value="band2">{{ t('settings.flat_tax_band2') }}</option>
+                <option value="band3">{{ t('settings.flat_tax_band3') }}</option>
+              </select>
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.flat_tax_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.financial_office_code') }}</label>
@@ -542,7 +760,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Pohoda XML export config (volitelné) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.pohoda_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.pohoda_section') }}</h3>
@@ -575,7 +793,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Email branding (M16) -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-1">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.branding_title') }}</h2>
           <label class="inline-flex items-center gap-2 cursor-pointer">
@@ -605,6 +823,14 @@ async function removeCurrency(c: CurrencyAccount) {
                 </button>
                 <input ref="logoFileInput" @change="onLogoSelected" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" />
               </div>
+              <label class="inline-flex items-center gap-2 mt-3 cursor-pointer">
+                <input
+                  v-model="supplier.pdf_logo_show_name" type="checkbox"
+                  :disabled="!supplier.email_branding_enabled || !supplier.has_email_logo"
+                  class="h-4 w-4 accent-primary-600 disabled:opacity-50" />
+                <span class="text-sm text-neutral-700">{{ t('settings.branding_logo_show_name') }}</span>
+              </label>
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.branding_logo_show_name_hint') }}</p>
             </div>
 
             <div>
@@ -659,112 +885,6 @@ async function removeCurrency(c: CurrencyAccount) {
           </div>
         </div>
       </section>
-
-      <!-- Currencies / Bank accounts -->
-      <section class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-        <header class="px-5 py-3 border-b border-neutral-200">
-          <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.currencies_banks') }}</h2>
-        </header>
-        <div class="overflow-x-auto">
-        <table class="w-full text-sm table-sticky-first">
-          <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
-            <tr>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.currency') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.account_th') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.account_cz') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.iban') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.bic') }}</th>
-              <th class="px-3 py-2 text-center font-medium">{{ t('common.default') }}</th>
-              <th class="px-3 py-2 text-center font-medium">{{ t('settings.active') }}</th>
-              <th class="px-3 py-2 w-32"></th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-neutral-100">
-            <tr v-for="c in currencies" :key="c.id">
-              <td class="px-3 py-2 font-mono">{{ c.code }} <span class="text-xs text-neutral-500">{{ c.symbol }}</span></td>
-              <td class="px-3 py-2">{{ c.label }}</td>
-              <td class="px-3 py-2 font-mono text-xs">
-                {{ c.account_number }}<span v-if="c.bank_code"> / {{ c.bank_code }}</span>
-              </td>
-              <td class="px-3 py-2 font-mono text-xs">{{ c.iban || '—' }}</td>
-              <td class="px-3 py-2 font-mono text-xs">{{ c.bic || '—' }}</td>
-              <td class="px-3 py-2 text-center">
-                <span v-if="c.is_default" class="text-primary-600">✓</span>
-                <span v-else class="text-neutral-400">—</span>
-              </td>
-              <td class="px-3 py-2 text-center">
-                <span v-if="c.is_active" class="text-success-600">✓</span>
-                <span v-else class="text-neutral-400">—</span>
-              </td>
-              <td class="px-3 py-2 text-right">
-                <button @click="startEditCurrency(c)" class="cursor-pointer text-primary-600 hover:text-primary-700 text-xs">{{ t('common.edit') }}</button>
-                <button v-if="(c.invoices_count ?? 0) === 0" @click="removeCurrency(c)"
-                  class="cursor-pointer text-danger-600 hover:text-danger-700 text-xs ml-2">{{ t('common.delete') }}</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        </div>
-        <div class="px-5 py-3 border-t border-neutral-200 bg-neutral-50 text-xs text-neutral-600 flex flex-wrap gap-3 items-center">
-          <span>{{ t('settings.add_another_account') }}</span>
-          <button v-for="code in [...new Set(currencies.map(c => c.code))]" :key="code"
-            @click="addCurrencyAccount(code)"
-            class="cursor-pointer px-2 h-7 border border-neutral-300 rounded text-xs hover:bg-white">
-            + {{ code }}
-          </button>
-        </div>
-      </section>
-    </div>
-
-    <!-- Modal — currency edit -->
-    <div v-if="editingCurrency" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
-        <h3 class="text-lg font-semibold mb-3">{{ t('settings.edit_currency_label_full', { label: editingCurrencyLabel }) }}</h3>
-        <div class="space-y-3">
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.account_label_form') }}</label>
-            <input v-model="currencyDraft.label" type="text" placeholder="CZK — Fio Bank"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.currency_account_cz') }}</label>
-            <input v-model="currencyDraft.account_number" type="text" placeholder="1000000005"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.currency_bank_code') }}</label>
-            <input v-model="currencyDraft.bank_code" type="text" placeholder="0100"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.currency_bank_name') }}</label>
-            <input v-model="currencyDraft.bank_name" type="text" placeholder="KB"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.iban') }}</label>
-            <input v-model="currencyDraft.iban" type="text" placeholder="CZ65 0100 0000 0019 2000 1453"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.currency_bic') }}</label>
-            <input v-model="currencyDraft.bic" type="text" placeholder="KOMBCZPP"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
-          </div>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="currencyDraft.is_active" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-            {{ t('settings.currency_active_hint') }}
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="currencyDraft.is_default" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-            {{ t('codebooks.is_default_account_hint') }}
-          </label>
-          <div class="flex justify-end gap-2 pt-2">
-            <button @click="editingCurrency = null" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
-            <button @click="saveCurrency" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.save') }}</button>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 </template>

@@ -3,6 +3,31 @@ import { api } from './client'
 export type PurchaseInvoiceStatus = 'draft' | 'received' | 'booked' | 'paid' | 'cancelled'
 export type PurchaseDocumentKind = 'invoice' | 'receipt' | 'credit_note' | 'advance'
 export type ExchangeRateSource = 'cnb' | 'manual' | 'idoklad' | 'fakturoid'
+/** Provenience platebního účtu pro QR platbu (viz migrace 0107). */
+export type PaymentAccountSource = 'isdoc' | 'ai' | 'ai_reextract' | 'qr_image' | 'manual'
+
+/** Strukturovaný platební účet dodavatele (pro QR platbu / ruční editaci). */
+export interface PaymentQrAccount {
+  account_number: string | null
+  bank_code: string | null
+  iban: string | null
+  bic: string | null
+  variable_symbol: string | null
+}
+
+/** Odpověď „Zaplatit pomocí QR" endpointu. */
+export interface PaymentQrResponse {
+  ok: boolean
+  qr_data_uri: string | null
+  source: PaymentAccountSource | null
+  amount: number
+  currency: string
+  account: PaymentQrAccount
+  editable: boolean
+  needs_account: boolean
+  /** true → účet ještě nikdo nezkusil doplnit, frontend smí spustit extract-account. */
+  can_extract?: boolean
+}
 
 export interface PurchaseInvoiceItem {
   id?: number
@@ -28,6 +53,16 @@ export interface PurchaseVatBreakdownRow {
   without_vat: number
   vat: number
   with_vat: number
+}
+
+/**
+ * Ruční override rekapitulace DPH dle dokladu dodavatele (§ 73 ZDPH).
+ * Per sazba lze přepsat základ i daň; kalkulátor reziduum zapeče do řádkových totálů.
+ */
+export interface PurchaseVatOverride {
+  rate: number
+  base: number
+  vat: number
 }
 
 export interface PurchaseInvoiceTotals {
@@ -57,6 +92,21 @@ export interface VendorSnapshot {
   country_name_en?: string
 }
 
+/** Nárok na odpočet DPH: plný / bez nároku / krácený (poměrný §75, viz vat_deduction_percent). */
+export type VatDeduction = 'full' | 'none' | 'proportional'
+
+/** Stručné shrnutí navázané přijaté faktury (záloha ↔ vyúčtovací). */
+export interface PurchaseInvoiceBrief {
+  id: number
+  varsymbol: string | null
+  vendor_invoice_number: string | null
+  document_kind: PurchaseDocumentKind | null
+  status: PurchaseInvoiceStatus
+  issue_date: string | null
+  total_with_vat: number
+  currency: string
+}
+
 export interface PurchaseInvoice {
   id: number
   supplier_id: number
@@ -76,7 +126,14 @@ export interface PurchaseInvoice {
   exchange_rate_date: string | null
   exchange_rate_source: ExchangeRateSource
   reverse_charge: boolean
+  prices_include_vat?: boolean
   is_fixed_asset: boolean
+  /** Nárok na odpočet DPH (full=plný, none=bez nároku → mimo DPH evidenci, proportional=krácený §75). */
+  vat_deduction: VatDeduction
+  /** Procento odpočtu při vat_deduction='proportional' (§75 poměrný; 0–100, default 100). */
+  vat_deduction_percent: number
+  /** Daňová uznatelnost nákladu pro daň z příjmů (DPFO/DPPO). */
+  tax_deductible: boolean
   language: 'cs' | 'en'
   note_above_items: string | null
   note_below_items: string | null
@@ -95,6 +152,13 @@ export interface PurchaseInvoice {
   paid_amount_payment_ccy: number | null
   paid_amount_invoice_ccy: number | null
   exchange_diff_base: number | null
+  // Platební účet dodavatele pro „Zaplatit pomocí QR" (migrace 0107)
+  payment_account_number: string | null
+  payment_bank_code: string | null
+  payment_iban: string | null
+  payment_bic: string | null
+  payment_variable_symbol: string | null
+  payment_account_source: PaymentAccountSource | null
   status: PurchaseInvoiceStatus
   booked_at: string | null
   paid_at: string | null
@@ -106,6 +170,23 @@ export interface PurchaseInvoice {
   pdf_uploaded_at: string | null
   vat_classification_code: string | null
   expense_category_id: number | null
+  /** Název + kód kategorie nákladu (join z expense_categories, jen v detailu). */
+  expense_category_label?: string | null
+  expense_category_code?: string | null
+  /** Záloha (advance), kterou tato finální faktura vyúčtovává (vazba uložená na finální). */
+  advance_purchase_invoice_id: number | null
+  /** AI návrh propojení se zálohou (čeká na potvrzení uživatelem). */
+  advance_link_suggested_id: number | null
+  /** Shrnutí navázané zálohy (pokud advance_purchase_invoice_id != null). */
+  linked_advance?: PurchaseInvoiceBrief | null
+  /** Shrnutí AI-navržené zálohy (suggest & confirm). */
+  advance_link_suggestion?: PurchaseInvoiceBrief | null
+  /** U zálohy (advance): finální faktura, která ji vyúčtovává (reverzní pohled). */
+  settled_by?: PurchaseInvoiceBrief | null
+  /** Vyúčtovací faktura bez vazby: existuje nespárovaná záloha téhož dodavatele? */
+  has_advance_candidates?: boolean
+  /** Záloha bez vyúčtování: existuje nepropojená finální faktura téhož dodavatele? */
+  has_settlement_candidates?: boolean
   /**
    * Diagnostický popis problému z AI extrakce (např. AI sečetla mezisoučty
    * jako další položky → suma řádků se výrazně liší od AI-vráceného totalu).
@@ -127,6 +208,8 @@ export interface PurchaseInvoice {
   vendor_dic?: string | null
   vendor_main_email?: string
   vendor_language?: 'cs' | 'en'
+  /** Ruční rekapitulace DPH dle dokladu (§ 73). NULL = počítá se standardně. */
+  vat_overrides: PurchaseVatOverride[] | null
   // Related
   items: PurchaseInvoiceItem[]
   vat_breakdown: PurchaseVatBreakdownRow[]
@@ -191,7 +274,11 @@ export interface PurchaseInvoicePayload {
   exchange_rate_date?: string | null
   exchange_rate_source?: ExchangeRateSource
   reverse_charge?: boolean
+  prices_include_vat?: boolean
   is_fixed_asset?: boolean
+  vat_deduction?: VatDeduction
+  vat_deduction_percent?: number
+  tax_deductible?: boolean
   language?: 'cs' | 'en'
   note_above_items?: string | null
   note_below_items?: string | null
@@ -204,6 +291,17 @@ export interface PurchaseInvoicePayload {
   exchange_diff_base?: number | null
   vat_classification_code?: string | null
   expense_category_id?: number | null
+  /** Ruční rekapitulace DPH dle dokladu (§ 73). null/[] = počítat standardně. */
+  vat_overrides?: PurchaseVatOverride[] | null
+  /** Platební účet dodavatele pro QR platbu (migrace 0107). */
+  payment?: {
+    account_number?: string | null
+    bank_code?: string | null
+    iban?: string | null
+    bic?: string | null
+    variable_symbol?: string | null
+    source?: PaymentAccountSource
+  }
   items: Array<{
     description: string
     quantity: number
@@ -316,6 +414,31 @@ export const purchaseInvoicesApi = {
   dismissExtractionWarning: (id: number) =>
     api.post<PurchaseInvoice>(`/purchase-invoices/${id}/dismiss-extraction-warning`).then(r => r.data),
 
+  // „Zaplatit pomocí QR" — QR z uloženého účtu (GET), jednorázové lazy doplnění
+  // účtu z ISDOC/AI (POST), ruční editace účtu (PUT).
+  paymentQr: (id: number) =>
+    api.get<PaymentQrResponse>(`/purchase-invoices/${id}/payment-qr`).then(r => r.data),
+  extractPaymentAccount: (id: number) =>
+    api.post<PaymentQrResponse>(`/purchase-invoices/${id}/payment-qr/extract-account`).then(r => r.data),
+  updatePaymentAccount: (id: number, payload: Partial<PaymentQrAccount>) =>
+    api.put<PaymentQrResponse>(`/purchase-invoices/${id}/payment-account`, payload).then(r => r.data),
+
+  // Propojení se zálohovou fakturou (advance) — proti dvojímu započtení nákladu
+  advanceCandidates: (id: number) =>
+    api.get<{ candidates: PurchaseInvoiceBrief[] }>(`/purchase-invoices/${id}/advance-candidates`)
+      .then(r => r.data.candidates),
+  // Opačný směr — z detailu zálohy nabídni nepropojené vyúčtovací faktury téhož dodavatele
+  settlementCandidates: (id: number) =>
+    api.get<{ candidates: PurchaseInvoiceBrief[] }>(`/purchase-invoices/${id}/settlement-candidates`)
+      .then(r => r.data.candidates),
+  linkAdvance: (id: number, advanceId: number) =>
+    api.post<PurchaseInvoice>(`/purchase-invoices/${id}/link-advance`, { advance_id: advanceId })
+      .then(r => r.data),
+  unlinkAdvance: (id: number) =>
+    api.delete<PurchaseInvoice>(`/purchase-invoices/${id}/link-advance`).then(r => r.data),
+  dismissAdvanceSuggestion: (id: number) =>
+    api.delete<PurchaseInvoice>(`/purchase-invoices/${id}/advance-suggestion`).then(r => r.data),
+
   uploadPdf: (id: number, file: File) => {
     const fd = new FormData()
     fd.append('file', file, file.name)
@@ -380,17 +503,26 @@ export const purchaseInvoicesApi = {
     api.post<InboxScanResult>('/purchase-invoices/scan-inbox', { dry_run: dryRun }).then(r => r.data),
 
   /**
-   * Export ZIP s archivovanými vendor PDF za měsíc.
-   * Priorita: pokud purchase_invoice.pdf_path je set, použije ho; jinak fakturu skipne.
+   * Export přijatých faktur za měsíc nebo čtvrtletí.
    * Vrací URL pro přímou navigaci (axios by stáhl jako blob).
    */
   exportUrl: (
-    month: string,
+    period: { type: 'monthly'; year: number; month: number } | { type: 'quarterly'; year: number; quarter: number },
     dateBy: 'tax' | 'issue' | 'received' = 'tax',
     format: 'pdf-zip' | 'pohoda' | 'isdoc' = 'pdf-zip',
   ) => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
-    const params = new URLSearchParams({ month, format, date_by: dateBy })
+    const params = new URLSearchParams({
+      period: period.type,
+      year: String(period.year),
+      format,
+      date_by: dateBy,
+    })
+    if (period.type === 'quarterly') {
+      params.set('quarter', String(period.quarter))
+    } else {
+      params.set('month', String(period.month))
+    }
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
     return `/api/purchase-invoices/export?${params.toString()}`
   },

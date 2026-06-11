@@ -12,11 +12,14 @@ import {
 } from '@/api/purchaseInvoices'
 import { formatMoney, formatDate, formatMonth } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
+import { useRowLink } from '@/composables/useRowLink'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
 import { useYearOptions } from '@/composables/useYearOptions'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
+import SearchableSelect from '@/components/ui/SearchableSelect.vue'
+import { clientsApi, type Client } from '@/api/clients'
 
 const { t, locale } = useI18n()
 const auth = useAuthStore()
@@ -46,6 +49,8 @@ const overdueOnly = ref(false)
 const unpaidOnly = ref(false)
 const needsReviewOnly = ref(false)
 const currencyFilter = ref('')
+const vendorFilter = ref<number | ''>('')
+const vendors = ref<Client[]>([])
 
 // Hromadné akce
 const selectedIds = ref<number[]>([])
@@ -62,6 +67,9 @@ const DEFAULT_YEAR = new Date().getFullYear()
 onMounted(() => {
   loadFiltersFromQuery(route.query)
   load()
+  // Dodavatelé pro filtr (jen dodavatelé — přijaté faktury chodí od nich).
+  clientsApi.list({ archived: false, per_page: 200, role: 'vendors' })
+    .then(r => { vendors.value = r.data }).catch(() => {})
 })
 
 function loadFiltersFromQuery(q: typeof route.query) {
@@ -77,6 +85,7 @@ function loadFiltersFromQuery(q: typeof route.query) {
   dateFrom.value     = typeof q.from === 'string' ? q.from : ''
   dateTo.value       = typeof q.to === 'string' ? q.to : ''
   currencyFilter.value = typeof q.currency === 'string' ? q.currency : ''
+  vendorFilter.value = typeof q.vendor === 'string' && q.vendor !== '' ? Number(q.vendor) : ''
   search.value       = typeof q.q === 'string' ? q.q : ''
 }
 
@@ -93,6 +102,7 @@ function syncFiltersToUrl() {
   if (dateFrom.value) q.from = dateFrom.value
   if (dateTo.value) q.to = dateTo.value
   if (currencyFilter.value) q.currency = currencyFilter.value
+  if (vendorFilter.value !== '') q.vendor = String(vendorFilter.value)
   if (overdueOnly.value) q.overdue = '1'
   if (unpaidOnly.value) q.unpaid = '1'
   if (needsReviewOnly.value) q.needs_review = '1'
@@ -101,7 +111,7 @@ function syncFiltersToUrl() {
 }
 
 watch([statusFilter, kindFilter, yearFilter, monthFilter, dateFrom, dateTo,
-       overdueOnly, unpaidOnly, needsReviewOnly, currencyFilter], () => {
+       overdueOnly, unpaidOnly, needsReviewOnly, currencyFilter, vendorFilter], () => {
   syncFiltersToUrl()
   load()
 })
@@ -126,6 +136,7 @@ watch(() => route.query, (newQ) => {
     unpaidOnly.value = false
     needsReviewOnly.value = false
     currencyFilter.value = ''
+    vendorFilter.value = ''
     search.value = ''
     // Uvolnit po flush (watch effects)
     setTimeout(() => { suppressUrlSync = false }, 0)
@@ -177,6 +188,7 @@ async function load(reset = true) {
       date_from:     dateFrom.value     || undefined,
       date_to:       dateTo.value       || undefined,
       currency:      currencyFilter.value || undefined,
+      vendor_id:     vendorFilter.value   || undefined,
       unpaid_only:   unpaidOnly.value   || undefined,
       overdue:       overdueOnly.value  || undefined,
       needs_review:  needsReviewOnly.value || undefined,
@@ -198,8 +210,9 @@ async function load(reset = true) {
   }
 }
 
-function openInvoice(inv: PurchaseInvoiceListItem) {
-  router.push(`/purchase-invoices/${inv.id}`)
+const navigateRow = useRowLink()
+function openInvoice(inv: PurchaseInvoiceListItem, e?: MouseEvent) {
+  navigateRow(`/purchase-invoices/${inv.id}`, e)
 }
 
 // Year picker — distinct roky z `purchase_invoices` (issue #33).
@@ -369,7 +382,7 @@ async function bulkDelete() {
     </div>
 
     <!-- ═══ Filtry v boxu ═══ -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
       <div class="flex flex-wrap items-center gap-2">
         <input
           v-model="search"
@@ -377,7 +390,7 @@ async function bulkDelete() {
           :placeholder="t('purchase_invoice.filters.search_placeholder')"
           class="flex-1 min-w-48 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
         />
-        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('purchase_invoice.filters.all_statuses') }}</option>
           <option value="draft">{{ t('purchase_invoice.status.draft') }}</option>
           <option value="received">{{ t('purchase_invoice.status.received') }}</option>
@@ -385,20 +398,28 @@ async function bulkDelete() {
           <option value="paid">{{ t('purchase_invoice.status.paid') }}</option>
           <option value="cancelled">{{ t('purchase_invoice.status.cancelled') }}</option>
         </select>
-        <select v-model="kindFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="kindFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('purchase_invoice.filters.all_kinds') }}</option>
           <option value="invoice">{{ t('purchase_invoice.document_kind.invoice') }}</option>
           <option value="receipt">{{ t('purchase_invoice.document_kind.receipt') }}</option>
           <option value="credit_note">{{ t('purchase_invoice.document_kind.credit_note') }}</option>
           <option value="advance">{{ t('purchase_invoice.document_kind.advance') }}</option>
         </select>
+        <div class="min-w-48 flex-1 max-w-xs">
+          <SearchableSelect
+            :model-value="vendorFilter === '' ? null : vendorFilter"
+            @update:model-value="(v) => vendorFilter = v === null ? '' : Number(v)"
+            :options="vendors.map(c => ({ value: c.id, label: c.company_name, secondary: c.ic ?? undefined }))"
+            :placeholder="t('purchase_invoice.filters.all_vendors')"
+          />
+        </div>
         <select v-model="yearFilter" :disabled="!!dateFrom || !!dateTo"
-          class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm disabled:opacity-50">
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm disabled:opacity-50">
           <option value="">{{ t('invoice.all_years') }}</option>
           <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
         </select>
         <select v-model="monthFilter" :disabled="!!dateFrom || !!dateTo || yearFilter === ''"
-          class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm disabled:opacity-50">
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm disabled:opacity-50">
           <option :value="''">{{ t('invoice.all_months') }}</option>
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
@@ -424,7 +445,7 @@ async function bulkDelete() {
     </div>
 
     <!-- ═══ Loading / Error / Empty / Data ═══ -->
-    <div v-if="loading" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <TableSkeleton :rows="6" :cols="7" />
     </div>
 
@@ -432,7 +453,7 @@ async function bulkDelete() {
       {{ error }}
     </div>
 
-    <div v-else-if="!groups.length" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div v-else-if="!groups.length" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <EmptyState
         :title="search || statusFilter || kindFilter ? t('purchase_invoice.empty_filtered') : t('purchase_invoice.empty')"
         :cta="t('purchase_invoice.new')"
@@ -461,7 +482,7 @@ async function bulkDelete() {
         </header>
 
         <!-- Desktop: tabulka -->
-        <div class="hidden md:block bg-white border border-t-0 border-neutral-200 rounded-b-lg overflow-hidden">
+        <div class="hidden md:block bg-surface border border-t-0 border-neutral-200 rounded-b-lg overflow-hidden">
           <div class="overflow-x-auto">
             <table class="w-full text-sm table-sticky-first">
               <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
@@ -481,7 +502,7 @@ async function bulkDelete() {
                   <th class="text-center px-4 py-2 font-medium">{{ t('purchase_invoice.fields.document_kind') }}</th>
                   <th class="text-center px-4 py-2 font-medium">{{ t('purchase_invoice.fields.tax_date') }}</th>
                   <th class="text-center px-4 py-2 font-medium">{{ t('purchase_invoice.fields.due_date') }}</th>
-                  <th class="text-right px-4 py-2 font-medium">{{ t('purchase_invoice.totals.to_pay') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('purchase_invoice.totals.with_vat') }}</th>
                   <th class="text-center px-4 py-2 font-medium">{{ t('purchase_invoice.status.draft') }}</th>
                 </tr>
               </thead>
@@ -489,7 +510,8 @@ async function bulkDelete() {
                 <tr
                   v-for="inv in g.invoices"
                   :key="inv.id"
-                  @click="openInvoice(inv)"
+                  @click="openInvoice(inv, $event)"
+                  @auxclick.prevent="openInvoice(inv, $event)"
                   class="cursor-pointer hover:bg-neutral-50 transition"
                   :class="rowClass(inv)"
                 >
@@ -533,7 +555,7 @@ async function bulkDelete() {
                     </span>
                   </td>
                   <td class="px-4 py-2.5 text-right font-mono">
-                    {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
+                    {{ formatMoney(inv.total_with_vat, inv.currency) }}
                   </td>
                   <td class="px-4 py-2.5 text-center">
                     <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
@@ -547,11 +569,12 @@ async function bulkDelete() {
         </div>
 
         <!-- Mobile: karty -->
-        <div class="md:hidden bg-white border border-t-0 border-neutral-200 rounded-b-lg divide-y divide-neutral-100 overflow-hidden">
+        <div class="md:hidden bg-surface border border-t-0 border-neutral-200 rounded-b-lg divide-y divide-neutral-100 overflow-hidden">
           <div
             v-for="inv in g.invoices"
             :key="`m-${inv.id}`"
-            @click="openInvoice(inv)"
+            @click="openInvoice(inv, $event)"
+            @auxclick.prevent="openInvoice(inv, $event)"
             class="cursor-pointer hover:bg-neutral-50 transition px-3 py-3"
             :class="rowClass(inv)"
           >
@@ -578,7 +601,7 @@ async function bulkDelete() {
                     <span class="truncate">{{ inv.vendor_company_name }}</span>
                   </div>
                   <div class="font-mono text-sm whitespace-nowrap">
-                    {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
+                    {{ formatMoney(inv.total_with_vat, inv.currency) }}
                   </div>
                 </div>
                 <div class="flex items-baseline justify-between gap-2 mt-1 text-xs text-neutral-500">

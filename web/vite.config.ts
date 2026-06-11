@@ -6,6 +6,10 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const apiTarget = env.VITE_API_PROXY || 'http://127.0.0.1:8800'
+  const backendProxy = () => ({
+    target: apiTarget,
+    changeOrigin: false,
+  })
 
   return {
     plugins: [
@@ -31,10 +35,9 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: {
-        '/api': {
-          target: apiTarget,
-          changeOrigin: false,
-        },
+        '/api': backendProxy(),
+        '/styles': backendProxy(),
+        '/manual': backendProxy(),
       },
     },
     build: {
@@ -45,6 +48,12 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         // /styles/ je mimo web/, servíruje IIS/Apache z repo rootu — neřešit při bundle
         external: [/^\/styles\//],
+        // @vueuse/core má /* #__PURE__ */ anotace na pozicích, které Rolldown neumí
+        // interpretovat — neškodné varování z node_modules, potlačujeme.
+        onwarn(warning, defaultHandler) {
+          if (warning.code === 'INVALID_ANNOTATION') return
+          defaultHandler(warning)
+        },
         output: {
           manualChunks(id) {
             if (id.includes('node_modules')) {

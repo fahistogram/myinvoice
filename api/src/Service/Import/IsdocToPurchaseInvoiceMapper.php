@@ -97,6 +97,18 @@ final class IsdocToPurchaseInvoiceMapper
             'items'                 => $items,
         ];
 
+        // Platební účet dodavatele z ISDOC <PaymentMeans> — pro „Zaplatit pomocí QR".
+        // Repository nastaví source/checked_at jen pokud je účet skutečně použitelný.
+        $isdocPayment = (array) ($parsed['payment'] ?? []);
+        $payload['payment'] = [
+            'account_number'  => $isdocPayment['account_number'] ?? null,
+            'bank_code'       => $isdocPayment['bank_code'] ?? null,
+            'iban'            => $isdocPayment['iban'] ?? null,
+            'bic'             => $isdocPayment['bic'] ?? null,
+            'variable_symbol' => $isdocPayment['variable_symbol'] ?? null,
+            'source'          => 'isdoc',
+        ];
+
         // Dedup guard — pokud (supplier, vendor, vendor_invoice_number, issue_date) tuple
         // už v systému je, vrátíme existující ID místo házení SQL duplicate key error.
         $existingId = $this->repo->findIdByVendorInvoice(
@@ -117,6 +129,27 @@ final class IsdocToPurchaseInvoiceMapper
         $id = $this->repo->createDraft($payload, $userId, $supplierId);
         $this->repo->replaceItems($id, $items);
         $this->calc->recompute($id);
+
+        // Seed override rekapitulace DPH dle dokladu (§ 73) — z <TaxTotal> (ISDOC)
+        // nebo <invoiceSummary> (Pohoda). Drobné rozdíly zapeče dle dokladu, větší
+        // jen ohlásí jako varování (PurchaseVatRecapSeeder). Stejný box jako AI.
+        $docByRate = (array) ($parsed['vat_recap'] ?? []);
+        if ($docByRate !== []) {
+            $warning = (new PurchaseVatRecapSeeder($this->repo, $this->calc))->seed(
+                $id,
+                $supplierId,
+                $docByRate,
+                (string) ($parsed['currency'] ?? 'CZK'),
+                $payload['document_kind'] === 'credit_note',
+            );
+            if ($warning !== null) {
+                try {
+                    $this->repo->appendExtractionWarning($id, $supplierId, $warning);
+                } catch (\Throwable) {
+                    // Varování je „nice to have" — faktura už je vytvořená správně.
+                }
+            }
+        }
 
         // Auto-ČNB kurz pro non-CZK fakturu pokud ISDOC neobsahoval explicitní kurz
         $this->cnbApplier->applyIfMissing(

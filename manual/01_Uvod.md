@@ -50,7 +50,7 @@ podle toho, jestli jsi plátce nebo neplátce, a podporuje speciální režimy:
 - **VIES ověření** EU VAT ID — kontrola platnosti DIČ klienta v reálném čase
 - **Auto-výpočet DPH** s rozpadem po sazbách v sumační tabulce
 
-Detaily jsou v kapitole [6. Fakturujeme](06_Fakturujeme.md). Pozor:
+Detaily jsou v kapitole [26. Fakturujeme](26_Fakturujeme.md). Pozor:
 **správnost faktury je vždy na uživateli** — aplikace generuje doklady,
 ale není daňový poradce.
 
@@ -117,7 +117,7 @@ a aplikace platby spáruje sama:
 
 ## 1.8 Exporty pro účetní
 
-Tři standardní formáty pro předání dokladů externí kanceláři nebo internímu
+Čtyři standardní formáty pro předání dokladů externí kanceláři nebo internímu
 účetnímu oddělení:
 
 - **PDF ZIP po měsících** — klasická archivace, název souboru
@@ -126,6 +126,7 @@ Tři standardní formáty pro předání dokladů externí kanceláři nebo inte
   podporují ho všechny větší české účetní programy
 - **Pohoda XML** (Stormware data package) — přímý import do Pohody bez
   ručního opisu
+- **Stereo XML** — DocumentPack XML pro import vydaných faktur do Stereo
 - Filtrování exportu podle období, typu dokladu (faktury / zálohové /
   dobropisy) a stavu (vystavené / zaplacené / vše)
 
@@ -145,7 +146,7 @@ dodavatelů** (firem / IČO) s plně izolovanými daty:
 
 ## 1.10 Bezpečnost
 
-Bezpečnost stojí na pěti vrstvách (detail v [20. Bezpečnost](20_Bezpecnost.md)):
+Bezpečnost stojí na pěti vrstvách (detail v [37. Bezpečnost](37_Bezpecnost.md)):
 
 - **Hesla** — bcrypt cost 12 + pepper, min. 12 znaků, indikátor síly
 - **2FA (TOTP)** — Google Authenticator, Authy, 1Password, Bitwarden…
@@ -177,8 +178,8 @@ Bezpečnost stojí na pěti vrstvách (detail v [20. Bezpečnost](20_Bezpecnost.
 
 MyInvoice je primárně **fakturační**, ne plnohodnotný účetní systém. Nad
 rámec fakturace umí z evidovaných dokladů vygenerovat XML pro EPO portál
-MFČR — viz [24. Výkazy DPH](24_Vykazy_DPH.md) (DPHDP3 + kontrolní hlášení +
-souhrnné hlášení) a [25. Daň z příjmů](25_Dan_z_prijmu.md) (DPFO/DPPO,
+MFČR — viz [27. Výkazy DPH](27_Vykazy_DPH.md) (DPHDP3 + kontrolní hlášení +
+[souhrnné hlášení](29_Souhrnne_hlaseni.md)) a [30. Daň z příjmů](30_Dan_z_prijmu.md) (DPFO/DPPO,
 zatím jen orientační kostra). Tyto výkazy jsou **pomůcka** — před podáním
 je vždy ověř s účetní nebo daňovým poradcem.
 
@@ -197,4 +198,4 @@ výkazy DPH a jednou měsíčně exportuješ ISDOC nebo Pohoda XML a předáš �
 - Vývojářskou dokumentaci API → viz `source/04-api.md` v repu projektu
 - Detaily databázového schématu → viz `source/02-database.md`
 - Specifikace jednotlivých formátů (ISDOC, Pohoda XML) → odkaz v
-  [16. Exporty](16_Exporty.md)
+  [15. Exporty](15_Exporty.md)

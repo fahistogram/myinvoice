@@ -1,0 +1,21 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+{% if is_test %}[TEST] {% endif %}Thank you for your payment
+------------
+
+{% if is_proforma %}We confirm receipt of your advance payment for proforma invoice No. {{ invoice.varsymbol }}. Thank you!{% else %}We confirm receipt of your payment for invoice No. {{ invoice.varsymbol }}. Thank you!{% endif %}
+
+Variable symbol: {{ invoice.varsymbol }}
+Payment date:    {{ paid_at|date('M j, Y') }}
+{% if payment_method == 'card' %}Payment method:  card
+{% elseif payment_method == 'cash' %}Payment method:  cash
+{% endif %}Paid:            {{ amount_paid|number_format(2, '.', ',') }} {{ currency }} ✓
+{% if is_proforma %}
+>>> Your advance payment has been received. The follow-up tax document will be sent separately as agreed.
+{% endif %}
+{% if not is_test %}
+We appreciate your payment and your business.
+{% else %}
+=== TEST EMAIL — the client did not receive it. ==={% endif %}
+{% endblock %}

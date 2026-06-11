@@ -22,6 +22,17 @@ use Psr\Http\Message\ServerRequestInterface as Request;
  */
 final class SummaryAction
 {
+    /**
+     * Pásma paušální daně (§ 7a ZDP) — roční limit příjmů. Hodnoty jsou stabilní
+     * (zákonné stropy), drží se v kódu mimo DB. Měsíční zálohy se mění ročně a
+     * záměrně je tu nesledujeme (informativní limit příjmů stačí pro varování).
+     */
+    private const FLAT_TAX_BANDS = [
+        'band1' => 1_000_000,
+        'band2' => 1_500_000,
+        'band3' => 2_000_000,
+    ];
+
     public function __construct(private readonly Connection $db) {}
 
     public function __invoke(Request $request, Response $response): Response
@@ -32,16 +43,21 @@ final class SummaryAction
         $prevYear = $year - 1;
         $sid = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
         $isVatPayer = $this->fetchIsVatPayer($pdo, $sid);
+        // revenueByYear počítáme jednou a sdílíme s forecastem (CAGR trend) — žádný druhý dotaz.
+        $revenueByYear = $this->revenueByYear($pdo, $sid, $isVatPayer);
 
         return Json::ok($response, [
             'kpi'                    => $this->kpi($pdo, $year, $prevYear, $sid, $isVatPayer),
             'overdue'                => $this->overdue($pdo, $sid),
             'unpaid_upcoming'        => $this->unpaidUpcoming($pdo, $sid),
+            'draft_invoices'         => $this->draftInvoices($pdo, $sid),
             'top_clients_ytd'        => $this->topClients($pdo, $year, $sid, $isVatPayer),
             'top_clients_prev_year'  => $this->topClients($pdo, $prevYear, $sid, $isVatPayer),
             'top_clients_12m'        => $this->topClientsRolling12m($pdo, $sid, $isVatPayer),
             'revenue_by_month'       => $this->revenueByMonth($pdo, $sid, $isVatPayer),
-            'revenue_by_year'        => $this->revenueByYear($pdo, $sid, $isVatPayer),
+            'revenue_breakdown_12m'  => $this->revenueBreakdown12m($pdo, $sid, $isVatPayer),
+            'purchase_costs_by_month'=> $this->purchaseCostsByMonth($pdo, $sid, $isVatPayer),
+            'revenue_by_year'        => $revenueByYear,
             'rolling_12m'            => $this->rolling12mRevenue($pdo, $sid, $isVatPayer),
             'cashflow_ytd'           => $this->cashflowYtd($pdo, $year, $prevYear, $sid),
             'payment_days_histogram' => $this->paymentDaysHistogram($pdo, $sid),
@@ -49,12 +65,13 @@ final class SummaryAction
             'cashflow_forecast'      => $this->cashflowForecast($pdo, $sid),
             'due_buckets'            => $this->dueBuckets($pdo, $sid),
             'aging_report'           => $this->agingReport($pdo, $sid),
-            'revenue_forecast'       => $this->revenueForecast($pdo, $year, $prevYear, $sid, $isVatPayer),
+            'revenue_forecast'       => $this->revenueForecast($pdo, $year, $prevYear, $sid, $isVatPayer, $revenueByYear),
             'invoice_size_histogram' => $this->invoiceSizeHistogram($pdo, $sid, $isVatPayer),
             'revenue_last_30d'       => $this->revenueLast30d($pdo, $sid, $isVatPayer),
             'active_recurring_count' => $this->activeRecurringCount($pdo, $sid),
             'active_clients_count'   => $this->activeClientsCount($pdo, $sid),
             'pending_approvals'      => $this->pendingApprovals($pdo, $sid),
+            'flat_tax_threshold'     => $this->flatTaxThreshold($pdo, $year, $sid),
             'today'                  => $today->format('Y-m-d'),
             'year'                   => $year,
             'prev_year'              => $prevYear,
@@ -103,6 +120,42 @@ final class SummaryAction
     }
 
     /**
+     * Rozpad tržeb po kategoriích za posledních 12 měsíců (CZK-normalizováno přes
+     * exchange_rate, VAT-aware sloupec). Pro koláčový graf „Tržby podle kategorie"
+     * na stránce Tržby (Stats). Symetrie k expense_breakdown_12m (PurchaseSummaryAction).
+     *
+     * @return list<array{category_id:?int, code:?string, label:?string, total: float, count: int, percent: float}>
+     */
+    private function revenueBreakdown12m(\PDO $pdo, int $sid, bool $isVatPayer): array
+    {
+        $rev = $this->revenueCol($isVatPayer);
+        $sql = "SELECT i.revenue_category_id, rc.code, rc.label,
+                       SUM($rev * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total,
+                       COUNT(*) AS cnt
+                  FROM invoices i
+                  JOIN currencies cur ON cur.id = i.currency_id
+             LEFT JOIN revenue_categories rc ON rc.id = i.revenue_category_id
+                 WHERE i.supplier_id = ?
+                   AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                   AND i.status IN ('issued', 'sent', 'reminded', 'paid')
+                   AND i.invoice_type IN ('invoice', 'credit_note')
+              GROUP BY i.revenue_category_id, rc.code, rc.label
+              ORDER BY total DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$sid]);
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+        $sum = array_sum(array_column($rows, 'total'));
+        return array_map(static fn (array $r) => [
+            'category_id' => $r['revenue_category_id'] !== null ? (int) $r['revenue_category_id'] : null,
+            'code'        => $r['code'] !== null ? (string) $r['code'] : null,
+            'label'       => $r['label'] !== null ? (string) $r['label'] : null,
+            'total'       => round((float) $r['total'], 2),
+            'count'       => (int) $r['cnt'],
+            'percent'     => $sum > 0 ? round(((float) $r['total'] / $sum) * 100, 1) : 0.0,
+        ], $rows);
+    }
+
+    /**
      * Obrat po rocích — všechny roky, ve kterých existují fakturované doklady (invoice + credit_note),
      * VAT-aware sloupec. Pro tabulkové zobrazení v Grafech.
      *
@@ -143,10 +196,79 @@ final class SummaryAction
         return (bool) $stmt->fetchColumn();
     }
 
+    /**
+     * Paušální daň (§ 7a ZDP) — sledování blížícího se ročního limitu příjmů pro
+     * zvolené pásmo. Příjmy = zaplacené vystavené faktury (kasová metoda, paid_at
+     * v aktuálním kalendářním roce), přepočet na CZK. Pokud supplier není v paušálu
+     * (flat_tax_band='none'), vrací applicable=false.
+     *
+     * @return array{applicable: bool, band: ?string, current_czk: float, limit_czk: ?int, percent: ?int, status: ?string, year: int}
+     */
+    private function flatTaxThreshold(\PDO $pdo, int $year, int $sid): array
+    {
+        // Defenzivně: sloupec flat_tax_band nemusí existovat, pokud ještě neproběhla
+        // migrace 0062 — v tom případě nesmí spadnout celý dashboard summary.
+        try {
+            $stmt = $pdo->prepare('SELECT flat_tax_band FROM supplier WHERE id = ?');
+            $stmt->execute([$sid]);
+            $band = (string) ($stmt->fetchColumn() ?: 'none');
+        } catch (\Throwable) {
+            $band = 'none';
+        }
+
+        if (!isset(self::FLAT_TAX_BANDS[$band])) {
+            return ['applicable' => false, 'band' => null, 'current_czk' => 0.0,
+                    'limit_czk' => null, 'percent' => null, 'status' => null, 'year' => $year];
+        }
+
+        $limit = self::FLAT_TAX_BANDS[$band];
+        $stmt = $pdo->prepare(
+            "SELECT COALESCE(SUM(i.total_with_vat * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)), 0) AS sum_czk
+               FROM invoices i
+          LEFT JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND i.status = 'paid'
+                AND i.paid_at IS NOT NULL
+                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND YEAR(i.paid_at) = ?"
+        );
+        $stmt->execute([$sid, $year]);
+        $current = round((float) $stmt->fetchColumn(), 2);
+
+        $percent = $limit > 0 ? (int) round($current / $limit * 100) : 0;
+        $status = match (true) {
+            $percent >= 95 => 'danger',
+            $percent >= 80 => 'warning',
+            $percent >= 60 => 'notice',
+            default        => 'ok',
+        };
+
+        return [
+            'applicable'  => true,
+            'band'        => $band,
+            'current_czk' => $current,
+            'limit_czk'   => $limit,
+            'percent'     => $percent,
+            'status'      => $status,
+            'year'        => $year,
+        ];
+    }
+
     /** SQL fragment vybírající správný sloupec obratu dle plátcovství DPH. */
     private function revenueCol(bool $isVatPayer): string
     {
         return $isVatPayer ? 'i.total_without_vat' : 'i.total_with_vat';
+    }
+
+    /**
+     * Sloupec NÁKLADU dle plátcovství DPH: plátce má vstupní DPH odpočitatelnou →
+     * náklad je bez DPH; neplátce ji odečíst nemůže → náklad je s DPH.
+     * Náklady/trend jsou „cost" metrika (ne cash), proto net pro plátce — shodně
+     * s PurchaseSummaryAction::costCol. (Závazky/cashflow dál používají gross.)
+     */
+    private function costCol(bool $isVatPayer): string
+    {
+        return $isVatPayer ? 'pi.total_without_vat' : 'pi.total_with_vat';
     }
 
     /**
@@ -210,6 +332,7 @@ final class SummaryAction
                    AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN (?, ?)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
                    AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND cur.is_active = 1
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -263,7 +386,8 @@ final class SummaryAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
                 AND i.status IN ('issued','sent','reminded') AND i.due_date <= CURDATE()
-                AND i.invoice_type IN ('invoice','credit_note')
+                AND " . $this->receivableDocTypeSql() . "
+                AND " . $this->outstandingReceivableSql() . "
               GROUP BY cur.code"
         );
         $stmt->execute([$sid]);
@@ -302,14 +426,15 @@ final class SummaryAction
             $statusCounts[$r['status']] = (int) $r['cnt'];
         }
 
-        // Přijaté faktury YTD — náklady, počet, nezaplacené, po splatnosti
+        // Přijaté faktury YTD — náklady (net pro plátce), počet, nezaplacené, po splatnosti
+        $costCol = $this->costCol($isVatPayer);
         $stmt = $pdo->prepare(
             "SELECT COUNT(*) AS cnt,
-                    COALESCE(SUM(pi.total_with_vat * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)), 0) AS costs_czk
+                    COALESCE(SUM({$costCol} * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)), 0) AS costs_czk
                FROM purchase_invoices pi
           LEFT JOIN currencies cur ON cur.id = pi.currency_id
               WHERE pi.supplier_id = ?
-                AND pi.status NOT IN ('draft', 'cancelled')
+                AND pi.status NOT IN ('draft', 'cancelled')" . $this->advanceCostExclude() . "
                 AND YEAR(pi.issue_date) = ?"
         );
         $stmt->execute([$sid, $year]);
@@ -353,6 +478,82 @@ final class SummaryAction
         ];
     }
 
+    /**
+     * Měsíční náklady (přijaté faktury) za posledních 12 měsíců v CZK — pro mini graf
+     * na dashboardu. Vždy 12 slotů vzestupně, chybějící měsíce = 0.
+     *
+     * @return list<array{ym:string, total:float}>
+     */
+    /**
+     * SQL predikát (cash sémantika, daňová evidence — shoda s PurchaseSummaryAction):
+     * zálohovou fakturu (advance) vyřaď z nákladů, pokud NENÍ zaplacená (cash ještě
+     * neodešel) NEBO je spárovaná s vyúčtovací fakturou (ta nese plný náklad →
+     * proti dvojímu započtení).
+     */
+    private function advanceCostExclude(): string
+    {
+        return " AND NOT (COALESCE(pi.document_kind, '') = 'advance'"
+             . " AND (pi.status <> 'paid'"
+             . " OR EXISTS (SELECT 1 FROM purchase_invoices adv_s"
+             . " WHERE adv_s.advance_purchase_invoice_id = pi.id)))";
+    }
+
+    /**
+     * SQL predikát pro pohledávkové doklady (co nám klienti dluží), alias `i`.
+     * Kromě ostrých faktur a dobropisů zahrnuje i NEZAPLACENÉ NESPÁROVANÉ proformy
+     * (proforma bez dceřiného ostrého daňového dokladu) — ty jsou reálný dluh.
+     * Spárovaná proforma se vynechá, aby se dluh nepočítal dvakrát (nese ho ostrý doklad).
+     * Kombinuj VŽDY se statusem IN ('issued','sent','reminded') — vyřadí zaplacené/storno.
+     * Pozn.: tržby/DPH/počty vystavených dokladů zůstávají jen invoice/credit_note.
+     */
+    private function receivableDocTypeSql(): string
+    {
+        return "(i.invoice_type IN ('invoice','credit_note')"
+             . " OR (i.invoice_type = 'proforma'"
+             . " AND NOT EXISTS (SELECT 1 FROM invoices ch"
+             . " WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice')))";
+    }
+
+    /**
+     * Doklad má reálnou nesplacenou pohledávku. Finální daňový doklad k zaplacené
+     * proformě má `amount_to_pay = 0` by design (záloha pokryla celek) — není to
+     * pohledávka a nepatří do „po splatnosti"/aging/cashflow ani do unpaid seznamu,
+     * i když status zůstává `issued`. Dobropisy (záporný total) ponecháváme beze
+     * změny. Zrcadlí InvoiceAmountPolicy::hasPositiveAmountToPay().
+     */
+    private function outstandingReceivableSql(): string
+    {
+        return "(i.invoice_type NOT IN ('invoice','proforma') OR i.amount_to_pay > 0)";
+    }
+
+    private function purchaseCostsByMonth(\PDO $pdo, int $sid, bool $isVatPayer): array
+    {
+        $costCol = $this->costCol($isVatPayer);
+        $sql = "SELECT DATE_FORMAT(pi.issue_date, '%Y-%m') AS ym,
+                       SUM({$costCol} * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)) AS total
+                  FROM purchase_invoices pi
+             LEFT JOIN currencies cur ON cur.id = pi.currency_id
+                 WHERE pi.supplier_id = ?
+                   AND pi.status NOT IN ('draft', 'cancelled')" . $this->advanceCostExclude() . "
+                   AND pi.issue_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 11 MONTH), '%Y-%m-01')
+                 GROUP BY ym";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$sid]);
+        $byYm = [];
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $byYm[(string) $r['ym']] = round((float) $r['total'], 2);
+        }
+
+        $out = [];
+        $cursor = (new \DateTimeImmutable(date('Y-m-01')))->modify('-11 months');
+        for ($i = 0; $i < 12; $i++) {
+            $ym = $cursor->format('Y-m');
+            $out[] = ['ym' => $ym, 'total' => $byYm[$ym] ?? 0.0];
+            $cursor = $cursor->modify('+1 month');
+        }
+        return $out;
+    }
+
     private function overdue(\PDO $pdo, int $sid): array
     {
         $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.client_id, cur.code AS currency,
@@ -365,7 +566,8 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued','sent','reminded')
                    AND i.due_date <= CURDATE()
-                   AND i.invoice_type IN ('invoice','credit_note')
+                   AND " . $this->receivableDocTypeSql() . "
+                   AND " . $this->outstandingReceivableSql() . "
                  ORDER BY i.due_date ASC
                  LIMIT 20";
         $stmt = $pdo->prepare($sql);
@@ -386,12 +588,48 @@ final class SummaryAction
                    AND i.status IN ('issued','sent','reminded')
                    AND i.due_date >= CURDATE()
                    AND i.invoice_type IN ('invoice','credit_note')
+                   AND " . $this->outstandingReceivableSql() . "
                  ORDER BY i.due_date ASC
                  LIMIT 20";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         return array_map(fn (array $r) => $this->castListItem($r), $rows);
+    }
+
+    /**
+     * Rozpracované (draft) vystavené faktury — pro widget „Výkazy práce" na Přehledu.
+     * Vrací firmu + zakázku (projekt) + tlačítko Výkaz vede na editaci dokladu.
+     * @return list<array<string,mixed>>
+     */
+    private function draftInvoices(\PDO $pdo, int $sid): array
+    {
+        $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.client_id, cur.code AS currency,
+                       i.issue_date, i.total_with_vat, i.project_id,
+                       c.company_name AS client_company_name,
+                       p.name AS project_name
+                  FROM invoices i
+                  JOIN clients c ON c.id = i.client_id
+                  JOIN currencies cur ON cur.id = i.currency_id
+             LEFT JOIN projects p ON p.id = i.project_id
+                 WHERE i.supplier_id = ?
+                   AND i.status = 'draft'
+                 ORDER BY i.updated_at DESC, i.id DESC
+                 LIMIT 24";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$sid]);
+        return array_map(static fn (array $r) => [
+            'id'                  => (int) $r['id'],
+            'varsymbol'           => $r['varsymbol'],
+            'invoice_type'        => $r['invoice_type'],
+            'client_id'           => (int) $r['client_id'],
+            'client_company_name' => $r['client_company_name'],
+            'project_id'          => $r['project_id'] !== null ? (int) $r['project_id'] : null,
+            'project_name'        => $r['project_name'],
+            'currency'            => $r['currency'],
+            'issue_date'          => $r['issue_date'],
+            'total_with_vat'      => (float) $r['total_with_vat'],
+        ], $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: []);
     }
 
     private function topClients(\PDO $pdo, int $year, int $sid, bool $isVatPayer): array
@@ -452,6 +690,7 @@ final class SummaryAction
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 23 MONTH), '%Y-%m-01')
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
                    AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND cur.is_active = 1
                  GROUP BY cur.code, ym";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -735,6 +974,7 @@ final class SummaryAction
                    AND i.status IN ('issued','sent','reminded')
                    AND i.invoice_type IN ('invoice','credit_note')
                    AND i.due_date >= CURDATE()
+                   AND " . $this->outstandingReceivableSql() . "
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -772,6 +1012,7 @@ final class SummaryAction
                    AND i.status IN ('issued','sent','reminded')
                    AND i.invoice_type IN ('invoice','credit_note')
                    AND i.due_date >= CURDATE()
+                   AND " . $this->outstandingReceivableSql() . "
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -809,7 +1050,8 @@ final class SummaryAction
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued','sent','reminded')
-                   AND i.invoice_type IN ('invoice','credit_note')
+                   AND " . $this->receivableDocTypeSql() . "
+                   AND " . $this->outstandingReceivableSql() . "
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -829,60 +1071,138 @@ final class SummaryAction
     }
 
     /**
-     * Forecast ročního obratu — growth-adjusted seasonality.
+     * Forecast ročního obratu — robustní odhad ze tří nezávislých signálů.
      *
-     * Postup:
-     *  1. YTD letošek (Jan 1 – dnes)
-     *  2. YTD loňsko (Jan 1 – stejné datum minulého roku) — pro vypočet growth ratio
-     *  3. Loňsko od dneška do konce roku (sezonalita budoucích měsíců)
-     *  4. growth_ratio = YTD_this / YTD_prev (capnut na rozumný rozsah, default 1.0 pokud loni nula)
-     *  5. forecast = YTD_this + (prev_remainder × growth_ratio)
+     * Starý model měřil růst jako YTD_letos / YTD_loni — tj. z pár měsíců na začátku roku.
+     * Krátké okno = šum: slabý loňský start nafoukl růst na stovky % a forecast přestřelil.
      *
-     * Tj. pokud rosteš +10 % YoY, predikujeme i zbytek roku o +10 % nad loni.
+     * Nově počítáme tři projekce celého roku a bereme jejich MEDIÁN (odolný vůči jednomu
+     * odlehlému signálu); navíc vracíme rozpětí min–max:
      *
-     * @return list<array{currency: string, ytd: float, prev_year_ytd: float, prev_year_remainder: float, growth_ratio: float, forecast: float, prev_year_full: float}>
+     *  1. run-rate                       — ytd / uplynulé_dny × dní_v_roce
+     *  2. sezonalita × krátkodobý růst    — ytd + loňský_zbytek × (rolling 12m / předch. 12m)
+     *  3. sezonalita × dlouhodobý trend   — ytd + loňský_zbytek × CAGR (posledních ≤5 let)
+     *
+     * Sezonalita (= loňský zbytek roku) drží tvar roku; růst se měří z dlouhých oken, takže
+     * odráží strukturální růst (rostoucí sazby/objem), ne sezónní výkyv krátkého YTD okna.
+     * Jak rok postupuje, loňský_zbytek → 0 a všechny tři signály konvergují ke skutečnosti.
+     *
+     * @param list<array{year: int, currency: string, total: float, invoice_count: int}> $revenueByYear sdílený výsledek revenueByYear() — zdroj CAGR trendu
+     * @return list<array{currency: string, ytd: float, prev_year_remainder: float, prev_year_full: float, growth_short: float, growth_trend: float, forecast: float, forecast_low: float, forecast_high: float}>
      */
-    private function revenueForecast(\PDO $pdo, int $year, int $prevYear, int $sid, bool $isVatPayer): array
+    private function revenueForecast(\PDO $pdo, int $year, int $prevYear, int $sid, bool $isVatPayer, array $revenueByYear): array
     {
         $rev = $this->revenueCol($isVatPayer);
+        // Scope musí pokrýt i rok−2, protože rolling-24m okno (prev_roll_12m) sahá dva roky zpět.
+        $prevPrevYear = $prevYear - 1;
         $sql = "SELECT cur.code AS currency,
                        SUM(CASE WHEN YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
                                  THEN $rev ELSE 0 END) AS ytd,
                        SUM(CASE WHEN YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
-                                  AND COALESCE(i.tax_date, i.issue_date) <= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
-                                 THEN $rev ELSE 0 END) AS prev_year_ytd,
-                       SUM(CASE WHEN YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
                                   AND COALESCE(i.tax_date, i.issue_date) > DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
                                  THEN $rev ELSE 0 END) AS prev_year_remainder,
                        SUM(CASE WHEN YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
-                                 THEN $rev ELSE 0 END) AS prev_year_full
+                                 THEN $rev ELSE 0 END) AS prev_year_full,
+                       SUM(CASE WHEN COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                                 THEN $rev ELSE 0 END) AS roll_12m,
+                       SUM(CASE WHEN COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)
+                                  AND COALESCE(i.tax_date, i.issue_date) <  DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                                 THEN $rev ELSE 0 END) AS prev_roll_12m
                   FROM invoices i
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
-                   AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN (?, ?)
+                   AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN (?, ?, ?)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
                    AND i.invoice_type IN ('invoice', 'credit_note')
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
-        $stmt->execute([$year, $prevYear, $prevYear, $prevYear, $sid, $year, $prevYear]);
-        return array_map(static function (array $r): array {
+        $stmt->execute([$year, $prevYear, $prevYear, $sid, $year, $prevYear, $prevPrevYear]);
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+
+        // Roční totály ukončených let pro CAGR — přetvořené z už načteného revenueByYear (žádný druhý dotaz).
+        $yearly = [];
+        foreach ($revenueByYear as $r) {
+            if ($r['year'] < $year) {
+                $yearly[$r['currency']][$r['year']] = $r['total'];
+            }
+        }
+
+        // Pozice v roce — pro run-rate a přirozenou konvergenci k realitě ke konci roku.
+        $today = new \DateTimeImmutable('today');
+        $daysElapsed = (int) $today->format('z') + 1;
+        $daysInYear = $today->format('L') === '1' ? 366 : 365;
+
+        return array_map(function (array $r) use ($daysElapsed, $daysInYear, $yearly): array {
+            $cur = (string) $r['currency'];
             $ytd = round((float) $r['ytd'], 2);
-            $ytdPrev = round((float) $r['prev_year_ytd'], 2);
             $rem = round((float) $r['prev_year_remainder'], 2);
-            // Růstový poměr — pokud loňské YTD je 0 nebo neznámé, fallback na 1.0 (= prostá sezonalita).
-            // Capnuto na [0.3, 3.0] — extrémní YoY (např. začátek byznysu) by jinak vytvořilo nerealistickou projekci.
-            $growth = ($ytdPrev > 0) ? max(0.3, min(3.0, $ytd / $ytdPrev)) : 1.0;
-            $forecast = round($ytd + ($rem * $growth), 2);
-            return [
-                'currency'            => (string) $r['currency'],
-                'ytd'                 => $ytd,
-                'prev_year_ytd'       => $ytdPrev,
-                'prev_year_remainder' => $rem,
-                'growth_ratio'        => round($growth, 3),
-                'forecast'            => $forecast,
-                'prev_year_full'      => round((float) $r['prev_year_full'], 2),
+            $prevFull = round((float) $r['prev_year_full'], 2);
+            $roll12 = (float) $r['roll_12m'];
+            $prevRoll12 = (float) $r['prev_roll_12m'];
+
+            // Krátkodobý růst: rolling 12m vs. předchozích 12m. Plná okna → bez sezónního zkreslení.
+            // Cap [0.5, 2.5] drží projekci v rozumných mezích i při raketovém/propadovém roce.
+            $gShort = $prevRoll12 > 0 ? max(0.5, min(2.5, $roll12 / $prevRoll12)) : 1.0;
+            // Dlouhodobý trend (CAGR). Cap [0.8, 1.8] je užší než u krátkodobého růstu — trend z více
+            // let je hladší, takže extrémy nečekáme. Bez dostatku historie fallback na krátkodobý růst.
+            $gTrendRaw = $this->trendGrowth($yearly[$cur] ?? []);
+            $gTrend = $gTrendRaw !== null ? max(0.8, min(1.8, $gTrendRaw)) : $gShort;
+
+            $runRate = $daysElapsed > 0 ? $ytd / $daysElapsed * $daysInYear : $ytd;
+
+            // Bez loňských dat nemá sezonalita o co se opřít → jediný smysluplný signál je run-rate.
+            if ($prevFull <= 0.0) {
+                $fc = round($runRate, 2);
+                return [
+                    'currency' => $cur, 'ytd' => $ytd, 'prev_year_remainder' => $rem,
+                    'prev_year_full' => $prevFull, 'growth_short' => round($gShort, 3),
+                    'growth_trend' => round($gTrend, 3), 'forecast' => $fc,
+                    'forecast_low' => $fc, 'forecast_high' => $fc,
+                ];
+            }
+
+            $signals = [
+                $runRate,                // run-rate (lineární extrapolace)
+                $ytd + $rem * $gShort,   // sezonalita × krátkodobý růst
+                $ytd + $rem * $gTrend,   // sezonalita × dlouhodobý trend
             ];
-        }, $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: []);
+            sort($signals);
+
+            return [
+                'currency'            => $cur,
+                'ytd'                 => $ytd,
+                'prev_year_remainder' => $rem,
+                'prev_year_full'      => $prevFull,
+                'growth_short'        => round($gShort, 3),
+                'growth_trend'        => round($gTrend, 3),
+                'forecast'            => round($signals[1], 2),
+                'forecast_low'        => round($signals[0], 2),
+                'forecast_high'       => round($signals[2], 2),
+            ];
+        }, $rows);
+    }
+
+    /**
+     * CAGR (geometrický průměrný roční růst) z posledních ≤5 ukončených let.
+     * Vrací růstový faktor (1.25 = +25 %/rok), nebo null když není dost dat (< 2 roky).
+     *
+     * @param array<int, float> $byYear year => total
+     */
+    private function trendGrowth(array $byYear): ?float
+    {
+        $byYear = array_filter($byYear, static fn (float $t): bool => $t > 0);
+        if (count($byYear) < 2) {
+            return null;
+        }
+        ksort($byYear);
+        $window = array_slice($byYear, -5, null, true);
+        $firstYear = array_key_first($window);
+        $lastYear = array_key_last($window);
+        $span = $lastYear - $firstYear;
+        if ($span < 1 || $window[$firstYear] <= 0) {
+            return null;
+        }
+        return ($window[$lastYear] / $window[$firstYear]) ** (1.0 / $span);
     }
 
     /**

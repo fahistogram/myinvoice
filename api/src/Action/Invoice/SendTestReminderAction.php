@@ -75,8 +75,11 @@ final class SendTestReminderAction
             }
         }
 
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
         try {
-            $pdfPath = $this->renderer->render($id);
+            $pdfPath = $this->renderer->render($id, false, $userId);
         } catch (\Throwable $e) {
             return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
         }
@@ -102,12 +105,19 @@ final class SendTestReminderAction
                     'name' => basename($pdfPath),
                     'contentType' => 'application/pdf',
                 ]],
+                $userId,
             );
         } catch (\Throwable $e) {
+            $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+            $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+            $this->logger->log('email.test_reminder_failed', $user['id'] ?? null, 'invoice', $id, [
+                'to' => $testRecipient,
+                'days_overdue' => $daysOverdue,
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $request->getHeaderLine('User-Agent'));
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
         }
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test_reminder', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,

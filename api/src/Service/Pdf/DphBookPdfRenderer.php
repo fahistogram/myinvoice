@@ -33,7 +33,7 @@ final class DphBookPdfRenderer
         $body = $this->twig()->render('dph_book.twig', $data);
 
         $rootDir = Bootstrap::rootDir();
-        $tmpDir = $rootDir . '/storage/cache/mpdf';
+        $tmpDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/mpdf');
         if (!is_dir($tmpDir)) {
             @mkdir($tmpDir, 0755, true);
         }
@@ -50,7 +50,10 @@ final class DphBookPdfRenderer
             'tempDir'       => $tmpDir,
             'autoPageBreak' => true,
         ]);
-        $period = $data['period']['year'] . '-' . str_pad((string) $data['period']['month'], 2, '0', \STR_PAD_LEFT);
+        $quarter = $data['period']['quarter'] ?? null;
+        $period = $quarter !== null
+            ? $data['period']['year'] . '-Q' . $quarter
+            : $data['period']['year'] . '-' . str_pad((string) $data['period']['month'], 2, '0', \STR_PAD_LEFT);
         $mpdf->SetTitle('Kniha DPH ' . $period);
         $mpdf->SetCreator('MyInvoice.cz');
 

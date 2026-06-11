@@ -37,7 +37,7 @@ final class ViesClient
     public function lookup(string $vatId): array
     {
         $vatId = strtoupper(preg_replace('/[\s\-]/', '', $vatId) ?? '');
-        if (!preg_match('/^([A-Z]{2})(\d{4,12})$/', $vatId, $m)) {
+        if (!preg_match('/^([A-Z]{2})([A-Z0-9+*]{2,12})$/', $vatId, $m)) {
             return ['valid' => false, 'source' => 'error'];
         }
         $country = $m[1];
@@ -49,14 +49,20 @@ final class ViesClient
             return $cached;
         }
 
-        // CZ → ARES (přesnější + spolehlivější než VIES pro tuzemce)
-        if ($country === 'CZ') {
+        // CZ → ARES (přesnější + spolehlivější než VIES pro tuzemce), ALE jen když
+        // číselná část DIČ odpovídá IČO (8 číslic). OSVČ s historickým DIČ =
+        // "CZ" + rodné číslo (9–10 číslic) NENÍ IČO → ARES-dle-IČO by hledal
+        // neexistující subjekt a vrátil false-negative "DIČ neexistuje" i pro
+        // aktivního plátce (např. CZ8901311870 = Ing. Jiří Zikmund). Pro takové
+        // (i pro 8místné IČO, které ARES nenajde) spadneme na autoritativní VIES,
+        // který ověří DIČ jak je zadané.
+        if ($country === 'CZ' && strlen($number) === 8) {
             $aresResult = $this->tryAres($number, $vatId);
             if ($aresResult !== null) {
                 $this->cache($vatId, $aresResult);
                 return $aresResult;
             }
-            // ARES nedostupné → spadneme na VIES jako fallback
+            // ARES nedostupné / subjekt nenalezen → spadneme na VIES jako fallback
         }
 
         // Try REST first
@@ -80,24 +86,18 @@ final class ViesClient
      * CZ-only verifikace přes ARES. Subjekt je "platný plátce DPH" iff
      * `seznamRegistraci.stavZdrojeDph === 'AKTIVNI'` (mapováno do `is_vat_payer`).
      *
+     * Vrací null = ARES nerozhodl (nedostupný NEBO subjekt nenalezen) → necháme
+     * rozhodnout autoritativní VIES. ARES bereme jako směrodatný JEN když subjekt
+     * skutečně našel; "nenalezeno" nesmí být tvrdý negativ, protože IČO odvozené
+     * z DIČ nemusí existovat (viz lookup() pro OSVČ s rodným číslem v DIČ).
+     *
      * @return array{valid:bool, name:string, address:string, parsed:?array, country:string, vat_number:string, source:'ares'}|null
      */
     private function tryAres(string $ico, string $vatId): ?array
     {
         $r = $this->ares->lookup($ico);
-        if ($r === null) {
-            return null; // ARES nedostupný → fallback na VIES
-        }
-        if (!($r['found'] ?? false)) {
-            return [
-                'valid'      => false,
-                'name'       => '',
-                'address'    => '',
-                'parsed'     => null,
-                'country'    => 'CZ',
-                'vat_number' => $vatId,
-                'source'     => 'ares',
-            ];
+        if ($r === null || !($r['found'] ?? false)) {
+            return null; // ARES nedostupný / subjekt nenalezen → fallback na VIES
         }
         $data   = $r['data'] ?? [];
         $valid  = (bool) ($data['is_vat_payer'] ?? false);

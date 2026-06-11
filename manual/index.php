@@ -10,13 +10,19 @@
  * auth-gate, doplň session check níže).
  *
  * Vyžaduje vygenerovaný obsah v manual/generated/ (php tools/generateManualHtml.php).
+ * Vzhled: manual.css — design tokeny zrcadlí aplikaci (web/src/styles/main.css),
+ * light/dark sdílí localStorage klíč `myinvoice-color-scheme` s aplikací.
  */
 
 declare(strict_types=1);
 
-$dir   = __DIR__ . '/generated';
+// HTML nechceme cachovat (jinak drží starý ?v= odkaz na CSS); samotné CSS
+// se cachuje normálně — verzi řídí query param z filemtime.
+header('Cache-Control: no-cache');
+
+$dir     = __DIR__ . '/generated';
 $tocFile = $dir . '/_toc.php';
-$ch    = isset($_GET['ch']) ? preg_replace('/[^A-Za-z0-9_-]/', '', (string)$_GET['ch']) : '';
+$ch      = isset($_GET['ch']) ? preg_replace('/[^A-Za-z0-9_-]/', '', (string)$_GET['ch']) : '';
 
 if (!is_file($tocFile)) {
     http_response_code(503);
@@ -30,14 +36,14 @@ if (!is_file($tocFile)) {
 $groups = require $tocFile;
 
 // Resolve aktuální kapitolu
-$bodyHtml = '';
-$activeFile = '';
+$bodyHtml    = '';
+$activeFile  = '';
 $activeTitle = 'MyInvoice.cz — manuál';
 
 if ($ch !== '') {
     $f = $dir . '/' . $ch . '.html';
     if (is_file($f)) {
-        $bodyHtml = file_get_contents($f);
+        $bodyHtml   = file_get_contents($f);
         $activeFile = $ch;
         // Najdi titulek z _toc
         foreach ($groups as $g) {
@@ -50,10 +56,53 @@ if ($ch !== '') {
 
 if ($bodyHtml === '') {
     // Default landing
-    $indexFile = $dir . '/INDEX.html';
-    $bodyHtml = is_file($indexFile) ? file_get_contents($indexFile) : '<h1>Manuál</h1>';
+    $indexFile  = $dir . '/INDEX.html';
+    $bodyHtml   = is_file($indexFile) ? file_get_contents($indexFile) : '<h1>Manuál</h1>';
     $activeFile = 'INDEX';
 }
+
+$isLanding = $activeFile === 'INDEX';
+
+// Verze aplikace (root VERSION) — pro patičku sidebaru
+$versionFile = dirname(__DIR__) . '/VERSION';
+$version     = is_file($versionFile) ? trim((string)file_get_contents($versionFile)) : '';
+
+// Accent barvy skupin TOC — pozičně mapované na skupiny v INDEX.md tak, aby
+// barvy sekcí odpovídaly menu aplikace (AppLayout ACCENT_CLASSES): Prodej=primary,
+// Nákup=warning, Finance=success, Dokumenty=neutral, Daně=danger, Systém=neutral.
+// Úvodní blok (Instalace a start) = sky; Systém = indigo, Reference = stone
+// (vlastní odstíny, aby se nekryly s neutrální Dokumenty).
+// Stejné pořadí drží i pilulky landing page (manual.css .landing h3:nth-of-type).
+$ACCENTS = ['sky', 'primary', 'warning', 'success', 'neutral', 'danger', 'indigo', 'stone'];
+
+// Pager: předchozí / další kapitola (flatten TOC)
+$flat = [];
+foreach ($groups as $g) {
+    foreach ($g['items'] as $it) { $flat[] = $it; }
+}
+$prevCh = $nextCh = null;
+if (!$isLanding) {
+    foreach ($flat as $i => $it) {
+        if ($it['file'] === $activeFile) {
+            $prevCh = $flat[$i - 1] ?? null;
+            $nextCh = $flat[$i + 1] ?? null;
+            break;
+        }
+    }
+}
+
+/** Číslo kapitoly ze jména souboru (01_Uvod → 01, 13a_… → 13a). */
+function chapterNum(string $file): string {
+    return preg_match('/^(\d+[a-z]?)_/', $file, $m) ? $m[1] : '';
+}
+
+$cssVer = (string)@filemtime(__DIR__ . '/manual.css');
+$hasPdf = is_file(__DIR__ . '/manual.pdf');
+
+// SVG ikony (Heroicons outline, stroke 2, viewBox 24)
+$ICON_SYSTEM = 'M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25';
+$ICON_LIGHT  = 'M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0z';
+$ICON_DARK   = 'M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998z';
 
 ?>
 <!doctype html>
@@ -61,491 +110,244 @@ if ($bodyHtml === '') {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#3B2D83">
     <title><?= htmlspecialchars($activeTitle, ENT_QUOTES) ?></title>
     <link rel="icon" type="image/svg+xml" href="/styles/logo.svg">
-    <style>
-:root {
-    --primary: #6c5ce7;
-    --primary-dark: #4f3fb8;
-    --primary-light: #ede9fe;
-    --bg: #fafbff;
-    --panel: #fff;
-    --border: #e5e7eb;
-    --text: #1f2937;
-    --muted: #6b7280;
-    --code-bg: #f3f4f6;
-    --code-text: #c0392b;
-    /* Sidebar — světlé pozadí, kontrastní text, primary accent */
-    --sidebar-bg: #ffffff;
-    --sidebar-bg-2: #f8f9fc;
-    --sidebar-text: #1f2937;
-    --sidebar-muted: #6b7280;
-    --sidebar-border: #e5e7eb;
-    --sidebar-hover: #f4f2fb;
-    --sidebar-active-bg: #ede9fe;
-    --sidebar-active-text: #4c1d95;
-    --sidebar-accent: #6c5ce7;
-}
-* { box-sizing: border-box; }
-body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
-    font-size: 16px;
-    line-height: 1.6;
-    color: var(--text);
-    background: var(--bg);
-}
-a { color: var(--primary); text-decoration: none; }
-a:hover { text-decoration: underline; }
-.layout { min-height: 100vh; }
-html, body { overflow-x: hidden; max-width: 100%; }
-.sidebar {
-    background: var(--sidebar-bg);
-    color: var(--sidebar-text);
-    border-right: 1px solid var(--sidebar-border);
-    padding: 24px 0;
-    overflow-y: auto;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 280px;
-    height: 100vh;
-    z-index: 10;
-    box-shadow: 1px 0 0 var(--sidebar-border);
-    /* Custom scrollbar pro Webkit — diskrétní, ladí s light theme */
-    scrollbar-width: thin;
-    scrollbar-color: #d1d5db transparent;
-}
-.sidebar::-webkit-scrollbar { width: 6px; }
-.sidebar::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
-.sidebar::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
-.sidebar-brand {
-    padding: 0 20px 20px;
-    border-bottom: 1px solid var(--sidebar-border);
-    margin-bottom: 20px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-.sidebar-brand img {
-    width: 36px;
-    height: 36px;
-    background: linear-gradient(135deg, #6c5ce7 0%, #4c1d95 100%);
-    border-radius: 8px;
-    padding: 4px;
-    box-shadow: 0 2px 8px rgba(108, 92, 231, 0.25);
-}
-.sidebar-brand .title { font-weight: 700; color: #15131D; font-size: 16px; }
-.sidebar-brand .sub { font-size: 12px; color: var(--sidebar-muted); margin-top: 2px; }
-.sidebar-brand a { color: inherit; text-decoration: none; }
-.toc-group { margin: 0 0 20px; }
-.toc-group-title {
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 1.4px;
-    color: #0f172a;
-    padding: 16px 20px 10px;
-    font-weight: 800;
-    margin-bottom: 6px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.toc-group-title::before {
-    content: "";
-    width: 4px;
-    height: 16px;
-    background: var(--sidebar-accent);
-    border-radius: 2px;
-    flex: 0 0 auto;
-}
-.toc-group ul { list-style: none; margin: 0; padding: 0; }
-.toc-group li a {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 20px 8px 24px;
-    font-size: 14px;
-    color: var(--sidebar-text);
-    border-left: 3px solid transparent;
-    transition: all 0.15s;
-    border-radius: 0;
-}
-.toc-group li a::before {
-    content: "›";
-    color: #cbd5e1;
-    font-size: 16px;
-    font-weight: 700;
-    line-height: 1;
-    flex: 0 0 auto;
-    transition: color 0.15s;
-}
-.toc-group li a:hover {
-    background: var(--sidebar-hover);
-    color: var(--sidebar-active-text);
-    text-decoration: none;
-}
-.toc-group li a:hover::before { color: var(--sidebar-accent); }
-.toc-group li a.active {
-    background: var(--sidebar-active-bg);
-    border-left-color: var(--sidebar-accent);
-    font-weight: 600;
-    color: var(--sidebar-active-text);
-}
-.toc-group li a.active::before { color: var(--sidebar-accent); content: "•"; }
-.toc-group li.sub a {
-    padding-left: 44px;
-    font-size: 13px;
-    color: var(--sidebar-muted);
-}
-.toc-group li.sub a::before { content: "—"; color: #cbd5e1; font-size: 13px; }
-.toc-group li.sub a:hover { color: var(--sidebar-active-text); background: var(--sidebar-hover); }
-.toc-group li.sub a:hover::before { color: var(--sidebar-accent); }
-.search-wrap { padding: 0 20px 20px; }
-.search-wrap input {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--sidebar-border);
-    background: #fff;
-    border-radius: 8px;
-    font-size: 14px;
-    outline: none;
-    color: var(--sidebar-text);
-}
-.search-wrap input::placeholder { color: var(--sidebar-muted); }
-.search-wrap input:focus {
-    border-color: var(--sidebar-accent);
-    background: #fff;
-    box-shadow: 0 0 0 3px rgba(108,92,231,0.15);
-}
-.search-results {
-    margin-top: 8px;
-    max-height: 300px;
-    overflow-y: auto;
-    background: var(--panel);
-    border-radius: 8px;
-    display: none;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-}
-.search-results.active { display: block; }
-.search-results .result {
-    display: block;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-    cursor: pointer;
-    font-size: 13px;
-    color: var(--text);
-    text-decoration: none;
-}
-.search-results .result:hover { background: var(--bg); text-decoration: none; }
-.search-results .result-title { font-weight: 600; color: var(--primary-dark); }
-.search-results .result-snip { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.sidebar-footer {
-    padding: 16px 20px;
-    font-size: 12px;
-    color: var(--sidebar-muted);
-    text-align: center;
-    border-top: 1px solid var(--sidebar-border);
-    margin-top: 12px;
-}
-.sidebar-footer a { color: var(--sidebar-accent); }
-.sidebar-footer a:hover { color: var(--sidebar-active-text); }
-.btn-back {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    margin: 0 20px 16px;
-    padding: 10px 14px;
-    background: var(--sidebar-accent);
-    border: 1px solid var(--sidebar-accent);
-    color: #fff;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    text-decoration: none;
-    transition: all 0.15s;
-    box-shadow: 0 1px 2px rgba(108, 92, 231, 0.2);
-}
-.btn-back:hover {
-    background: #5849c2;
-    border-color: #5849c2;
-    color: #fff;
-    text-decoration: none;
-    transform: translateX(-2px);
-    box-shadow: 0 4px 12px rgba(108, 92, 231, 0.3);
-}
-.btn-back svg { width: 16px; height: 16px; }
-.btn-pdf {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    margin: 0 20px 16px;
-    padding: 10px 14px;
-    background: #fff;
-    border: 1px solid var(--sidebar-accent);
-    color: var(--sidebar-accent);
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    text-decoration: none;
-    transition: all 0.15s;
-}
-.btn-pdf:hover {
-    background: var(--sidebar-active-bg);
-    color: var(--sidebar-active-text);
-    border-color: var(--sidebar-active-text);
-    text-decoration: none;
-    box-shadow: 0 2px 8px rgba(108, 92, 231, 0.18);
-}
-.btn-pdf svg { width: 16px; height: 16px; }
-.sidebar-version {
-    display: inline-block;
-    background: var(--sidebar-active-bg);
-    color: var(--sidebar-active-text);
-    padding: 2px 10px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 700;
-    margin-bottom: 4px;
-}
-.content {
-    /* Sidebar je position:fixed (280px), content musí mít margin-left = sidebar width.
-       Žádný max-width, aby text + figure margin auto vycentrovaly v celé dostupné
-       šířce — bez dead-space napravo od contentu. */
-    padding: 32px 40px;
-    margin-left: 280px;
-    min-width: 0;
-    /* Long URL nebo unbreakable strings nemají rozbít grid column */
-    overflow-wrap: break-word;
-    word-wrap: break-word;
-    /* Optional: na ultra-wide (>1600px) limitovat čitelnost textu (max-width
-       na <p>, <li> atd.) — figure ne. Viz pravidla níž. */
-}
-/* Limit šířky čitelného textu na ultra-wide displays (čitelnost: ~80 chars/line) */
-.content > p,
-.content > ul,
-.content > ol,
-.content > blockquote,
-.content > h1,
-.content > h2,
-.content > h3,
-.content > table {
-    max-width: 1100px;
-    margin-left: auto;
-    margin-right: auto;
-}
-.content pre.code-block { max-width: 100%; overflow-x: auto; }
-.content table.md-tab { table-layout: fixed; }
-.content h1 { font-size: 32px; line-height: 1.2; margin: 0 0 24px; color: var(--text); }
-.content h2 { font-size: 24px; line-height: 1.3; margin: 32px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--text); }
-.content h3 { font-size: 18px; margin: 24px 0 12px; color: var(--text); }
-.content p { margin: 0 0 14px; }
-.content ul, .content ol { margin: 0 0 14px; padding-left: 28px; }
-.content li { margin-bottom: 4px; }
-.content code {
-    background: var(--code-bg);
-    color: var(--code-text);
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
-    font-size: 13px;
-}
-.content pre.code-block {
-    background: #1e1e2e;
-    color: #cdd6f4;
-    padding: 16px;
-    border-radius: 8px;
-    overflow-x: auto;
-    margin: 0 0 16px;
-    font-family: "JetBrains Mono", Consolas, monospace;
-    font-size: 13px;
-    line-height: 1.5;
-}
-.content pre.code-block code { background: transparent; color: inherit; padding: 0; }
-.content blockquote {
-    margin: 0 0 16px;
-    padding: 12px 16px;
-    background: #fff8e1;
-    border-left: 4px solid #f39c12;
-    border-radius: 0 6px 6px 0;
-}
-.content blockquote p { margin: 0; }
-.content table.md-tab {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 0 0 16px;
-    font-size: 14px;
-}
-.content table.md-tab th,
-.content table.md-tab td {
-    border: 1px solid var(--border);
-    padding: 8px 12px;
-}
-.content table.md-tab th {
-    background: var(--bg);
-    font-weight: 600;
-}
-.content table.md-tab tr:nth-child(2n) td { background: #fafafa; }
-.content figure.fig {
-    /* `fit-content` zmenší figure na šířku obrázku — malé natural, velké capped na 100%.
-       Žádný border / pozadí — jen samotný obrázek, vystředěný. */
-    width: fit-content;
-    max-width: 100%;
-    margin: 16px auto;
-    padding: 0;
-}
-.content figure.fig img {
-    /* Velké obrázky (> šířka contentu) zmenší na 100%; malé zůstanou v natural size.
-       `margin: 0 auto` vycentruje img v figure — důležité, když JS pak nastaví img
-       max-width pro DPR scaling (img je užší než figure-natural-width). */
-    max-width: 100%;
-    height: auto;
-    display: block;
-    margin: 0 auto;
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}
-.content figure.fig figcaption {
-    text-align: center;
-    margin-top: 6px;
-    font-size: 13px;
-    color: var(--muted);
-    font-style: italic;
-}
-.content figure.fig figcaption {
-    margin-top: 8px;
-    font-size: 13px;
-    color: var(--muted);
-    font-style: italic;
-}
-.content hr { border: 0; border-top: 1px solid var(--border); margin: 32px 0; }
-/* Hamburger menu toggle — viditelný pouze na tablet/mobile */
-.menu-toggle {
-    display: none;
-    position: fixed;
-    top: 12px;
-    left: 12px;
-    z-index: 20;
-    background: var(--sidebar-accent);
-    color: #fff;
-    border: 0;
-    border-radius: 8px;
-    width: 44px;
-    height: 44px;
-    font-size: 22px;
-    cursor: pointer;
-    box-shadow: 0 4px 12px rgba(108,92,231,0.3);
-}
-/* Tablet portrait + mobile: sidebar slide-in, obsah full width */
-@media (max-width: 1023px) {
-    .menu-toggle { display: block; }
-    .sidebar { transform: translateX(-100%); transition: transform 0.25s; }
-    .sidebar.open { transform: translateX(0); }
-    .content { margin-left: 0; padding: 64px 18px 24px; }
-    .content h1 { font-size: 26px; }
-    .content h2 { font-size: 21px; }
-}
-@media (max-width: 640px) {
-    .content { padding: 64px 16px 20px; }
-}
-    </style>
+    <link rel="stylesheet" href="/manual/manual.css?v=<?= htmlspecialchars($cssVer, ENT_QUOTES) ?>">
+    <script>
+      // Anti-FOUC: nastav .dark ještě před prvním renderem. Klíč je sdílený
+      // s aplikací (composables/useTheme.ts THEME_STORAGE_KEY), takže manuál
+      // automaticky přebírá režim zvolený v aplikaci.
+      (function () {
+        try {
+          var p = (localStorage.getItem('myinvoice-color-scheme') || 'auto').replace(/^"|"$/g, '');
+          if (p === 'dark' || (p !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
 </head>
 <body>
-<button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Menu">☰</button>
-<div class="layout">
-    <aside class="sidebar">
-        <div class="sidebar-brand">
-            <img src="/styles/logo.svg" alt="logo">
-            <div>
-                <div class="title"><a href="/manual">MyInvoice.cz</a></div>
-                <div class="sub">Uživatelský manuál</div>
-            </div>
+
+<!-- ═════════ TOPBAR ═════════ -->
+<header class="topbar">
+    <a href="/manual" class="brand">
+        <img src="/styles/logo.svg" alt="MyInvoice">
+        <span class="wordmark">My<b>Invoice</b><i>.cz</i></span>
+        <span class="brand-badge">Manuál</span>
+    </a>
+    <div class="topbar-right">
+        <div class="theme-group" role="group" aria-label="Barevný režim">
+            <button type="button" class="theme-btn" data-theme="auto" title="Podle systému" aria-label="Podle systému">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="<?= $ICON_SYSTEM ?>"/></svg>
+            </button>
+            <button type="button" class="theme-btn" data-theme="light" title="Světlý" aria-label="Světlý">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="<?= $ICON_LIGHT ?>"/></svg>
+            </button>
+            <button type="button" class="theme-btn" data-theme="dark" title="Tmavý" aria-label="Tmavý">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="<?= $ICON_DARK ?>"/></svg>
+            </button>
         </div>
-        <a href="/" class="btn-back">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-            Zpět do Admin
-        </a>
-        <?php if (is_file(__DIR__ . '/manual.pdf')): ?>
-        <a href="/manual/manual.pdf" class="btn-pdf" download>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16" />
-            </svg>
+        <?php if ($hasPdf): ?>
+        <a href="/manual/manual.pdf" class="btn btn-outline hide-mobile" download>
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg>
             Stáhnout PDF
         </a>
         <?php endif; ?>
+        <a href="/" class="btn btn-primary hide-mobile">
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+            Zpět do Admin
+        </a>
+        <button type="button" class="hamburger" id="menu-toggle" aria-label="Menu" aria-expanded="false">
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+    </div>
+</header>
+
+<div class="backdrop" id="backdrop"></div>
+
+<!-- ═════════ SIDEBAR ═════════ -->
+<aside class="sidebar" id="sidebar">
+    <nav>
+        <div class="sidebar-actions">
+            <a href="/" class="btn btn-primary">
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+                Zpět do Admin
+            </a>
+            <?php if ($hasPdf): ?>
+            <a href="/manual/manual.pdf" class="btn btn-outline" download>
+                <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg>
+                PDF
+            </a>
+            <?php endif; ?>
+        </div>
         <div class="search-wrap">
-            <input type="search" id="manual-search" placeholder="Hledat v manuálu…" />
+            <svg class="search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607z"/></svg>
+            <input type="search" id="manual-search" placeholder="Hledat v manuálu…" autocomplete="off" />
             <div class="search-results" id="search-results"></div>
         </div>
-        <?php foreach ($groups as $g): ?>
+        <ul class="toc-top">
+            <li>
+                <a href="/manual/" class="nav-item <?= $isLanding ? 'active' : '' ?>">
+                    <span class="num"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path stroke-linecap="round" stroke-linejoin="round" d="M3 11.5 12 4l9 7.5M5.5 9.7V20a1 1 0 0 0 1 1H10v-5.5h4V21h3.5a1 1 0 0 0 1-1V9.7"/></svg></span>
+                    Homepage
+                </a>
+            </li>
+        </ul>
+        <?php foreach ($groups as $gi => $g): ?>
             <div class="toc-group">
-                <div class="toc-group-title"><?= htmlspecialchars($g['title']) ?></div>
+                <div class="nav-pill acc-<?= $ACCENTS[$gi % count($ACCENTS)] ?>"><?= htmlspecialchars($g['title']) ?></div>
                 <ul>
                 <?php foreach ($g['items'] as $it): ?>
                     <li>
                         <a href="/manual?ch=<?= urlencode($it['file']) ?>"
-                           class="<?= $activeFile === $it['file'] ? 'active' : '' ?>">
+                           class="nav-item <?= $activeFile === $it['file'] ? 'active' : '' ?>">
+                            <span class="num"><?= htmlspecialchars(chapterNum($it['file'])) ?></span>
                             <?= htmlspecialchars($it['title']) ?>
                         </a>
                     </li>
                     <?php if ($activeFile === $it['file'] && !empty($it['sub'])): ?>
                         <?php foreach ($it['sub'] as $s): ?>
-                            <li class="sub"><a href="#<?= htmlspecialchars($s['slug']) ?>"><?= htmlspecialchars($s['text']) ?></a></li>
+                            <li><a class="nav-sub" href="#<?= htmlspecialchars($s['slug']) ?>"><?= htmlspecialchars($s['text']) ?></a></li>
                         <?php endforeach; ?>
                     <?php endif; ?>
                 <?php endforeach; ?>
                 </ul>
             </div>
         <?php endforeach; ?>
-        <div class="sidebar-footer">
-            Vyvíjí <a href="https://mywebdesign.cz/" target="_blank">MyWebdesign.cz</a>
-        </div>
-    </aside>
-    <main class="content">
-        <?= $bodyHtml ?>
-    </main>
-</div>
+    </nav>
+    <div class="sidebar-footer">
+        <div>MyInvoice.cz<?php if ($version !== ''): ?> <span class="ver">v<?= htmlspecialchars($version) ?></span><?php endif; ?></div>
+        <div>Vyvíjí <a href="https://mywebdesign.cz/" target="_blank" rel="noopener">MyWebdesign.cz</a></div>
+    </div>
+</aside>
+
+<!-- ═════════ OBSAH ═════════ -->
+<main class="content<?= $isLanding ? ' landing' : '' ?>">
+    <?= $bodyHtml ?>
+    <?php if ($prevCh || $nextCh): ?>
+    <nav class="pager" aria-label="Další kapitoly">
+        <?php if ($prevCh): ?>
+        <a class="prev" href="/manual?ch=<?= urlencode($prevCh['file']) ?>">
+            <span class="pager-label">← Předchozí</span>
+            <span class="pager-title"><?= htmlspecialchars($prevCh['title']) ?></span>
+        </a>
+        <?php endif; ?>
+        <?php if ($nextCh): ?>
+        <a class="next" href="/manual?ch=<?= urlencode($nextCh['file']) ?>">
+            <span class="pager-label">Další →</span>
+            <span class="pager-title"><?= htmlspecialchars($nextCh['title']) ?></span>
+        </a>
+        <?php endif; ?>
+    </nav>
+    <?php endif; ?>
+</main>
+
+<!-- SVG filtr pro .img-auto-dark (viz manual.css): lineární remap kanálů
+     černá → #1D1B2A (surface), bílá zůstává — tmavým plochám invertovaných
+     screenshotů dá indigo nádech přesně v barvě formulářů aplikace. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <filter id="dark-surface-tint" color-interpolation-filters="sRGB">
+        <feComponentTransfer>
+            <feFuncR type="linear" slope="0.8863" intercept="0.1137"/>
+            <feFuncG type="linear" slope="0.8941" intercept="0.1059"/>
+            <feFuncB type="linear" slope="0.8353" intercept="0.1647"/>
+        </feComponentTransfer>
+    </filter>
+</svg>
 
 <script>
-// Image DPR scaling — Windows scaling 125% způsobuje, že screenshot 880px se
-// vykreslí na 1100 device px (browser upscaluje pro vysoké DPI desktop displeje).
-// Image omezíme na natural / dpr, takže 1 source px = 1 device px (1:1 mapping).
-//
-// Mobile (typicky dpr 2–3) tohle PŘESKAKUJE — tam by se obrázek zmenšil na 1/3
-// a uživatel by neviděl detaily. Místo toho jen max-width: 100% (responsive).
-//
-// Trigger: úzké viewporty (< 1024px) → bez scalingu, jen 100% width.
-(function() {
-  const dpr = window.devicePixelRatio || 1;
-  if (dpr <= 1) return;
-  const apply = (img) => {
-    if (img.naturalWidth <= 0) return;
-    if (window.innerWidth < 1024) {
-      // Mobile / tablet — ponech responsive (default max-width: 100%)
-      img.style.maxWidth = '100%';
-      return;
+// ── Barevný režim (System / Light / Dark) — sdílí klíč s aplikací ──
+(function () {
+    const KEY = 'myinvoice-color-scheme';
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    const get = () => { try { return (localStorage.getItem(KEY) || 'auto').replace(/^"|"$/g, ''); } catch (e) { return 'auto'; } };
+    const set = (v) => { try { localStorage.setItem(KEY, v); } catch (e) {} };
+    const btns = document.querySelectorAll('.theme-btn');
+    function apply() {
+        const p = get();
+        const dark = p === 'dark' || (p !== 'light' && mq.matches);
+        document.documentElement.classList.toggle('dark', dark);
+        btns.forEach(b => b.classList.toggle('active', b.dataset.theme === p));
     }
-    const px = Math.round(img.naturalWidth / dpr);
-    img.style.maxWidth = `min(${px}px, 100%)`;
-  };
-  const all = () => document.querySelectorAll('.content figure.fig img').forEach(img => {
-    if (img.complete) apply(img); else img.addEventListener('load', () => apply(img));
-  });
-  all();
-  // Re-aplikuj při resize (přechod desktop ↔ mobile)
-  let resizeTimer;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(all, 150);
-  });
+    btns.forEach(b => b.addEventListener('click', () => { set(b.dataset.theme); apply(); }));
+    mq.addEventListener('change', apply);
+    apply();
 })();
 
-// Klientské vyhledávání přes search-index.json
-(async function() {
+// ── Mobile drawer ──
+(function () {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('backdrop');
+    const toggle = document.getElementById('menu-toggle');
+    function setOpen(open) {
+        sidebar.classList.toggle('open', open);
+        backdrop.classList.toggle('show', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('open')));
+    backdrop.addEventListener('click', () => setOpen(false));
+})();
+
+// ── Světlé screenshoty → kandidáti na dark inverzi ──
+// Změř průměrný jas (canvas 32×32, same-origin /manual/img/); světlé obrázky
+// dostanou .img-auto-dark — samotný filtr aplikuje CSS jen pod .dark, takže
+// přepínání témat funguje bez přepočtu.
+(function () {
+    const mark = (img) => {
+        try {
+            const c = document.createElement('canvas');
+            c.width = 32; c.height = 32;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0, 32, 32);
+            const d = ctx.getImageData(0, 0, 32, 32).data;
+            let sum = 0;
+            for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+            if (sum / (d.length / 4) > 160) img.classList.add('img-auto-dark');
+        } catch (e) { /* cross-origin taint apod. — nech bez filtru */ }
+    };
+    document.querySelectorAll('.content figure.fig img').forEach(img => {
+        if (img.complete && img.naturalWidth) mark(img);
+        else img.addEventListener('load', () => mark(img), { once: true });
+    });
+})();
+
+// ── Externí odkazy v obsahu → nový tab ──
+document.querySelectorAll('.content a[href^="http"]').forEach(a => {
+    a.target = '_blank';
+    a.rel = 'noopener';
+});
+
+// ── Image DPR scaling — Windows scaling 125% způsobuje, že screenshot 880px se
+// vykreslí na 1100 device px (browser upscaluje pro vysoké DPI desktop displeje).
+// Image omezíme na natural / dpr, takže 1 source px = 1 device px (1:1 mapping).
+// Mobile (typicky dpr 2–3) tohle PŘESKAKUJE — tam jen max-width: 100% (responsive).
+(function () {
+    const dpr = window.devicePixelRatio || 1;
+    if (dpr <= 1) return;
+    const apply = (img) => {
+        if (img.naturalWidth <= 0) return;
+        if (window.innerWidth < 1024) {
+            img.style.maxWidth = '100%';
+            return;
+        }
+        const px = Math.round(img.naturalWidth / dpr);
+        img.style.maxWidth = `min(${px}px, 100%)`;
+    };
+    const all = () => document.querySelectorAll('.content figure.fig img').forEach(img => {
+        if (img.complete) apply(img); else img.addEventListener('load', () => apply(img));
+    });
+    all();
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(all, 150);
+    });
+})();
+
+// ── Klientské vyhledávání přes search-index.json ──
+(async function () {
     const input = document.getElementById('manual-search');
     const results = document.getElementById('search-results');
     if (!input) return;
@@ -558,7 +360,7 @@ html, body { overflow-x: hidden; max-width: 100%; }
     }
     function debounce(fn, ms) {
         let t;
-        return function(...args) { clearTimeout(t); t = setTimeout(() => fn.apply(this, args), ms); };
+        return function (...args) { clearTimeout(t); t = setTimeout(() => fn.apply(this, args), ms); };
     }
     function score(item, query) {
         const q = query.toLowerCase();
@@ -584,7 +386,7 @@ html, body { overflow-x: hidden; max-width: 100%; }
         const to = Math.min(text.length, i + q.length + 50);
         return (from > 0 ? '…' : '') + text.substring(from, to) + (to < text.length ? '…' : '');
     }
-    input.addEventListener('input', debounce(async function() {
+    input.addEventListener('input', debounce(async function () {
         const q = input.value.trim();
         if (q.length < 2) { results.classList.remove('active'); results.innerHTML = ''; return; }
         const idx = await loadIndex();
@@ -593,7 +395,7 @@ html, body { overflow-x: hidden; max-width: 100%; }
         results.innerHTML = matches.map(m => {
             const sec = bestSection(m.item, q);
             const url = '/manual?ch=' + encodeURIComponent(m.item.f) + (sec ? '#' + sec.a : '');
-            const titleHtml = escHtml(m.item.t) + (sec ? ' <span style="color:var(--muted);font-weight:400">› ' + escHtml(sec.t) + '</span>' : '');
+            const titleHtml = escHtml(m.item.t) + (sec ? ' <span>› ' + escHtml(sec.t) + '</span>' : '');
             return '<a class="result" href="' + escHtml(url) + '"><div class="result-title">' + titleHtml + '</div><div class="result-snip">' + escHtml(snippet(m.item.b, q)) + '</div></a>';
         }).join('');
         results.classList.add('active');

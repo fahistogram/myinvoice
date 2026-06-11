@@ -21,6 +21,8 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 
 final class CreateInvoiceAction
 {
+    use HandlesVarsymbolDuplicate;
+
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly ClientRepository $clients,
@@ -57,7 +59,14 @@ final class CreateInvoiceAction
         // Auto-default VAT klasifikace pokud user nezadal (s multi-tenant scope)
         $this->applyVatClassificationDefaults($body, SupplierGuard::currentId($request));
 
-        $id = $this->repo->createDraft($body, $userId);
+        try {
+            $id = $this->repo->createDraft($body, $userId);
+        } catch (\PDOException $e) {
+            if ($dupMsg = self::varsymbolDuplicateMessage($e, $body['varsymbol'] ?? null)) {
+                return Json::error($response, 'varsymbol_duplicate', $dupMsg, 409);
+            }
+            throw $e;
+        }
         $this->repo->replaceItems($id, (array) ($body['items'] ?? []));
         $this->calc->recompute($id);
         $rateMeta = $this->rateApplier->applyToInvoice($id);
@@ -83,6 +92,10 @@ final class CreateInvoiceAction
     {
         $vatRates = $this->repo->vatRateMap();
         $reverseCharge = !empty($body['reverse_charge']);
+        // Country-aware RC: tuzemský odběratel → §92a (ř.25), zahraniční EU → dodání do JČS (ř.20).
+        $customerEuForeign = $reverseCharge
+            && (int) ($body['client_id'] ?? 0) > 0
+            && $this->repo->clientIsEuForeign((int) $body['client_id']);
 
         if (!empty($body['items']) && is_array($body['items'])) {
             foreach ($body['items'] as &$item) {
@@ -90,7 +103,7 @@ final class CreateInvoiceAction
                 $rateId = (int) ($item['vat_rate_id'] ?? 0);
                 $rate = (float) ($vatRates[$rateId] ?? 0);
                 $taxDate = $body['tax_date'] ?? $body['issue_date'] ?? null;
-                $item['vat_classification_code'] = $this->vatDefaulter->defaultForSale($rate, $reverseCharge, $taxDate, $supplierId);
+                $item['vat_classification_code'] = $this->vatDefaulter->defaultForSale($rate, $reverseCharge, $taxDate, $supplierId, $customerEuForeign);
             }
             unset($item);
         }
@@ -109,6 +122,7 @@ final class CreateInvoiceAction
                 'sale',
                 $body['tax_date'] ?? $body['issue_date'] ?? null,
                 $supplierId,
+                $customerEuForeign,
             );
         }
     }

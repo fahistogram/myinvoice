@@ -9,6 +9,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\ProjectRepository;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
+use MyInvoice\Service\Invoice\VarsymbolGenerator;
 use ZipArchive;
 
 /**
@@ -45,6 +46,7 @@ final class InvoiceImportService
         private readonly SnapshotBuilder $snapshots,
         private readonly InvoiceCalculator $calculator,
         private readonly IsdocToPurchaseInvoiceMapper $purchaseMapper,
+        private readonly VarsymbolGenerator $varsymbol,
     ) {}
 
     /**
@@ -102,6 +104,9 @@ final class InvoiceImportService
         $created = 0;
         $skipped = 0;
         $failed = 0;
+        // Scopes vydaných faktur, jejichž číselné řady je po importu třeba dorovnat
+        // (counter pozadu za historickými čísly). Klíč = typ|client|datum (idempotentní).
+        $counterScopes = [];
 
         foreach ($parsed as $entry) {
             if (isset($entry['error'])) {
@@ -132,13 +137,37 @@ final class InvoiceImportService
                     // Přidej kind do response pro UI
                     $r['kind'] = $route === 'issued' || $route === 'purchase' ? $route : null;
                     $results[] = ['file' => $label, 'status' => $r['status']] + $r;
-                    if ($r['status'] === 'created') $created++;
+                    if ($r['status'] === 'created') {
+                        $created++;
+                        if ($route === 'issued') {
+                            $type = (string) ($inv['invoice_type'] ?? 'invoice');
+                            $cli  = (int) ($r['client_id'] ?? 0);
+                            $date = (string) ($inv['issue_date'] ?? '');
+                            $counterScopes[$type . '|' . $cli . '|' . $date] = [$type, $cli, $date];
+                        }
+                    }
                     elseif ($r['status'] === 'skipped') $skipped++;
                     else $failed++;
                 } catch (\Throwable $e) {
                     $results[] = ['file' => $label, 'status' => 'failed', 'reason' => $e->getMessage()];
                     $failed++;
                 }
+            }
+        }
+
+        // Dorovnání číselných řad po importu vydaných faktur: counter se posune za
+        // nejvyšší importované číslo odpovídající aktuálnímu template (jinak no-op).
+        // Selhání syncu nesmí shodit import — jen se přeskočí (generátor je i tak
+        // duplicate-aware při dalším vystavení).
+        foreach ($counterScopes as [$type, $cli, $date]) {
+            if (!in_array($type, ['invoice', 'proforma', 'credit_note'], true)) {
+                continue;
+            }
+            try {
+                $for = $date !== '' ? new \DateTimeImmutable($date) : null;
+                $this->varsymbol->syncCounter($supplierId, $type, $for, $cli);
+            } catch (\Throwable) {
+                // ignore — best-effort dorovnání
             }
         }
 
@@ -322,6 +351,10 @@ final class InvoiceImportService
         $paidAt = $isPaid ? ($taxDate ?: $inv['issue_date']) : null;
         $sentAt = (string) $inv['issue_date'] . ' 12:00:00';
 
+        // Výchozí kategorie tržby — default zakázky > klienta (sdílený helper, stejná
+        // logika jako createDraft / recurring), aby i importovaná faktura dostala kategorii.
+        $revenueCategoryId = InvoiceRepository::resolveDefaultRevenueCategoryId($this->db->pdo(), $clientId, $projectId);
+
         // Insert invoice
         $pdo = $this->db->pdo();
         $sql = 'INSERT INTO invoices
@@ -329,8 +362,8 @@ final class InvoiceImportService
              issue_date, tax_date, due_date, currency_id, exchange_rate, exchange_rate_date,
              reverse_charge, language,
              total_without_vat, total_vat, total_with_vat,
-             status, sent_at, paid_at, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)';
+             status, sent_at, paid_at, revenue_category_id, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?)';
 
         $pdo->prepare($sql)->execute([
             $supplierId,
@@ -349,6 +382,7 @@ final class InvoiceImportService
             $status,
             $sentAt,
             $paidAt,
+            $revenueCategoryId,
             $userId,
         ]);
         $invoiceId = (int) $pdo->lastInsertId();

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Dark mode řízený třídou .dark na <html> (nastavuje composable useTheme přes VueUse).
+   :where() drží specificitu na 0, aby utility nebyly přebity. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* ─── Primary — indigo (sladěno s MyWebdesign.cz brand #3B2D83) ─── */
   --color-primary-50:  #F4F2FB;
@@ -25,16 +29,25 @@
   --color-neutral-800: #2A2638;
   --color-neutral-900: #15131D;   /* text */
 
+  /* ─── Surfaces (hodnoty přepínané v .dark) ─── */
+  --color-surface:   #FFFFFF;   /* karty, panely, modály, topbar, sidebar (light = bílá) */
+
   /* ─── Accent — pastel sky blue ─── */
   --color-accent-50:   #EFF6FC;
   --color-accent-100:  #D7E8F6;
   --color-accent-500:  #5BA8E0;
   --color-accent-600:  #3F89C5;
+  /* Teal (modrozelená) — stav „Odesláno": zelená rodina (ladí se zelenou ikonou
+     e-mailu), ale odlišitelná od zelené „Zaplaceno" a od modrého accentu. */
+  --color-teal-50:     #E2F3F4;
+  --color-teal-500:    #4AA9AE;
+  --color-teal-600:    #2D8A91;
 
   /* ─── Semantic (pastel) ─── */
   --color-success-50:  #ECF6F0;
   --color-success-500: #4CAF7A;   /* soft sage */
-  --color-success-600: #3B9665;
+  --color-success-600: #3B9665;   /* primary „go/potvrdit" button (Vystavit, Zaplaceno…) */
+  --color-success-700: #2E7B53;   /* hover plného success tlačítka */
   --color-warning-50:  #FDF6E9;
   --color-warning-500: #E8A547;   /* soft amber */
   --color-warning-600: #C68A30;
@@ -63,6 +76,57 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 12px;
+}
+
+/* ═══════════════════════ DARK MODE ═══════════════════════
+ * Why: nepřebarvujeme komponenty, jen v .dark přepíšeme HODNOTY tokenů.
+ * Neutral škála se obrací (50 = nejtmavší pozadí … 900 = nejsvětlejší text),
+ * takže ~3400 výskytů bg-neutral-50 / text-neutral-900 / border-neutral-200
+ * se překlopí samo. bg-white se nahrazuje za bg-surface (viz převod komponent).
+ * Laděno k indigo brandu #3B2D83. Light mód zůstává beze změny.
+ * How to apply: .dark třídu na <html> řídí composable useTheme. */
+.dark {
+  /* Nativní ovládací prvky (kalendář u input[type=date], scrollbary, checkboxy…)
+     vykreslit tmavě — jinak je kalendář černý na tmavém a špatně vidět. */
+  color-scheme: dark;
+
+  /* Neutral — invertovaná, teplá indigo tmavá */
+  --color-neutral-50:  #14121C;   /* page background */
+  --color-neutral-100: #1C1A28;   /* subtle tint / hover */
+  --color-neutral-200: #2C2840;   /* borders */
+  --color-neutral-300: #3B3656;
+  --color-neutral-400: #6B6488;   /* velmi tlumené/disabled — mírně zesvětleno */
+  --color-neutral-500: #968FAD;   /* muted text (popisky/placeholdery) — ~4.3 → ~5.5:1 (AA) */
+  --color-neutral-600: #A8A1BE;   /* sekundární text */
+  --color-neutral-700: #C6C0DA;
+  --color-neutral-800: #E2DEEC;
+  --color-neutral-900: #F3F1F9;   /* hlavní text */
+
+  /* Plochy nad pozadím */
+  --color-surface:   #1E1B2B;   /* karty / panely / topbar / sidebar */
+
+  /* Primary — zesvětlené pro kontrast a sytost na tmavém podkladu */
+  --color-primary-50:  #221C3A;   /* soft pill bg (bg-primary-50) */
+  --color-primary-100: #2C2450;
+  --color-primary-600: #7C68C4;   /* primary button */
+  --color-primary-700: #9C8FDA;   /* accent text (text-primary-700) — čitelný na tmavém */
+  --color-primary-800: #B7AAE8;   /* silnější accent text (text-primary-800) */
+  --color-primary-900: #D4CCF3;   /* nejsilnější accent text (text-primary-900) */
+
+  /* Semantic soft pozadí (-50) → tmavé tinty */
+  --color-success-50: #16261D;
+  --color-warning-50: #2A2113;
+  --color-danger-50:  #2C1717;
+  /* Zelená (Upravit — outline: border + text + ikona). V dark mírně svítivější
+     pro čitelnost na tmavém podkladu, ale ne neonová. */
+  --color-success-500: #56A98A;   /* border Upravit */
+  --color-success-600: #46A074;   /* text + ikona Upravit (a ostatní success text) */
+  --color-success-700: #2A6446;   /* hover bg tint */
+  --color-accent-50:  #122231;
+  /* accent-100 (soft pill bg — badge Proforma) — bez tohoto override by zůstal
+     světlý #D7E8F6 a v dark módu zářil. Laděno k ostatním -50 stavům. */
+  --color-accent-100: #16344C;
+  --color-teal-50:    #102A2D;   /* stav „Odesláno" — tmavý tint */
 }
 
 html, body {
@@ -101,6 +165,35 @@ html, body {
      :where() drží specificitu na 0, takže Tailwind utility (bg-warning-50,
      hover:bg-neutral-50, …) na <tr> stále vyhrávají. */
   :where(.table-sticky-first tbody tr) {
-    background-color: white;
+    background-color: var(--color-surface);
+  }
+
+  /*
+   * Tenký „plovoucí" scrollbar.
+   * Why: nativní systémový scrollbar (hlavně na Windows a v dark módu) je tlustý
+   * a barevně mimo paletu — v postranním menu vyloženě ruší. Kreslíme vlastní úzký
+   * thumb z neutral tokenů, takže se light/dark přepne sám (neutral škála se v .dark
+   * obrací) a nemusíme řešit dvě varianty.
+   * How to apply: class="scrollbar-slim" na scrollovaný element (overflow-y-auto …).
+   */
+  .scrollbar-slim {
+    scrollbar-width: thin;                                  /* Firefox */
+    scrollbar-color: var(--color-neutral-300) transparent;  /* thumb / track */
+  }
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background-color: var(--color-neutral-300);
+    border-radius: 9999px;
+    border: 2px solid transparent;     /* odsazení → opticky tenčí, „plovoucí" thumb */
+    background-clip: padding-box;
+  }
+  .scrollbar-slim::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-neutral-400);
   }
 }

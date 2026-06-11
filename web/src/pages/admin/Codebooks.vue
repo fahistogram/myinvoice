@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type VatRate, type Country, type CurrencyAccount, type Unit } from '@/api/settings'
+import { settingsApi, type VatRate, type Country, type Unit } from '@/api/settings'
 import { suppliersApi, type SupplierListItem, type SupplierCreatePayload } from '@/api/suppliers'
 import { expenseCategoriesApi, type ExpenseCategory } from '@/api/expenseCategories'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { vatClassificationsApi, type VatClassification } from '@/api/vatClassifications'
+import { taxConstantsApi, type TaxConstantsYear } from '@/api/taxConstants'
+import type { TaxConstantsData } from '@/api/tax'
 import { clientsApi } from '@/api/clients'
 import { useSupplierStore } from '@/stores/supplier'
 import { useAuthStore } from '@/stores/auth'
@@ -16,10 +19,8 @@ const toast = useToast()
 const supplierStore = useSupplierStore()
 const auth = useAuthStore()
 
-type Tab = 'suppliers' | 'currencies' | 'vat' | 'countries' | 'units' | 'expense_categories' | 'vat_classifications'
+type Tab = 'suppliers' | 'currencies' | 'vat' | 'countries' | 'units' | 'expense_categories' | 'revenue_categories' | 'vat_classifications' | 'tax_constants'
 const tab = ref<Tab>('suppliers')
-
-const currencies = ref<CurrencyAccount[]>([])
 const vatRates   = ref<VatRate[]>([])
 const countries  = ref<Country[]>([])
 const units      = ref<Unit[]>([])
@@ -29,9 +30,8 @@ const loading    = ref(false)
 async function loadAll() {
   loading.value = true
   try {
-    [suppliers.value, currencies.value, vatRates.value, countries.value, units.value] = await Promise.all([
+    [suppliers.value, vatRates.value, countries.value, units.value] = await Promise.all([
       suppliersApi.list(),
-      settingsApi.listCurrencies(),
       settingsApi.listVatRates(),
       settingsApi.listCountries(),
       settingsApi.listUnits(),
@@ -44,18 +44,68 @@ onMounted(loadAll)
 const supplierDraft = reactive<SupplierCreatePayload>({
   company_name: '', street: '', city: '', zip: '', email: '',
   country_iso2: 'CZ', ic: '', dic: '', is_vat_payer: true,
+  commercial_register: '',
   default_payment_due_days: 14, default_hourly_rate: 1500,
 })
 const supplierCreateOpen = ref(false)
 const supplierAresLoading = ref(false)
 const supplierAresMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
 
+// Bankovní účet nového dodavatele (volitelný, lze načíst z registru plátců DPH)
+const supplierBank = reactive({ currency: 'CZK', account_number: '', bank_code: '', bank_name: '', iban: '', bic: '' })
+const supplierBankLoading = ref(false)
+const supplierBankMessage = ref<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null)
+const supplierBankAccounts = ref<import('@/api/clients').CrpDphAccount[]>([])
+
+function supplierApplyBank(acc: import('@/api/clients').CrpDphAccount) {
+  if (acc.iban) {
+    supplierBank.currency = 'EUR'
+    supplierBank.iban = acc.iban
+  } else {
+    supplierBank.currency = 'CZK'
+    supplierBank.account_number = acc.prefix ? `${acc.prefix}-${acc.number}` : acc.number
+    supplierBank.bank_code = acc.bank_code
+  }
+}
+
+async function supplierLookupBank() {
+  const dic = (supplierDraft.dic || '').replace(/\D/g, '')
+  if (!/^\d{8,10}$/.test(dic)) {
+    supplierBankMessage.value = { type: 'error', text: t('supplier.bank_lookup_no_dic') }
+    return
+  }
+  supplierBankLoading.value = true
+  supplierBankMessage.value = null
+  supplierBankAccounts.value = []
+  try {
+    const r = await clientsApi.lookupBank(dic)
+    supplierBankAccounts.value = r.accounts
+    if (r.accounts.length === 0) {
+      supplierBankMessage.value = { type: 'error', text: t('supplier.bank_lookup_none') }
+    } else {
+      supplierApplyBank(r.accounts[0])
+      supplierBankMessage.value = r.accounts.length === 1
+        ? { type: 'success', text: t('supplier.bank_lookup_one') }
+        : { type: 'success', text: t('supplier.bank_lookup_many', { n: r.accounts.length }) }
+    }
+    if (r.unreliable === true) supplierBankMessage.value = { type: 'warning', text: t('supplier.bank_lookup_unreliable') }
+  } catch (e: any) {
+    supplierBankMessage.value = { type: 'error', text: e?.response?.data?.error?.message || t('supplier.bank_lookup_failed') }
+  } finally {
+    supplierBankLoading.value = false
+  }
+}
+
 function newSupplier() {
   Object.assign(supplierDraft, {
     company_name: '', street: '', city: '', zip: '', email: '',
     country_iso2: 'CZ', ic: '', dic: '', is_vat_payer: true,
+    commercial_register: '', taxpayer_type: undefined,
     default_payment_due_days: 14, default_hourly_rate: 1500,
   })
+  Object.assign(supplierBank, { currency: 'CZK', account_number: '', bank_code: '', bank_name: '', iban: '', bic: '' })
+  supplierBankMessage.value = null
+  supplierBankAccounts.value = []
   supplierAresMessage.value = null
   supplierCreateOpen.value = true
 }
@@ -83,6 +133,8 @@ async function supplierLookupAres() {
     supplierDraft.ic           = d.ic           || ic
     supplierDraft.dic          = d.dic          || supplierDraft.dic
     supplierDraft.is_vat_payer = d.is_vat_payer
+    supplierDraft.commercial_register = d.commercial_register || supplierDraft.commercial_register
+    if (d.taxpayer_type === 'fo' || d.taxpayer_type === 'po') supplierDraft.taxpayer_type = d.taxpayer_type
     supplierAresMessage.value = { type: 'success', text: t('supplier.ares_loaded', { name: d.company_name }) }
   } catch (e: any) {
     supplierAresMessage.value = { type: 'error', text: e?.response?.data?.error?.message || t('supplier.ares_failed') }
@@ -97,7 +149,18 @@ async function saveSupplier() {
     return
   }
   try {
-    await suppliersApi.create(supplierDraft)
+    const payload = { ...supplierDraft }
+    if (supplierBank.account_number || supplierBank.iban) {
+      payload.bank_account = {
+        currency: supplierBank.currency,
+        account_number: supplierBank.account_number || undefined,
+        bank_code: supplierBank.bank_code || undefined,
+        bank_name: supplierBank.bank_name || undefined,
+        iban: supplierBank.iban || undefined,
+        bic: supplierBank.bic || undefined,
+      }
+    }
+    await suppliersApi.create(payload)
     supplierCreateOpen.value = false
     toast.success(t('common.saved'))
     await loadAll()
@@ -128,65 +191,6 @@ function switchSupplier(id: number) {
   if (id === supplierStore.currentSupplierId) return
   supplierStore.setSupplier(id)
   window.location.reload()
-}
-
-// ─── Currencies ───────────────────────────────────────────
-const currencyDraft = reactive<Partial<CurrencyAccount> & { _new?: boolean }>({})
-const currencyOpen = ref(false)
-function newCurrency() {
-  Object.assign(currencyDraft, {
-    id: undefined, code: '', label: '', symbol: '', name_cs: '', name_en: '',
-    decimals: 2, is_active: true, is_default: false,
-    account_number: null, bank_code: null, bank_name: null, iban: null, bic: null,
-    _new: true,
-  })
-  currencyOpen.value = true
-}
-function editCurrency(c: CurrencyAccount) {
-  Object.assign(currencyDraft, { ...c, _new: false })
-  currencyOpen.value = true
-}
-async function saveCurrency() {
-  try {
-    if (currencyDraft._new) {
-      await settingsApi.createCurrency({
-        code: currencyDraft.code, label: currencyDraft.label, symbol: currencyDraft.symbol,
-        name_cs: currencyDraft.name_cs, name_en: currencyDraft.name_en,
-        decimals: currencyDraft.decimals, is_active: currencyDraft.is_active, is_default: currencyDraft.is_default,
-        account_number: currencyDraft.account_number || null,
-        bank_code: currencyDraft.bank_code || null,
-        bank_name: currencyDraft.bank_name || null,
-        iban: currencyDraft.iban || null,
-        bic: currencyDraft.bic || null,
-      })
-    } else if (currencyDraft.id) {
-      await settingsApi.updateCurrency(currencyDraft.id, {
-        label: currencyDraft.label,
-        is_active: currencyDraft.is_active,
-        is_default: currencyDraft.is_default,
-        account_number: currencyDraft.account_number || null,
-        bank_code: currencyDraft.bank_code || null,
-        bank_name: currencyDraft.bank_name || null,
-        iban: currencyDraft.iban || null,
-        bic: currencyDraft.bic || null,
-      })
-    }
-    currencyOpen.value = false
-    toast.success(t('common.saved'))
-    await loadAll()
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
-}
-async function deleteCurrency(c: CurrencyAccount) {
-  if (!confirm(`Smazat ${c.label}?`)) return
-  try {
-    await settingsApi.deleteCurrency(c.id)
-    toast.success(t('common.deleted'))
-    await loadAll()
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
 }
 
 // ─── VAT rates ────────────────────────────────────────────
@@ -243,8 +247,7 @@ const countryDraft = reactive<Partial<Country> & { _new?: boolean }>({})
 const countryOpen = ref(false)
 
 useHotkey('escape', () => {
-  if (currencyOpen.value) currencyOpen.value = false
-  else if (vatOpen.value) vatOpen.value = false
+  if (vatOpen.value) vatOpen.value = false
   else if (countryOpen.value) countryOpen.value = false
   else if (unitOpen.value) unitOpen.value = false
 })
@@ -377,6 +380,66 @@ async function removeExpense(c: ExpenseCategory) {
   }
 }
 
+// ─── Revenue categories (kategorie tržeb pro CRM/Stats rozpad) ─────────
+const revenueCategories = ref<RevenueCategory[]>([])
+const revenueDraft = reactive({
+  id: 0,
+  code: '',
+  label: '',
+  display_order: 0,
+  archived: false,
+})
+const revenueOpen = ref(false)
+
+async function loadRevenueCategories() {
+  revenueCategories.value = await revenueCategoriesApi.list(true)
+}
+
+function newRevenue() {
+  Object.assign(revenueDraft, { id: 0, code: '', label: '', display_order: 0, archived: false })
+  revenueOpen.value = true
+}
+
+function editRevenue(c: RevenueCategory) {
+  Object.assign(revenueDraft, c)
+  revenueOpen.value = true
+}
+
+async function saveRevenue() {
+  try {
+    if (revenueDraft.id) {
+      await revenueCategoriesApi.update(revenueDraft.id, {
+        code: revenueDraft.code,
+        label: revenueDraft.label,
+        display_order: revenueDraft.display_order,
+        archived: revenueDraft.archived,
+      })
+    } else {
+      await revenueCategoriesApi.create({
+        code: revenueDraft.code,
+        label: revenueDraft.label,
+        display_order: revenueDraft.display_order,
+      })
+    }
+    revenueOpen.value = false
+    toast.success(t('common.saved'))
+    await loadRevenueCategories()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
+async function removeRevenue(c: RevenueCategory) {
+  if (!confirm(t('revenue_categories.delete_confirm', { label: c.label }))) return
+  try {
+    const r = await revenueCategoriesApi.delete(c.id)
+    toast.success(r.deleted ? t('common.deleted') : t('revenue_categories.archived_due_to_usage'))
+    await loadRevenueCategories()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
 // ─── VAT classifications (kódy DPHDP3 + KH) ──────────────────────────
 const vatClassifications = ref<VatClassification[]>([])
 const vatClsDraft = reactive({
@@ -465,10 +528,99 @@ async function removeVatCls(c: VatClassification) {
   }
 }
 
-// Načti při přepnutí na tab=expense_categories / vat_classifications
+// ─── Daňové konstanty (číselník — override defaultů z backendu) ──────────
+const taxYears = ref<TaxConstantsYear[]>([])
+const taxYear = ref<number>(0)
+const taxModel = ref<TaxConstantsData | null>(null)
+const taxIsOverride = ref(false)
+const taxIsNew = ref(false)   // nově přidaný, ještě neuložený rok
+const taxSaving = ref(false)
+
+/** Nejvyšší přidatelný rok = aktuální kalendářní rok + 1 (jeden rok dopředu, ne dál). */
+const maxAddableTaxYear = computed(() => new Date().getFullYear() + 1)
+const canAddTaxYear = computed(() =>
+  taxYears.value.length > 0 &&
+  Math.max(...taxYears.value.map(y => y.year)) < maxAddableTaxYear.value,
+)
+const taxRates = [30, 40, 60, 80] as const
+const taxBands = ['band1', 'band2', 'band3'] as const
+
+async function loadTaxConstants() {
+  taxYears.value = await taxConstantsApi.list()
+  if (taxYears.value.length && !taxYears.value.find(y => y.year === taxYear.value)) {
+    selectTaxYear(taxYears.value[0].year)
+  }
+}
+function selectTaxYear(year: number) {
+  const row = taxYears.value.find(y => y.year === year)
+  if (!row) return
+  taxYear.value = year
+  taxIsOverride.value = row.is_override
+  taxIsNew.value = false
+  taxModel.value = JSON.parse(JSON.stringify(row.data)) // hluboká kopie pro editaci
+}
+
+/** Přidá další rok (nejnovější + 1) předvyplněný hodnotami nejnovějšího roku a rovnou ho uloží do DB,
+ *  aby přežil reload. Hodnoty lze následně upravit a uložit znovu.
+ *  Strop: lze přidat maximálně aktuální kalendářní rok + 1 (jeden rok dopředu). */
+async function addTaxYear() {
+  if (!taxYears.value.length) return
+  const maxYear = Math.max(...taxYears.value.map(y => y.year))
+  const newYear = maxYear + 1
+  if (newYear > maxAddableTaxYear.value) return
+  if (taxYears.value.some(y => y.year === newYear)) { selectTaxYear(newYear); return }
+  const base = taxYears.value.find(y => y.year === maxYear)
+  if (!base) return
+  const cloned = JSON.parse(JSON.stringify(base.data))
+  cloned.year = newYear
+  taxSaving.value = true
+  try {
+    const saved = await taxConstantsApi.save(newYear, cloned)
+    taxYears.value.unshift(saved)
+    taxYears.value.sort((a, b) => b.year - a.year)
+    taxYear.value = newYear
+    taxIsOverride.value = saved.is_override
+    taxIsNew.value = false
+    taxModel.value = JSON.parse(JSON.stringify(saved.data))
+    toast.success(t('codebooks.tax_year_added', { year: newYear }))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  } finally { taxSaving.value = false }
+}
+async function saveTaxConstants() {
+  if (!taxModel.value) return
+  taxSaving.value = true
+  try {
+    const updated = await taxConstantsApi.save(taxYear.value, taxModel.value)
+    const i = taxYears.value.findIndex(y => y.year === taxYear.value)
+    if (i >= 0) taxYears.value[i] = updated
+    taxIsOverride.value = updated.is_override
+    taxIsNew.value = false
+    toast.success(t('codebooks.tax_saved'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  } finally { taxSaving.value = false }
+}
+async function resetTaxConstants() {
+  if (!confirm(t('codebooks.tax_reset_confirm'))) return
+  try {
+    const updated = await taxConstantsApi.reset(taxYear.value)
+    const i = taxYears.value.findIndex(y => y.year === taxYear.value)
+    if (i >= 0) taxYears.value[i] = updated
+    taxIsOverride.value = false
+    taxModel.value = JSON.parse(JSON.stringify(updated.data))
+    toast.success(t('codebooks.tax_reset_done'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
+// Načti při přepnutí na tab=expense_categories / revenue_categories / vat_classifications / tax_constants
 watch(tab, (newTab) => {
   if (newTab === 'expense_categories') loadExpenseCategories()
+  if (newTab === 'revenue_categories') loadRevenueCategories()
   if (newTab === 'vat_classifications') loadVatClassifications()
+  if (newTab === 'tax_constants') loadTaxConstants()
 })
 </script>
 
@@ -481,19 +633,20 @@ watch(tab, (newTab) => {
 
     <!-- Tabs — Dodavatelé jako první volba (multi-tenant firmy embed do Codebooks) -->
     <div class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
-      <button v-for="tt in (['suppliers', 'currencies', 'vat', 'vat_classifications', 'expense_categories', 'countries', 'units'] as const)" :key="tt"
+      <button v-for="tt in (['suppliers', 'vat', 'vat_classifications', 'expense_categories', 'revenue_categories', 'countries', 'units', 'tax_constants'] as const)" :key="tt"
         @click="tab = tt"
         class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap"
         :class="tab === tt
           ? 'border-primary-600 text-primary-700 font-medium'
           : 'border-transparent text-neutral-600 hover:text-neutral-900'">
         {{ tt === 'suppliers' ? t('nav.suppliers')
-          : tt === 'currencies' ? t('codebooks.tab_currencies')
           : tt === 'vat' ? t('codebooks.tab_vat')
           : tt === 'vat_classifications' ? t('codebooks.tab_vat_classifications')
           : tt === 'expense_categories' ? t('codebooks.tab_expense_categories')
+          : tt === 'revenue_categories' ? t('codebooks.tab_revenue_categories')
           : tt === 'countries' ? t('codebooks.tab_countries')
-          : t('codebooks.tab_units') }}
+          : tt === 'units' ? t('codebooks.tab_units')
+          : t('codebooks.tab_tax_constants') }}
       </button>
     </div>
 
@@ -510,7 +663,7 @@ watch(tab, (newTab) => {
       </div>
 
       <!-- Desktop tabulka -->
-      <div class="hidden md:block bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="hidden md:block bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full text-sm table-sticky-first">
             <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
@@ -557,7 +710,7 @@ watch(tab, (newTab) => {
       </div>
 
       <!-- Mobile karty -->
-      <div class="md:hidden bg-white border border-neutral-200 rounded-lg shadow-sm divide-y divide-neutral-100 overflow-hidden">
+      <div class="md:hidden bg-surface border border-neutral-200 rounded-lg shadow-sm divide-y divide-neutral-100 overflow-hidden">
         <div v-for="s in suppliers" :key="`m-${s.id}`" class="px-4 py-3">
           <div class="flex items-baseline justify-between gap-2">
             <div class="font-medium text-neutral-900 flex items-center gap-1.5 min-w-0 truncate">
@@ -586,98 +739,6 @@ watch(tab, (newTab) => {
       </div>
     </section>
 
-    <!-- ====== CURRENCIES ====== -->
-    <section v-else-if="tab === 'currencies'">
-      <div class="flex justify-end mb-3">
-        <button @click="newCurrency"
-          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-          {{ t('codebooks.new_currency') }}
-        </button>
-      </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-        <!-- Desktop: tabulka -->
-        <div class="hidden md:block overflow-x-auto">
-        <table class="w-full text-sm table-sticky-first">
-          <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
-            <tr>
-              <th class="px-3 py-2 text-left font-medium">{{ t('codebooks.code') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('codebooks.account_label') }}</th>
-              <th class="px-3 py-2 text-center font-medium">{{ t('codebooks.decimals') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('settings.account_cz') }} / {{ t('settings.iban') }}</th>
-              <th class="px-3 py-2 text-center font-medium">{{ t('common.default') }}</th>
-              <th class="px-3 py-2 text-center font-medium">{{ t('settings.active') }}</th>
-              <th class="px-3 py-2 w-32"></th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-neutral-100">
-            <tr v-for="c in currencies" :key="c.id">
-              <td class="px-3 py-2 font-mono">{{ c.code }} <span class="text-xs text-neutral-500">{{ c.symbol }}</span></td>
-              <td class="px-3 py-2 text-xs">{{ c.label }}</td>
-              <td class="px-3 py-2 text-center font-mono">{{ c.decimals }}</td>
-              <td class="px-3 py-2 font-mono text-xs">
-                <span v-if="c.account_number">{{ c.account_number }}<span v-if="c.bank_code"> / {{ c.bank_code }}</span></span>
-                <span v-else-if="c.iban">{{ c.iban }}</span>
-                <span v-else class="text-neutral-400">—</span>
-              </td>
-              <td class="px-3 py-2 text-center">
-                <span v-if="c.is_default" class="text-primary-600">✓</span>
-                <span v-else class="text-neutral-400">—</span>
-              </td>
-              <td class="px-3 py-2 text-center">
-                <span v-if="c.is_active" class="text-success-600">✓</span>
-                <span v-else class="text-neutral-400">—</span>
-              </td>
-              <td class="px-3 py-2 text-right text-xs">
-                <button @click="editCurrency(c)" class="cursor-pointer text-primary-600 hover:text-primary-700 mr-3">{{ t('common.edit') }}</button>
-                <button @click="deleteCurrency(c)" :disabled="(c.invoices_count ?? 0) > 0"
-                  class="cursor-pointer text-danger-500 hover:text-danger-600 disabled:opacity-30 disabled:cursor-not-allowed"
-                  :title="(c.invoices_count ?? 0) > 0 ? t('codebooks.in_use_currency', { n: c.invoices_count }) : t('common.delete')">
-                  {{ t('common.delete') }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        </div>
-
-        <!-- Mobile: karty -->
-        <div class="md:hidden divide-y divide-neutral-100">
-          <div v-for="c in currencies" :key="`m-${c.id}`" class="p-3 space-y-1.5">
-            <div class="flex items-baseline justify-between gap-2">
-              <div class="flex items-baseline gap-2">
-                <span class="font-mono font-semibold">{{ c.code }}</span>
-                <span class="text-xs text-neutral-500">{{ c.symbol }}</span>
-                <span class="text-xs text-neutral-500">·</span>
-                <span class="text-xs text-neutral-500">{{ c.label }}</span>
-              </div>
-              <span class="font-mono text-xs text-neutral-500">{{ c.decimals }}d</span>
-            </div>
-            <div class="font-mono text-xs text-neutral-600 truncate">
-              <span v-if="c.account_number">{{ c.account_number }}<span v-if="c.bank_code"> / {{ c.bank_code }}</span></span>
-              <span v-else-if="c.iban">{{ c.iban }}</span>
-              <span v-else class="text-neutral-400">—</span>
-            </div>
-            <div class="flex items-center justify-between gap-2 text-xs">
-              <span>
-                <span v-if="c.is_default" class="text-primary-600">✓ {{ t('common.default') }}</span>
-                <span v-if="c.is_default && c.is_active" class="text-neutral-400 mx-1.5">·</span>
-                <span v-if="c.is_active" class="text-success-600">✓ {{ t('settings.active') }}</span>
-              </span>
-              <div class="flex gap-2">
-                <button @click="editCurrency(c)" class="cursor-pointer h-8 px-3 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded">{{ t('common.edit') }}</button>
-                <button @click="deleteCurrency(c)" :disabled="(c.invoices_count ?? 0) > 0"
-                  class="cursor-pointer h-8 px-3 text-xs border border-danger-500/40 text-danger-500 hover:bg-danger-50 disabled:opacity-30 disabled:cursor-not-allowed rounded"
-                  :title="(c.invoices_count ?? 0) > 0 ? t('codebooks.in_use_currency', { n: c.invoices_count }) : t('common.delete')">
-                  {{ t('common.delete') }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- ====== VAT RATES ====== -->
     <section v-else-if="tab === 'vat'">
       <div class="flex justify-end mb-3">
@@ -687,7 +748,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_vat') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -766,7 +827,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_country') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -836,7 +897,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_unit') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -905,11 +966,11 @@ watch(tab, (newTab) => {
         </button>
       </div>
 
-      <div v-if="expenseCategories.length === 0" class="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+      <div v-if="expenseCategories.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
         {{ t('expense_categories.empty') }}
       </div>
 
-      <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
             <tr>
@@ -947,6 +1008,53 @@ watch(tab, (newTab) => {
       </div>
     </section>
 
+    <!-- ====== REVENUE CATEGORIES (kategorie tržeb) ====== -->
+    <section v-else-if="tab === 'revenue_categories'">
+      <div class="flex justify-between mb-3 gap-2">
+        <p class="text-sm text-neutral-500">{{ t('revenue_categories.hint') }}</p>
+        <button @click="newRevenue"
+          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+          {{ t('revenue_categories.new') }}
+        </button>
+      </div>
+
+      <div v-if="revenueCategories.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+        {{ t('revenue_categories.empty') }}
+      </div>
+
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+            <tr>
+              <th class="px-3 py-2 text-left font-medium w-24">{{ t('revenue_categories.code') }}</th>
+              <th class="px-3 py-2 text-left font-medium">{{ t('revenue_categories.label') }}</th>
+              <th class="px-3 py-2 text-right font-medium w-24">{{ t('revenue_categories.usage') }}</th>
+              <th class="px-3 py-2 w-40"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-100">
+            <tr v-for="c in revenueCategories" :key="c.id" :class="['hover:bg-neutral-50', c.archived ? 'opacity-50' : '']">
+              <td class="px-3 py-2 font-mono text-xs">{{ c.code }}</td>
+              <td class="px-3 py-2">
+                {{ c.label }}
+                <span v-if="c.archived" class="ml-2 text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500">{{ t('revenue_categories.archived') }}</span>
+              </td>
+              <td class="px-3 py-2 text-right font-mono text-xs text-neutral-600">{{ c.invoices_count || 0 }}</td>
+              <td class="px-3 py-2 text-right text-xs">
+                <button @click="editRevenue(c)" class="cursor-pointer text-primary-600 hover:text-primary-700 mr-3">
+                  {{ t('common.edit') }}
+                </button>
+                <button @click="removeRevenue(c)" class="cursor-pointer text-danger-500 hover:text-danger-600">
+                  {{ t('common.delete') }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ====== VAT CLASSIFICATIONS ====== -->
     <section v-else-if="tab === 'vat_classifications'">
       <div class="flex justify-between mb-3 gap-2">
@@ -958,11 +1066,11 @@ watch(tab, (newTab) => {
         </button>
       </div>
 
-      <div v-if="vatClassifications.length === 0" class="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+      <div v-if="vatClassifications.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
         {{ t('vat_classifications.empty') }}
       </div>
 
-      <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
             <tr>
@@ -1012,11 +1120,161 @@ watch(tab, (newTab) => {
       </div>
     </section>
 
+    <!-- ====== TAX CONSTANTS (roční daňové konstanty) ====== -->
+    <section v-else-if="tab === 'tax_constants'">
+      <div class="flex flex-wrap items-center gap-3 mb-3">
+        <label class="text-sm text-neutral-600">{{ t('codebooks.tax_year') }}:</label>
+        <select v-model.number="taxYear" @change="selectTaxYear(taxYear)"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option v-for="y in taxYears" :key="y.year" :value="y.year">{{ y.year }}</option>
+        </select>
+        <button v-if="auth.user?.role === 'admin'" @click="addTaxYear" type="button"
+          :disabled="!canAddTaxYear"
+          :title="canAddTaxYear ? '' : t('codebooks.tax_add_year_max', { year: maxAddableTaxYear })"
+          class="cursor-pointer h-9 px-3 text-sm border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          {{ t('codebooks.tax_add_year') }}
+        </button>
+        <span v-if="taxIsNew" class="text-xs px-2 py-0.5 rounded bg-primary-50 text-primary-700 font-medium">{{ t('codebooks.tax_year_new') }}</span>
+        <span v-else-if="taxIsOverride" class="text-xs px-2 py-0.5 rounded bg-warning-50 text-warning-600 font-medium">{{ t('codebooks.tax_overridden') }}</span>
+        <span v-else class="text-xs px-2 py-0.5 rounded bg-neutral-100 text-neutral-500">{{ t('codebooks.tax_default') }}</span>
+        <div class="ml-auto flex items-center gap-2" v-if="auth.user?.role === 'admin'">
+          <button v-if="taxIsOverride" @click="resetTaxConstants" type="button"
+            class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('codebooks.tax_reset') }}</button>
+          <button @click="saveTaxConstants" :disabled="taxSaving" type="button"
+            class="cursor-pointer h-9 px-4 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md disabled:opacity-50">{{ t('common.save') }}</button>
+        </div>
+      </div>
+      <p class="text-xs text-neutral-500 mb-4 max-w-3xl">{{ t('codebooks.tax_hint') }}</p>
+
+      <div v-if="taxModel" class="grid lg:grid-cols-2 gap-4">
+        <!-- DPH a výkazy — platí pro VŠECHNY plátce (nejen OSVČ), proto zvýrazněně nahoře -->
+        <div class="bg-primary-50/40 border border-primary-300 rounded-lg p-4 shadow-sm lg:col-span-2">
+          <div class="flex flex-wrap items-center gap-2 mb-1">
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-primary-700">{{ t('codebooks.tax_g_vat_general') }}</h3>
+            <span class="text-[11px] px-2 py-0.5 rounded-full bg-primary-600 text-white font-medium">{{ t('codebooks.tax_g_vat_general_badge') }}</span>
+          </div>
+          <p class="text-xs text-neutral-500 mb-3 max-w-3xl">{{ t('codebooks.tax_g_vat_general_hint') }}</p>
+          <div class="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_vat_rate_standard') }}</span>
+              <input v-model.number="taxModel.vat_rate_standard" type="number" step="0.1" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_vat_rate_reduced') }}</span>
+              <input v-model.number="taxModel.vat_rate_reduced" type="number" step="0.1" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_kh_threshold') }}</span>
+              <input v-model.number="taxModel.kh_item_threshold" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_vat_low') }}</span>
+              <input v-model.number="taxModel.vat_limit_low" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_vat_high') }}</span>
+              <input v-model.number="taxModel.vat_limit_high" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Paušální daň -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_pausal') }}</h3>
+          <div class="grid grid-cols-3 gap-3">
+            <label v-for="(b, i) in taxBands" :key="b" class="block">
+              <span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_band', { n: i + 1 }) }}</span>
+              <input v-model.number="taxModel.pausal_annual[b]" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" />
+            </label>
+          </div>
+        </div>
+
+        <!-- Daň z příjmu -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_income') }}</h3>
+          <div class="grid grid-cols-3 gap-3">
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_rate_low') }}</span>
+              <input v-model.number="taxModel.tax_rate_low" type="number" step="0.001" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_rate_high') }}</span>
+              <input v-model.number="taxModel.tax_rate_high" type="number" step="0.001" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_threshold') }}</span>
+              <input v-model.number="taxModel.tax_high_threshold" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Pojistné -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_insurance') }}</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_rate') }}</span>
+              <input v-model.number="taxModel.social_rate" type="number" step="0.001" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_health_rate') }}</span>
+              <input v-model.number="taxModel.health_rate" type="number" step="0.001" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_pct') }}</span>
+              <input v-model.number="taxModel.social_assessment_pct" type="number" step="0.01" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_health_pct') }}</span>
+              <input v-model.number="taxModel.health_assessment_pct" type="number" step="0.01" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_min_main') }}</span>
+              <input v-model.number="taxModel.social_min_base_main" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_min_sec') }}</span>
+              <input v-model.number="taxModel.social_min_base_secondary" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_health_min') }}</span>
+              <input v-model.number="taxModel.health_min_base" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Slevy a zvýhodnění -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_credits') }}</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_credit_taxpayer') }}</span>
+              <input v-model.number="taxModel.credit_taxpayer" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_credit_spouse') }}</span>
+              <input v-model.number="taxModel.credit_spouse" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label v-for="i in 3" :key="i" class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_child', { n: i }) }}</span>
+              <input v-model.number="taxModel.child_credits[i - 1]" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Výdajové paušály -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_expense_caps') }}</h3>
+          <div class="grid grid-cols-4 gap-3">
+            <label v-for="r in taxRates" :key="r" class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_cap', { rate: r }) }}</span>
+              <input v-model.number="taxModel.expense_caps[r]" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Odpočty (DPH konstanty jsou ve zvýrazněném boxu nahoře) -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_deductions_vat') }}</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_mortgage_cap') }}</span>
+              <input v-model.number="taxModel.mortgage_cap" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_pension_cap') }}</span>
+              <input v-model.number="taxModel.pension_cap" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+          </div>
+        </div>
+
+        <!-- Stropy pásem paušální daně (rate × band) -->
+        <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm lg:col-span-2">
+          <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_ceilings') }}</h3>
+          <table class="text-sm">
+            <thead>
+              <tr class="text-xs text-neutral-500">
+                <th class="text-left font-medium pr-3 pb-1">{{ t('codebooks.tax_f_rate') }}</th>
+                <th v-for="(b, i) in taxBands" :key="b" class="text-left font-medium px-2 pb-1">{{ t('codebooks.tax_f_band', { n: i + 1 }) }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in taxRates" :key="r">
+                <td class="pr-3 py-1 text-neutral-600 font-mono">{{ r }} %</td>
+                <td v-for="b in taxBands" :key="b" class="px-2 py-1">
+                  <input v-model.number="taxModel.band_ceilings[r][b]" type="number" class="h-8 w-32 px-2 border border-neutral-300 rounded text-sm font-mono" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- ====== Modals ====== -->
 
     <!-- VAT classification modal -->
-    <div v-if="vatClsOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-xl w-full p-5">
+    <div v-if="vatClsOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-xl w-full p-5">
         <h3 class="text-lg font-semibold mb-3">
           {{ vatClsEditMode === 'edit' ? t('vat_classifications.edit_title') : t('vat_classifications.new_title') }}
         </h3>
@@ -1030,7 +1288,7 @@ watch(tab, (newTab) => {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('vat_classifications.direction') }}</label>
-              <select v-model="vatClsDraft.direction" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="vatClsDraft.direction" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option value="sale">{{ t('vat_classifications.direction_sale') }}</option>
                 <option value="purchase">{{ t('vat_classifications.direction_purchase') }}</option>
                 <option value="both">{{ t('vat_classifications.direction_both') }}</option>
@@ -1081,8 +1339,8 @@ watch(tab, (newTab) => {
     </div>
 
     <!-- Expense category modal -->
-    <div v-if="expenseOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="expenseOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">
           {{ expenseDraft.id ? t('expense_categories.edit_title') : t('expense_categories.new_title') }}
         </h3>
@@ -1100,7 +1358,7 @@ watch(tab, (newTab) => {
           </div>
           <div>
             <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('expense_categories.fixed_or_var') }}</label>
-            <select v-model="expenseDraft.fixed_or_var" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+            <select v-model="expenseDraft.fixed_or_var" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
               <option value="variable">{{ t('expense_categories.variable') }}</option>
               <option value="fixed">{{ t('expense_categories.fixed') }}</option>
             </select>
@@ -1122,9 +1380,44 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
+    <!-- Revenue category modal -->
+    <div v-if="revenueOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
+        <h3 class="text-lg font-semibold mb-3">
+          {{ revenueDraft.id ? t('revenue_categories.edit_title') : t('revenue_categories.new_title') }}
+        </h3>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.code') }} *</label>
+            <input v-model="revenueDraft.code" type="text" maxlength="20" placeholder="konzultace"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <p class="text-xs text-neutral-500 mt-1">{{ t('revenue_categories.code_hint') }}</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.label') }} *</label>
+            <input v-model="revenueDraft.label" type="text" maxlength="100" placeholder="Konzultace a poradenství"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.display_order') }}</label>
+            <input v-model.number="revenueDraft.display_order" type="number" step="1"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+          <label v-if="revenueDraft.id" class="flex items-center gap-2 text-sm">
+            <input v-model="revenueDraft.archived" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+            {{ t('revenue_categories.archive') }}
+          </label>
+        </div>
+        <div class="flex justify-end gap-2 pt-4 mt-3 border-t border-neutral-200">
+          <button @click="revenueOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+          <button @click="saveRevenue" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.save') }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Supplier create modal (multi-tenant firma) -->
-    <div v-if="supplierCreateOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-xl w-full p-5">
+    <div v-if="supplierCreateOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-xl w-full p-5">
         <h3 class="text-lg font-semibold mb-1">{{ t('supplier.create_title') }}</h3>
         <p class="text-xs text-neutral-500 mb-4">{{ t('supplier.create_hint') }}</p>
         <form @submit.prevent="saveSupplier">
@@ -1174,6 +1467,59 @@ watch(tab, (newTab) => {
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('supplier.email') }} *</label>
               <input v-model="supplierDraft.email" type="email" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.commercial_register') }}</label>
+              <input v-model="supplierDraft.commercial_register" type="text" :placeholder="t('settings.commercial_register_placeholder')" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+
+            <div class="border-t border-neutral-200 pt-3">
+              <div class="flex items-center justify-between mb-2 gap-2">
+                <label class="block text-xs font-medium text-neutral-700">{{ t('settings.account_cz') }} / {{ t('settings.iban') }} <span class="text-neutral-400">{{ t('common.optional') }}</span></label>
+                <button type="button" @click="supplierLookupBank" :disabled="supplierBankLoading"
+                  class="cursor-pointer h-8 px-3 text-xs bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 disabled:opacity-50 shrink-0">
+                  {{ supplierBankLoading ? t('common.loading') : t('supplier.bank_lookup') }}
+                </button>
+              </div>
+              <div v-if="supplierBankMessage" class="mb-2 text-xs px-2 py-1 rounded"
+                :class="{
+                  'bg-success-50 text-success-600': supplierBankMessage.type === 'success',
+                  'bg-danger-50 text-danger-500': supplierBankMessage.type === 'error',
+                  'bg-warning-50 text-warning-600': supplierBankMessage.type === 'warning',
+                }">
+                {{ supplierBankMessage.text }}
+              </div>
+              <div v-if="supplierBankAccounts.length > 1" class="mb-2 flex flex-wrap gap-1.5">
+                <button v-for="(acc, i) in supplierBankAccounts" :key="i" type="button" @click="supplierApplyBank(acc)"
+                  class="cursor-pointer px-2 py-1 text-xs font-mono border border-neutral-300 rounded hover:bg-primary-50 hover:border-primary-300">
+                  {{ acc.display }}
+                </button>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('common.currency') }}</label>
+                  <select v-model="supplierBank.currency" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm bg-surface">
+                    <option value="CZK">CZK</option>
+                    <option value="EUR">EUR</option>
+                  </select>
+                </div>
+                <template v-if="supplierBank.currency === 'CZK'">
+                  <div>
+                    <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.currency_account_cz') }}</label>
+                    <input v-model="supplierBank.account_number" placeholder="1000000005" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.currency_bank_code') }}</label>
+                    <input v-model="supplierBank.bank_code" maxlength="4" placeholder="0100" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="col-span-2">
+                    <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.iban') }}</label>
+                    <input v-model="supplierBank.iban" placeholder="CZ65 0800 0000 1920 0014 5399" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                  </div>
+                </template>
+              </div>
+            </div>
           </div>
           <div class="flex justify-end gap-2 pt-4 mt-3 border-t border-neutral-200">
             <button type="button" @click="supplierCreateOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
@@ -1183,57 +1529,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="currencyOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
-        <h3 class="text-lg font-semibold mb-3">{{ currencyDraft._new ? t('codebooks.new_currency') : t('settings.edit_currency', { code: currencyDraft.code }) }}</h3>
-        <div class="space-y-3">
-          <div class="grid grid-cols-3 gap-3" v-if="currencyDraft._new">
-            <div><label class="block text-sm font-medium mb-1">{{ t('codebooks.code') }} *</label>
-              <input v-model="currencyDraft.code" type="text" maxlength="3" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono uppercase" /></div>
-            <div><label class="block text-sm font-medium mb-1">Symbol</label>
-              <input v-model="currencyDraft.symbol" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" /></div>
-            <div><label class="block text-sm font-medium mb-1">{{ t('codebooks.decimals') }}</label>
-              <input v-model.number="currencyDraft.decimals" type="number" min="0" max="6" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" /></div>
-          </div>
-          <div class="grid grid-cols-2 gap-3" v-if="currencyDraft._new">
-            <div><label class="block text-sm font-medium mb-1">{{ t('codebooks.name_cs') }}</label>
-              <input v-model="currencyDraft.name_cs" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" /></div>
-            <div><label class="block text-sm font-medium mb-1">{{ t('codebooks.name_en') }}</label>
-              <input v-model="currencyDraft.name_en" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" /></div>
-          </div>
-          <div><label class="block text-sm font-medium mb-1">{{ t('codebooks.account_label_required') }}</label>
-            <input v-model="currencyDraft.label" type="text" placeholder="CZK — Fio Bank"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" /></div>
-          <div><label class="block text-sm font-medium mb-1">{{ t('settings.currency_account_cz') }}</label>
-            <input v-model="currencyDraft.account_number" type="text" placeholder="1000000005" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" /></div>
-          <div class="grid grid-cols-2 gap-3">
-            <div><label class="block text-sm font-medium mb-1">{{ t('settings.currency_bank_code') }}</label>
-              <input v-model="currencyDraft.bank_code" type="text" placeholder="0100" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" /></div>
-            <div><label class="block text-sm font-medium mb-1">{{ t('settings.currency_bank_name') }}</label>
-              <input v-model="currencyDraft.bank_name" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" /></div>
-          </div>
-          <div><label class="block text-sm font-medium mb-1">{{ t('settings.iban') }}</label>
-            <input v-model="currencyDraft.iban" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" /></div>
-          <div><label class="block text-sm font-medium mb-1">{{ t('settings.bic') }}</label>
-            <input v-model="currencyDraft.bic" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" /></div>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="currencyDraft.is_active" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-            {{ t('settings.active') }}
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="currencyDraft.is_default" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-            {{ t('codebooks.is_default_account_hint') }}
-          </label>
-          <div class="flex justify-end gap-2 pt-2">
-            <button @click="currencyOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
-            <button @click="saveCurrency" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.save') }}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="vatOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="vatOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ vatDraft._new ? t('codebooks.new_vat') : vatDraft.code }}</h3>
         <div class="space-y-3">
           <div class="grid grid-cols-3 gap-3">
@@ -1270,8 +1567,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="unitOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="unitOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ unitDraft._new ? t('codebooks.new_unit') : unitDraft.code }}</h3>
         <div class="space-y-3">
           <div>
@@ -1301,8 +1598,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="countryOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="countryOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ countryDraft._new ? t('codebooks.new_country') : countryDraft.iso2 }}</h3>
         <div class="space-y-3">
           <div class="grid grid-cols-2 gap-3">

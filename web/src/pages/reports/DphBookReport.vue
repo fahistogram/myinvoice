@@ -10,6 +10,7 @@ const { t, locale } = useI18n()
 const now = new Date()
 const year = ref(now.getFullYear())
 const month = ref(now.getMonth() + 1)
+const periodType = ref<'monthly' | 'quarterly'>('monthly')
 
 const preview = ref<DphBookPreview | null>(null)
 const loading = ref(false)
@@ -19,7 +20,7 @@ async function loadPreview() {
   loading.value = true
   error.value = ''
   try {
-    preview.value = await reportsApi.dphBookPreview(year.value, month.value)
+    preview.value = await reportsApi.dphBookPreview(year.value, month.value, periodType.value)
   } catch (e) {
     error.value = apiErrorMessage(e)
   } finally {
@@ -28,7 +29,7 @@ async function loadPreview() {
 }
 
 function downloadPdf() {
-  window.open(reportsApi.dphBookPdfUrl(year.value, month.value), '_blank')
+  window.open(reportsApi.dphBookPdfUrl(year.value, month.value, periodType.value), '_blank')
 }
 
 const monthOptions = computed(() =>
@@ -38,6 +39,14 @@ const monthOptions = computed(() =>
 )
 // Distinct roky z dat (issue #33).
 const yearOptions = useYearOptions('combined', year)
+
+const quarterOptions = [1, 2, 3, 4]
+const isQuarterly = computed(() => periodType.value === 'quarterly')
+// Kvartální období: $month nese (jako u DPH přiznání) poslední měsíc kvartálu (3/6/9/12).
+const currentQuarter = computed(() => Math.ceil(month.value / 3))
+function setQuarter(q: number) {
+  month.value = q * 3
+}
 
 function fmtMoney(v: number): string {
   return new Intl.NumberFormat(locale.value === 'en' ? 'en-US' : 'cs-CZ', {
@@ -53,7 +62,7 @@ function fmtDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'cs-CZ')
 }
 
-watch([year, month], loadPreview)
+watch([year, month, periodType], loadPreview)
 onMounted(loadPreview)
 </script>
 
@@ -78,11 +87,29 @@ onMounted(loadPreview)
         <h1 class="text-2xl font-semibold">{{ t('reports.dph_book.title') }}</h1>
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('reports.dph_book.subtitle') }}</p>
       </div>
-      <div class="flex items-center gap-2">
-        <select v-model.number="month" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+      <div class="flex items-center gap-2 flex-wrap">
+        <!-- Period toggle (měsíční / kvartální) -->
+        <div class="flex rounded-md border border-neutral-300 overflow-hidden text-sm">
+          <button type="button" @click="periodType = 'monthly'"
+            :class="periodType === 'monthly' ? 'bg-primary-600 text-white' : 'bg-surface text-neutral-700 hover:bg-neutral-50'"
+            class="px-3 h-9 cursor-pointer">
+            {{ t('reports.dph.monthly') }}
+          </button>
+          <button type="button" @click="periodType = 'quarterly'"
+            :class="periodType === 'quarterly' ? 'bg-primary-600 text-white' : 'bg-surface text-neutral-700 hover:bg-neutral-50'"
+            class="px-3 h-9 cursor-pointer border-l border-neutral-300">
+            {{ t('reports.dph.quarterly') }}
+          </button>
+        </div>
+        <!-- Quarter picker pokud quarterly, jinak month -->
+        <select v-if="isQuarterly" :value="currentQuarter" @change="setQuarter(Number(($event.target as HTMLSelectElement).value))"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option v-for="q in quarterOptions" :key="q" :value="q">Q{{ q }}</option>
+        </select>
+        <select v-else v-model.number="month" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
-        <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
         </select>
         <button type="button" @click="downloadPdf" :disabled="loading || !preview"
@@ -95,7 +122,7 @@ onMounted(loadPreview)
       </div>
     </div>
 
-    <div v-if="loading" class="bg-white border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">
+    <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">
       {{ t('common.loading') }}…
     </div>
     <div v-else-if="error" class="bg-danger-50 border border-danger-500/40 text-danger-500 rounded-md p-3 text-sm">
@@ -104,7 +131,7 @@ onMounted(loadPreview)
 
     <div v-else-if="preview" class="space-y-4">
       <!-- Period info -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-4">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-4">
         <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
           {{ t('reports.dph_book.period_label') }}
         </div>
@@ -113,13 +140,13 @@ onMounted(loadPreview)
 
       <!-- No data -->
       <div v-if="preview.sections.length === 0"
-        class="bg-white border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-500">
+        class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-500">
         {{ t('reports.dph_book.no_data') }}
       </div>
 
       <!-- Sections -->
       <div v-for="section in preview.sections" :key="section.key"
-        class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="sticky top-0 px-5 py-3 border-b border-neutral-200 bg-neutral-50">
           <h3 class="text-sm font-semibold text-neutral-800">
             <span class="font-mono">{{ section.key }}</span>
@@ -186,7 +213,7 @@ onMounted(loadPreview)
       <!-- Total summary — odděleně uskutečněná (daň na výstupu) a přijatá (odpočet) -->
       <div v-if="preview.sections.length > 0" class="grid gap-4 md:grid-cols-2">
         <!-- Uskutečněná plnění -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-4">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-4">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-3">
             {{ t('reports.dph_book.summary_issued') }}
           </div>
@@ -206,7 +233,7 @@ onMounted(loadPreview)
           </div>
         </div>
         <!-- Přijatá plnění -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-4">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-4">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-3">
             {{ t('reports.dph_book.summary_received') }}
           </div>

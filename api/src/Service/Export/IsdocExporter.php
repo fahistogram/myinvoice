@@ -16,10 +16,10 @@ use Rikudou\Iban\Iban\CzechIbanAdapter;
  *
  * Vyrobí buď single .isdoc XML (pro 1 fakturu) nebo ZIP s více .isdoc soubory.
  *
- * Mapování DocumentType:
+ * Mapování DocumentType (ISDOC 6.0.2 číselník DocumentTypeType):
  *   1 = běžná faktura (invoice)
- *   2 = zálohová faktura (proforma)
- *   5 = opravný daňový doklad / dobropis (credit_note)
+ *   2 = opravný daňový doklad / dobropis (credit_note, cancellation)
+ *   4 = zálohová faktura — nedaňový zálohový list (proforma); je NEdaňový doklad
  *
  * PaymentMeansCode:
  *   42 = převod (bank transfer) — default pro CZK účty s bank_code
@@ -87,11 +87,15 @@ final class IsdocExporter
      */
     private float $exportRate = 1.0;
     private bool $exportForeign = false;
+    private readonly InvoiceExportDataResolver $dataResolver;
 
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
-    ) {}
+        ?InvoiceExportDataResolver $dataResolver = null,
+    ) {
+        $this->dataResolver = $dataResolver ?? new InvoiceExportDataResolver($db);
+    }
 
     /**
      * @param int[] $invoiceIds
@@ -171,10 +175,10 @@ final class IsdocExporter
 
         // ─── ROOT SEQUENCE (přesné pořadí dle isdoc-invoice-6.0.2.xsd) ───
         $docType = match ($invoice['invoice_type']) {
-            'proforma'     => 2,
-            'credit_note'  => 5,
-            'cancellation' => 5,
-            default        => 1,
+            'proforma'     => 4,  // zálohová faktura = nedaňový zálohový list
+            'credit_note'  => 2,  // opravný daňový doklad (dobropis)
+            'cancellation' => 2,  // storno řešíme jako dobropis
+            default        => 1,  // faktura — daňový doklad
         };
         $this->el($dom, $root, 'DocumentType', (string) $docType);
         $this->el($dom, $root, 'ID', (string) ($invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id'])));
@@ -186,12 +190,16 @@ final class IsdocExporter
         if (!empty($invoice['tax_date'])) {
             $this->el($dom, $root, 'TaxPointDate', (string) $invoice['tax_date']);
         }
-        // VATApplicable = je dodavatel plátce DPH? NEodvozovat z reverse_charge —
+        // VATApplicable = je doklad předmětem DPH? NEodvozovat z reverse_charge —
         // reverse charge je plátcovský režim a značí se <LocalReverseChargeFlag> v TaxCategory
-        // (viz níže). Neplátce → false; plátce (vč. reverse charge) → true. Default true (legacy).
+        // (viz níže). Doklad je nedaňový (false), pokud je dodavatel neplátce DPH NEBO jde
+        // o zálohovou fakturu (DocumentType 4 = nedaňový zálohový list — DPH se přiznává až
+        // na konečném daňovém dokladu). Jinak plátce (vč. reverse charge) → true.
         $supplier = $this->resolveSupplier($invoice);
         $isVatPayer = !isset($supplier['is_vat_payer']) || !empty($supplier['is_vat_payer']);
-        $this->el($dom, $root, 'VATApplicable', $isVatPayer ? 'true' : 'false');
+        $isProforma = ($invoice['invoice_type'] ?? '') === 'proforma';
+        $isTaxDocument = $isVatPayer && !$isProforma;
+        $this->el($dom, $root, 'VATApplicable', $isTaxDocument ? 'true' : 'false');
         // ElectronicPossibilityAgreementReference je povinný (minOccurs=1) — pokud
         // dodavatel nemá explicitní souhlasový dokument, posíláme prázdný string.
         $this->el($dom, $root, 'ElectronicPossibilityAgreementReference', '');
@@ -253,18 +261,38 @@ final class IsdocExporter
             // InvoiceLine řadí <…Curr> PŘED base sourozence (viz XSD sekvence).
             // UnitPrice/UnitPriceTaxInclusive/LineExtensionTaxAmount Curr variantu
             // nemají — dle standardu jsou vždy v lokální měně.
-            $unitPrice = (float) $item['unit_price_without_vat'];
+            // UnitPrice je BEZ DPH. V režimu „ceny s DPH" nese unit_price_without_vat brutto,
+            // proto jednotkové ceny dopočítáme z řádkových totálů (netto z base, s DPH z tot).
+            $qtyItem = (float) $item['quantity'];
+            $pricesInclVat = !empty($invoice['prices_include_vat']);
+            $unitPrice = ($pricesInclVat && $qtyItem != 0.0)
+                ? round($base / $qtyItem, 2)
+                : (float) $item['unit_price_without_vat'];
+            // Jednotkovou cenu s DPH odvozujeme z řádkového total_with_vat (ne dopočtem
+            // nominální sazbou). Řádkový total už zohledňuje reverse charge i osvobození
+            // (daň = 0), takže UnitPriceTaxInclusive sedí s LineExtensionAmountTaxInclusive.
+            // Dopočet unitPrice*(1+sazba/100) by u RC dal falešné brutto (sazba 21 %, ale
+            // daň se nepřenáší → 0) a řádek by si protiřečil.
+            $unitPriceInclVat = $qtyItem != 0.0
+                ? round($tot / $qtyItem, 2)
+                : $unitPrice;
             $this->elAmountCurr($dom, $line, 'LineExtensionAmount', $base, true);
             $this->elAmountCurr($dom, $line, 'LineExtensionAmountTaxInclusive', $tot, true);
             $this->elAmount($dom, $line, 'LineExtensionTaxAmount', $vat);
             $this->elAmount($dom, $line, 'UnitPrice', $unitPrice);
-            $this->elAmount($dom, $line, 'UnitPriceTaxInclusive', $unitPrice * (1 + ((float) ($item['vat_rate_snapshot'] ?? 0)) / 100));
+            $this->elAmount($dom, $line, 'UnitPriceTaxInclusive', $unitPriceInclVat);
 
             // Na úrovni řádky je správný název <ClassifiedTaxCategory>
             // (na úrovni TaxSubTotal se používá <TaxCategory> — pozor na rozdíl).
             $cat = $dom->createElementNS(self::NS, 'ClassifiedTaxCategory');
             $this->el($dom, $cat, 'Percent', $this->fmt((float) ($item['vat_rate_snapshot'] ?? 0)));
             $this->el($dom, $cat, 'VATCalculationMethod', '0');
+            // ISDOC 4.1.5: je-li doklad nedaňový (VATApplicable=false na úrovni dokladu),
+            // musejí být nedaňové i všechny řádky → VATApplicable=false uvnitř
+            // ClassifiedTaxCategory (XSD sekvence: Percent, VATCalculationMethod, VATApplicable).
+            if (!$isTaxDocument) {
+                $this->el($dom, $cat, 'VATApplicable', 'false');
+            }
             $line->appendChild($cat);
 
             $itemEl = $dom->createElementNS(self::NS, 'Item');
@@ -328,10 +356,16 @@ final class IsdocExporter
         $mon = $dom->createElementNS(self::NS, 'LegalMonetaryTotal');
         $this->elAmountCurr($dom, $mon, 'TaxExclusiveAmount', $base, false);
         $this->elAmountCurr($dom, $mon, 'TaxInclusiveAmount', $tot, false);
+        // Záloha je NEDAŇOVÁ proforma — DPH se přiznává až na tomto konečném dokladu,
+        // takže `AlreadyClaimed*` (= již daňově zúčtováno z daňových záloh) jsou 0 a
+        // `Difference*` = plná hodnota dokladu. Odečtení uhrazené zálohy se komunikuje
+        // POUZE přes `PaidDepositsAmount` (snižuje `PayableAmount`). Dřív se sem dávala
+        // záloha do AlreadyClaimedTaxInclusive, což bylo vnitřně rozporné (základ 0,
+        // ale částka s DPH = celá záloha → nesmyslná implikovaná DPH).
         $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxExclusiveAmount', 0.0, false);
-        $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxInclusiveAmount', $advance, false);
+        $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxInclusiveAmount', 0.0, false);
         $this->elAmountCurr($dom, $mon, 'DifferenceTaxExclusiveAmount', $base, false);
-        $this->elAmountCurr($dom, $mon, 'DifferenceTaxInclusiveAmount', $tot - $advance, false);
+        $this->elAmountCurr($dom, $mon, 'DifferenceTaxInclusiveAmount', $tot, false);
         $this->elAmountCurr($dom, $mon, 'PayableRoundingAmount', $rounding, false);
         $this->elAmountCurr($dom, $mon, 'PaidDepositsAmount', $advance, false);
         $this->elAmountCurr($dom, $mon, 'PayableAmount', $payable, false);
@@ -389,7 +423,10 @@ final class IsdocExporter
         $partyEl = $dom->createElementNS(self::NS, 'Party');
 
         $idEl = $dom->createElementNS(self::NS, 'PartyIdentification');
-        $this->el($dom, $idEl, 'ID', (string) ($party['ic'] ?? '0'));
+        // PartyIdentification i jeho <ID> (IČ) jsou v XSD povinné, ale IDType je
+        // neomezený xs:string → prázdný <ID></ID> je validní. Když subjekt IČO nemá
+        // (typicky B2C odběratel — fyzická osoba), posíláme prázdno, NE fiktivní "0".
+        $this->el($dom, $idEl, 'ID', trim((string) ($party['ic'] ?? '')));
         $partyEl->appendChild($idEl);
 
         $nameEl = $dom->createElementNS(self::NS, 'PartyName');
@@ -446,80 +483,17 @@ final class IsdocExporter
 
     private function resolveSupplier(array $invoice): array
     {
-        // Live data ze supplier tabulky (defenzivní base — pro legacy faktury s prázdným
-        // snapshotem a pro chybějící klíče v starších snapshotech). Snapshot vyhrává nad
-        // live (zachovává historický stav vystavené faktury).
-        $live = $this->loadLiveSupplier((int) ($invoice['supplier_id'] ?? 0));
-        if (!empty($invoice['supplier_snapshot'])) {
-            $snap = is_string($invoice['supplier_snapshot']) ? json_decode($invoice['supplier_snapshot'], true) : $invoice['supplier_snapshot'];
-            if (is_array($snap)) {
-                return array_merge($live, $snap);
-            }
-        }
-        return $live;
+        return $this->dataResolver->supplier($invoice);
     }
 
     private function resolveClient(array $invoice): array
     {
-        $live = $this->loadLiveClient((int) ($invoice['client_id'] ?? 0));
-        if (!empty($invoice['client_snapshot'])) {
-            $snap = is_string($invoice['client_snapshot']) ? json_decode($invoice['client_snapshot'], true) : $invoice['client_snapshot'];
-            if (is_array($snap)) {
-                return array_merge($live, $snap);
-            }
-        }
-        // Final fallback: invoice repo joinuje basic client fields (legacy data bez clients
-        // záznamu — např. smazaný klient).
-        if (empty($live)) {
-            return [
-                'company_name' => $invoice['client_company_name'] ?? '',
-                'ic' => $invoice['client_ic'] ?? '',
-                'dic' => $invoice['client_dic'] ?? '',
-                'main_email' => $invoice['client_main_email'] ?? '',
-                'country_iso2' => 'CZ',
-            ];
-        }
-        return $live;
-    }
-
-    private function loadLiveSupplier(int $supplierId): array
-    {
-        if ($supplierId <= 0) return [];
-        $stmt = $this->db->pdo()->prepare(
-            'SELECT s.*, co.iso2 AS country_iso2, co.name_cs AS country_name_cs, co.name_en AS country_name_en
-               FROM supplier s JOIN countries co ON co.id = s.country_id WHERE s.id = ?'
-        );
-        $stmt->execute([$supplierId]);
-        return $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
-    }
-
-    private function loadLiveClient(int $clientId): array
-    {
-        if ($clientId <= 0) return [];
-        $stmt = $this->db->pdo()->prepare(
-            'SELECT c.*, co.iso2 AS country_iso2, co.name_cs AS country_name_cs, co.name_en AS country_name_en
-               FROM clients c JOIN countries co ON co.id = c.country_id WHERE c.id = ?'
-        );
-        $stmt->execute([$clientId]);
-        return $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        return $this->dataResolver->client($invoice);
     }
 
     private function resolveBank(array $invoice): ?array
     {
-        if (!empty($invoice['bank_snapshot'])) {
-            $snap = is_string($invoice['bank_snapshot']) ? json_decode($invoice['bank_snapshot'], true) : $invoice['bank_snapshot'];
-            if (is_array($snap)) return $snap;
-        }
-        if (!empty($invoice['bank_account_number']) || !empty($invoice['bank_iban'])) {
-            return [
-                'account_number' => $invoice['bank_account_number'] ?? null,
-                'bank_code'      => $invoice['bank_code'] ?? null,
-                'bank_name'      => $invoice['bank_name'] ?? null,
-                'iban'           => $invoice['bank_iban'] ?? null,
-                'bic'            => $invoice['bank_bic'] ?? null,
-            ];
-        }
-        return null;
+        return $this->dataResolver->bank($invoice);
     }
 
     private function el(\DOMDocument $dom, \DOMElement $parent, string $name, string $value): \DOMElement

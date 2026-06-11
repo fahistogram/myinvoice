@@ -18,11 +18,11 @@ use MyInvoice\Infrastructure\Database\Connection;
  *
  * **Sekce SH:**
  * Per řádek (group by counterparty VAT_ID + kód plnění):
- *   - Kód plnění:
- *     - **0** = Dodání zboží do jiného členského státu (řádek 20 DPHDP3, VAT kód "20")
- *     - **1** = Trojstranný obchod (zprostředkovatel)
- *     - **2** = Poskytnutí služby s místem plnění v jiném státě (VAT kód "22")
- *     - **3** = Přemístění zboží
+ *   - Kód plnění (k_pln_eu) dle DPHSHV XSD:
+ *     - **0** = Dodání zboží do jiného členského státu (ř.20 DPHDP3, VAT kód "20")
+ *     - **1** = Přemístění obchodního majetku do JČS (§ 13 odst. 6)
+ *     - **2** = Dodání zboží formou třístranného obchodu prostřední osobou (§ 17, ř.31, VAT kód "31")
+ *     - **3** = Poskytnutí služby s místem plnění v JČS (§ 9 odst. 1, ř.21, VAT kód "22")
  *   - DIČ kupujícího (s prefixem země, např. SK1234567890)
  *   - Hodnota plnění v CZK (základ daně, bez DPH)
  *   - Počet plnění
@@ -32,15 +32,21 @@ use MyInvoice\Infrastructure\Database\Connection;
 final class SouhrnneHlaseniBuilder
 {
     /**
-     * Mapování VAT klasifikačních kódů na SH typ plnění.
-     *   "20" (EU dodání zboží) → 0
-     *   "22" (EU služby)        → 2
-     *   "21" (EU dodání po trojstranném obchodu — pokud máte custom kód) → 1
+     * Mapování VAT klasifikačních kódů na kód plnění SH (k_pln_eu) dle DPHSHV XSD:
+     *   0 = dodání zboží do JČS (§13)
+     *   1 = přemístění obchodního majetku do JČS (§13/6)
+     *   2 = dodání zboží formou třístranného obchodu prostřední osobou (§17)
+     *   3 = poskytnutí služby s místem plnění v JČS (§9/1), daň přiznává příjemce
+     *
+     * Klasifikační kódy číselníku:
+     *   "20" (EU dodání zboží)             → 0
+     *   "31" (třístranný obchod, ř.31)     → 2  (prostřední osoba)
+     *   "22" (EU služby, ř.21)             → 3
      */
     private const VAT_CODE_TO_SH_TYPE = [
-        '20' => '0',  // dodání zboží
-        '21' => '1',  // trojstranný obchod (pokud existuje custom kód)
-        '22' => '2',  // poskytnutí služby
+        '20' => '0',  // dodání zboží do JČS
+        '31' => '2',  // třístranný obchod — dodání zboží prostřední osobou (§17)
+        '22' => '3',  // poskytnutí služby do JČS (§9/1)
     ];
 
     public function __construct(

@@ -9,17 +9,16 @@ declare(strict_types=1);
  *   php api/bin/reset.php --yes       # bez ptaní
  *   php api/bin/reset.php --yes --keep-cache   # ponechá ARES/VIES cache
  *
+ * DYNAMICKÉ mazání: vymaže VŠECHNY tabulky kromě keep-listu (viz níže $keep),
+ *       takže nezaostává za schématem — nové tabulky (vč. secretů: IMAP hesla,
+ *       podpisové certifikáty) se po migraci automaticky vyčistí.
  * Ponechává (globální číselníky + schema): countries, vat_rates, units,
- *       exchange_rates (cache ČNB kurzů — drahé refetchnout), migrations
- * Maže: users, sessions, password_resets, login_otps, trusted_devices, login_attempts, api_tokens,
- *       supplier, clients, projects, invoices, work_reports, activity_log,
- *       bank_statements, bank_transactions, payment_matches (bank N:N matching),
- *       invoice_counters, purchase_invoice_counters, invoice_pdfs (PDF historie),
- *       invoice_attachments, recurring_invoice_templates + _items
- *       (pravidelné fakturace), purchase_invoices + _items, app_meta
- *       (version cache), ares_cache, vies_cache (volitelně), email_templates,
- *       project/client revenue cache, currencies (per-supplier!),
- *       crm_monthly_summary, tax_submissions
+ *       tax_constants, exchange_rates (cache ČNB kurzů — drahé refetchnout), migrations.
+ *       S --keep-cache navíc ares_cache/vies_cache/crpdph_cache.
+ * Globální seed (supplier_id IS NULL) zůstává u: vat_classifications,
+ *       bank_email_notice_providers — maže se jen per-tenant.
+ * Vše ostatní (users, supplier, currencies, doklady, banka, dokumenty, podpisy,
+ *       importy, cache přepočtů, …) se TRUNCATE.
  *
  * Pozn.: currencies jsou per-supplier (multi-tenant), takže s ním padají.
  * Po resetu setup.php založí novému supplier defaultní CZK + EUR.
@@ -90,94 +89,62 @@ if (!$autoYes) {
     }
 }
 
-// Tabulky ke smazání (v pořadí kvůli FK; FOREIGN_KEY_CHECKS=0 je dole, ale držíme topologii)
-$wipe = [
-    // Bank — payment_matches musí PŘED bank_transactions (FK on delete cascade by to vzal,
-    // ale držíme topologii pro robustnost a explicit auditní stopu mazání)
-    'payment_matches',               // N:N bank tx ↔ purchase/sale invoice (migrace 0034)
-    'bank_transactions',
-    'bank_statements',
-    // Vystavené faktury + work reports
-    'work_report_items',
-    'work_reports',
-    'invoice_items',
-    'invoice_pdfs',                  // PDF historie (cascade by ji vzal s invoices, ale TRUNCATE FK ignoruje)
-    'invoice_attachments',           // uživatelské přílohy faktur
-    'recurring_invoice_template_items',  // child před parentem (FK + ON DELETE CASCADE)
-    'recurring_invoice_templates',   // šablony pravidelných faktur (FK → invoices nullified, viz fk_inv_recurring)
-    'invoices',
-    'invoice_counters',
-    // Přijaté faktury (fáze 1+ integrace forku)
-    'purchase_invoice_items',
-    'purchase_invoices',
-    'purchase_invoice_counters',     // per-tenant counter PF-YYYYMM-NNNN (migrace 0026)
-    'expense_categories',            // per-tenant kategorie nákladů (migrace 0035)
-    // Import jobs + AI extractions (fáze 2a/2b/2c)
-    'import_jobs',                   // iDoklad/Fakturoid background jobs
-    'import_job_logs',               // (pokud existuje — log za jobs)
-    'ai_extractions',                // AI extract history (jen pokud table existuje)
-    // CRM aggregate cache
-    'crm_monthly_summary',           // pre-aggregated stats (fáze 5)
-    'crm_action_item_dismissals',    // per-user dismissals "Akce pro tebe" (migrace 0040)
-    'project_revenue_cache',
-    'client_revenue_cache',
-    // Tax submission archive (fáze 6 — archivované EPO XML)
-    'tax_submissions',
-    // VAT klasifikace per-tenant (globální seed s supplier_id NULL zůstává)
-    // POZOR: jen tenant rows, nikoli globální seed (supplier_id IS NULL)
-    // proto NEpoužíváme TRUNCATE, ale DELETE WHERE — viz speciální handling níže
-    // Clients + projects
-    'project_billing_emails',
-    'projects',
-    'clients',
-    'currencies',                    // per-supplier (multi-tenant) — setup.php založí znovu
-    'supplier',
-    // Auth + sessions
-    'sessions',
-    'password_resets',
-    'login_otps',                    // e-mailové 2FA kódy (migrace 0047)
-    'trusted_devices',               // „zapamatovaná zařízení" pro e-mailové 2FA (migrace 0047)
-    'login_attempts',
-    'api_tokens',                    // Personal Access Tokens (FK→users, ale TRUNCATE FK ignoruje)
-    'activity_log',
-    'cron_runs',                     // cron heartbeat historie (smaže i ?_last_report pro UI)
-    'email_templates',
-    'app_meta',                      // version-check cache + jiné globální K/V; reset = fresh fetch
-    'users',
+// Reset je DYNAMICKÝ: vymaže VŠECHNY tabulky kromě keep-listu (globální číselníky +
+// schema + drahé cache). Díky tomu nezaostává za schématem — nové tabulky se po
+// migraci automaticky vyčistí (důležité např. pro IMAP účty / podpisové certifikáty
+// se šifrovanými secrety). Pokud přibude nová GLOBÁLNÍ tabulka, přidej ji do $keep,
+// jinak se taky smaže.
+$keep = [
+    'countries',      // globální číselník zemí
+    'vat_rates',      // globální sazby DPH
+    'units',          // globální měrné jednotky
+    'tax_constants',  // globální daňové konstanty
+    'exchange_rates', // cache kurzů ČNB — drahé refetchnout
+    'migrations',     // evidence schématu
+];
+// ARES/VIES/CRPDPH cache — defaultně mažeme, s --keep-cache ponecháme.
+if ($keepCache) {
+    $keep = array_merge($keep, ['ares_cache', 'vies_cache', 'crpdph_cache']);
+}
+
+// Tabulky s globálním seedem (supplier_id IS NULL) — smaž jen per-tenant řádky.
+$partial = [
+    'vat_classifications'         => 'supplier_id IS NOT NULL',
+    'bank_email_notice_providers' => 'supplier_id IS NOT NULL', // ponech globální bankovní providery
 ];
 
-// VAT klasifikace — speciální handling: zachovat globální seed (supplier_id IS NULL),
-// smazat jen per-tenant overrides
-$wipeWithGlobalSeed = [
-    'vat_classifications' => 'supplier_id IS NOT NULL',
-];
-if (!$keepCache) {
-    $wipe[] = 'ares_cache';
-    $wipe[] = 'vies_cache';
-}
+$allTables = $pdo->query('SHOW TABLES')->fetchAll(\PDO::FETCH_COLUMN);
 
 echo "\n[reset] Mažu tabulky…\n";
 $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
 $total = 0;
-foreach ($wipe as $t) {
+foreach ($allTables as $t) {
+    if (in_array($t, $keep, true)) {
+        continue;
+    }
+    if (isset($partial[$t])) {
+        try {
+            $deleted = $pdo->exec("DELETE FROM `$t` WHERE {$partial[$t]}");
+            echo "  ✓ $t (ponechán globální seed, smazáno {$deleted} tenant řádků)\n";
+            $total++;
+        } catch (\PDOException $e) {
+            echo "  - $t (skipped: " . $e->getMessage() . ")\n";
+        }
+        continue;
+    }
     try {
         $pdo->exec("TRUNCATE TABLE `$t`");
         echo "  ✓ $t\n";
         $total++;
     } catch (\PDOException $e) {
-        // tabulka nemusí existovat (např. settings/email_templates jsou volitelné)
-        echo "  - $t (skipped: " . $e->getMessage() . ")\n";
-    }
-}
-
-// Partial wipes — zachovat globální seed rows (vat_classifications kde supplier_id IS NULL)
-foreach ($wipeWithGlobalSeed as $t => $whereClause) {
-    try {
-        $deleted = $pdo->exec("DELETE FROM `$t` WHERE $whereClause");
-        echo "  ✓ $t (kept global seed, deleted {$deleted} tenant rows)\n";
-        $total++;
-    } catch (\PDOException $e) {
-        echo "  - $t (skipped: " . $e->getMessage() . ")\n";
+        // Fallback DELETE — TRUNCATE může v některých případech selhat i s FK_CHECKS=0.
+        try {
+            $pdo->exec("DELETE FROM `$t`");
+            echo "  ✓ $t (DELETE)\n";
+            $total++;
+        } catch (\PDOException $e2) {
+            echo "  - $t (skipped: " . $e2->getMessage() . ")\n";
+        }
     }
 }
 
@@ -185,10 +152,11 @@ $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
 
 // PDF cache + storage cleanup — vč. přijaté faktury archive + XSD (necháváme)
 $dirs = [
-    $rootDir . '/storage/invoices',
-    $rootDir . '/storage/purchase-invoices',  // archive PDF dodavatelů (fáze 1)
-    $rootDir . '/storage/cache/mpdf',
-    $rootDir . '/storage/cache/twig',
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices'),
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices'),  // archive PDF dodavatelů (fáze 1)
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('documents'),          // sekce Dokumenty (soubory, náhledy, joby)
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/mpdf'),
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/twig'),
 ];
 echo "\n[reset] Čistím cache adresáře…\n";
 foreach ($dirs as $d) {

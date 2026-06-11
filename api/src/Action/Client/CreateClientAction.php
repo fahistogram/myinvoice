@@ -7,6 +7,7 @@ namespace MyInvoice\Action\Client;
 use MyInvoice\Http\Json;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Repository\ClientEmailContactRepository;
 use MyInvoice\Repository\ClientRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
@@ -20,6 +21,7 @@ final class CreateClientAction
         private readonly ClientRepository $repo,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
+        private readonly ClientEmailContactRepository $emailContacts,
     ) {}
 
     public function __invoke(Request $request, Response $response): Response
@@ -39,7 +41,17 @@ final class CreateClientAction
         } catch (\InvalidArgumentException $e) {
             return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         }
+
+        // E-mailové kontakty dle účelu (#86) — replace-all, validuje repo.
+        if (isset($body['email_contacts']) && is_array($body['email_contacts'])) {
+            try {
+                $this->emailContacts->replaceForClient($id, $supplierId, $body['email_contacts']);
+            } catch (\DomainException $e) {
+                return Json::error($response, 'invalid_email_contacts', $e->getMessage(), 422);
+            }
+        }
         $client = $this->repo->find($id);
+        $client['email_contacts'] = $this->emailContacts->listForClient($id, $supplierId);
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());

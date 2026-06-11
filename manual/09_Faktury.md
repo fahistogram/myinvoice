@@ -1,8 +1,8 @@
 # 9. Faktury — seznam a hromadné akce
 
 Faktury jsou srdce systému. Tato kapitola popisuje **seznam faktur** a **hromadné
-akce**. Editaci jednotlivé faktury popisuje [11. Editor faktury](11_Faktura_editor.md),
-PDF a odeslání e-mailem [12. Faktura PDF](12_Faktura_PDF.md).
+akce**. Editaci jednotlivé faktury popisuje [10. Editor faktury](10_Faktura_editor.md),
+PDF a odeslání e-mailem [11. Faktura PDF](11_Faktura_PDF.md).
 
 ## 9.1 Seznam faktur
 
@@ -112,8 +112,8 @@ Funguje fulltext česky i anglicky.
   drobné chyby (špatná částka, chybějící popis), pošlou se klientovi všechny
   najednou.
 - **„Označit zaplacené" je manuální fallback** — primárně se faktury označují
-  zaplacenými automaticky při importu bankovního výpisu (viz [13. Banka](13_Banka.md)).
+  zaplacenými automaticky při importu bankovního výpisu (viz [23. Banka](23_Banka.md)).
 - **Filtr „Po splatnosti"** je nejrychlejší způsob, jak zjistit, kdo dluží —
   klik na řádek a hned máš tlačítko **Upomínka**.
-- **Klik na číslo faktury** otevře [Detail faktury](12_Faktura_PDF.md).
+- **Klik na číslo faktury** otevře [Detail faktury](11_Faktura_PDF.md).
 - **Klik na ikonu PDF** stáhne přímo PDF (bez otvírání detailu).

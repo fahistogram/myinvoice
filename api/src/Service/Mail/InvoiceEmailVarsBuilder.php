@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Service\Mail;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\Branding\AccentColor;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
 
 /**
@@ -146,11 +147,25 @@ final class InvoiceEmailVarsBuilder
         $varsymbol = $invoice['varsymbol'] ?? '';
         $supplier = $this->resolveSupplierName($invoice, false);
         $prefix = $isTest ? '[TEST] ' : '';
+        $type = (string) ($invoice['invoice_type'] ?? 'invoice');
 
+        // Předmět odpovídá typu dokladu (stejně jako text v těle e-mailu) —
+        // zálohová faktura ani opravný daňový doklad nejsou „Faktura".
         if ($locale === 'en') {
-            return "{$prefix}Invoice {$varsymbol}" . ($supplier ? " — {$supplier}" : '');
+            $label = match ($type) {
+                'proforma'    => 'Proforma invoice',
+                'credit_note' => 'Credit note',
+                default       => 'Invoice',
+            };
+        } else {
+            $label = match ($type) {
+                'proforma'    => 'Zálohová faktura',
+                'credit_note' => 'Opravný daňový doklad',
+                default       => 'Faktura',
+            };
         }
-        return "{$prefix}Faktura {$varsymbol}" . ($supplier ? " — {$supplier}" : '');
+
+        return "{$prefix}{$label} {$varsymbol}" . ($supplier ? " — {$supplier}" : '');
     }
 
     /**
@@ -241,6 +256,10 @@ final class InvoiceEmailVarsBuilder
                 $row['email_branding_enabled'] = (bool) $br['email_branding_enabled'];
                 $row['email_accent_color']     = (string) ($br['email_accent_color'] ?: '#3B2D83');
                 $row['logo_path']              = $br['logo_path'] ?: null;
+                $row['accent_soft']            = AccentColor::emailBackground(
+                    $row['email_branding_enabled'],
+                    $row['email_accent_color'],
+                );
             }
         }
 

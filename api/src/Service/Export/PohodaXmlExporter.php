@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Export;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
+use MyInvoice\Repository\TaxConstantsRepository;
 
 /**
  * Stormware Pohoda XML data package exporter.
@@ -30,11 +31,14 @@ use MyInvoice\Repository\InvoiceRepository;
  *   pohoda_activity_code → <inv:activity><typ:ids>...</typ:ids></inv:activity>
  *   pohoda_contract_code → <inv:contract><typ:ids>...</typ:ids></inv:contract>
  *
- * VAT classification (`<inv:classificationVAT>`) hardcoded podle vat_rate_snapshot:
- *   21 %  → UDA5     (tuzemské plnění základní)
- *   12 %  → UDA5_12  (snížené)
- *    0 %  → UNX      (osvobozeno)
- *   reverse_charge → PNAR (přenesená daňová povinnost)
+ * VAT classification (`<inv:classificationVAT>`) — Pohoda schema vyžaduje STRUKTUROVANÉ
+ * dítě `<typ:ids>` + `<typ:classificationVATType>` ({inland, nonSubsume}), NE prostý text
+ * (validation error: "typ Text v tomto kontextu elementu classificationVAT není povolen").
+ * Mapování podle vat_rate_snapshot:
+ *   21 %  → UDA5    + inland     (tuzemské plnění základní)
+ *   12 %  → UDA5_12 + inland     (snížené)
+ *    0 %  → UNX     + nonSubsume (osvobozeno)
+ *   reverse_charge → PNAR + nonSubsume (přenesená daňová povinnost)
  */
 final class PohodaXmlExporter
 {
@@ -42,10 +46,29 @@ final class PohodaXmlExporter
     public const NS_INV = 'http://www.stormware.cz/schema/version_2/invoice.xsd';
     public const NS_TYP = 'http://www.stormware.cz/schema/version_2/type.xsd';
 
+    private readonly InvoiceExportDataResolver $dataResolver;
+
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
-    ) {}
+        private readonly TaxConstantsRepository $taxConstants,
+        ?InvoiceExportDataResolver $dataResolver = null,
+    ) {
+        $this->dataResolver = $dataResolver ?? new InvoiceExportDataResolver($db);
+    }
+
+    /**
+     * Hranice základní sazby (bucket high vs low) pro rok dokladu — z číselníku
+     * daňových konstant místo natvrdo 20,5. Hranice low/low2 (11,5 / 9,5) zůstávají
+     * fixní: jsou to středy historických snížených sazeb (12/10 %), které Pohoda
+     * kategorie low/low2 přímo kopírují.
+     */
+    private function highBoundary(array $invoice): float
+    {
+        $date = (string) ($invoice['tax_date'] ?? $invoice['issue_date'] ?? '');
+        $year = $date !== '' ? (int) substr($date, 0, 4) : (int) date('Y');
+        return $this->taxConstants->vatBucketThreshold($year);
+    }
 
     /**
      * @param int[] $invoiceIds
@@ -135,9 +158,13 @@ final class PohodaXmlExporter
             }
             $this->el($dom, $hdr, self::NS_INV, 'inv:dateDue', (string) $invoice['due_date']);
 
-            // Klasifikace DPH (per-faktura — vezme se první VAT rate z položek; v praxi mix se řeší per-položka v invoiceItem)
+            // Klasifikace DPH (per-faktura — vezme se nejvyšší VAT rate z položek; mix se v praxi
+            // řeší per-položka v invoiceItem). Pohoda vyžaduje strukturované dítě, ne prostý text.
             $defaultVatClass = $this->classifyVat($invoice);
-            $this->el($dom, $hdr, self::NS_INV, 'inv:classificationVAT', $defaultVatClass);
+            $classEl = $dom->createElementNS(self::NS_INV, 'inv:classificationVAT');
+            $this->el($dom, $classEl, self::NS_TYP, 'typ:ids', $defaultVatClass['ids']);
+            $this->el($dom, $classEl, self::NS_TYP, 'typ:classificationVATType', $defaultVatClass['type']);
+            $hdr->appendChild($classEl);
 
             // Číslo objednávky / poznámka
             if (!empty($invoice['note_above_items'])) {
@@ -213,7 +240,7 @@ final class PohodaXmlExporter
                 // Sazba DPH
                 $rate = (float) ($item['vat_rate_snapshot'] ?? 0);
                 $rateCode = match (true) {
-                    $rate >= 20.5 => 'high',
+                    $rate >= $this->highBoundary($invoice) => 'high',
                     $rate >= 11.5 => 'low',
                     $rate >= 9.5  => 'low2',  // 10% (Pohoda historic)
                     default       => 'none',
@@ -226,7 +253,13 @@ final class PohodaXmlExporter
                 // Pohoda dopočítá CZK z kurzu uvedeného v summary)
                 $blockName = $isForeign ? 'inv:foreignCurrency' : 'inv:homeCurrency';
                 $block = $dom->createElementNS(self::NS_INV, $blockName);
-                $this->el($dom, $block, self::NS_TYP, 'typ:unitPrice', $this->fmt((float) $item['unit_price_without_vat']));
+                // payVAT=false → unitPrice musí být BEZ DPH. V režimu „ceny s DPH" nese
+                // unit_price_without_vat brutto, proto dopočítáme netto z řádkového základu.
+                $qtyItem = (float) $item['quantity'];
+                $unitPriceNet = (!empty($invoice['prices_include_vat']) && $qtyItem != 0.0)
+                    ? round(((float) ($item['total_without_vat'] ?? 0)) / $qtyItem, 2)
+                    : (float) $item['unit_price_without_vat'];
+                $this->el($dom, $block, self::NS_TYP, 'typ:unitPrice', $this->fmt($unitPriceNet));
                 $this->el($dom, $block, self::NS_TYP, 'typ:price',     $this->fmt((float) ($item['total_without_vat'] ?? 0)));
                 $this->el($dom, $block, self::NS_TYP, 'typ:priceVAT',  $this->fmt((float) ($item['total_vat'] ?? 0)));
                 $this->el($dom, $block, self::NS_TYP, 'typ:priceSum',  $this->fmt((float) ($item['total_with_vat'] ?? 0)));
@@ -250,8 +283,8 @@ final class PohodaXmlExporter
             // (uživatel by měl doplnit kurz; export jinak nemá CZK účetní hodnoty).
             $homeCurrency = $dom->createElementNS(self::NS_INV, 'inv:homeCurrency');
             $homeBuckets  = $isForeign && !empty($invoice['czk_recap'])
-                ? $this->bucketsFromCzkRecap($invoice['czk_recap'])
-                : $this->bucketsFromBreakdown($bd);
+                ? $this->bucketsFromCzkRecap($invoice['czk_recap'], $this->highBoundary($invoice))
+                : $this->bucketsFromBreakdown($bd, $this->highBoundary($invoice));
             $homeTotal = $isForeign && !empty($invoice['czk_recap'])
                 ? (float) $invoice['czk_recap']['total_with_vat_czk']
                 : (float) ($totals['with_vat'] ?? 0);
@@ -282,7 +315,7 @@ final class PohodaXmlExporter
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:rate', number_format($exchangeRate, 6, '.', ''));
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:amount', '1');
 
-                $fb = $this->bucketsFromBreakdown($bd);
+                $fb = $this->bucketsFromBreakdown($bd, $this->highBoundary($invoice));
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:priceNone',    $this->fmt($fb['none']));
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:priceLow',     $this->fmt($fb['low']));
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:priceLowVAT',  $this->fmt($fb['lowVat']));
@@ -316,55 +349,30 @@ final class PohodaXmlExporter
         return $el;
     }
 
-    private function classifyVat(array $invoice): string
+    /**
+     * @return array{ids:string, type:string}  ids = zkratka členění v Pohodě, type = enum {inland, nonSubsume}
+     */
+    private function classifyVat(array $invoice): array
     {
-        if (!empty($invoice['reverse_charge'])) return 'PNAR';
+        if (!empty($invoice['reverse_charge'])) {
+            return ['ids' => 'PNAR', 'type' => 'nonSubsume'];
+        }
         $bd = $invoice['vat_breakdown'] ?? [];
-        if (empty($bd)) return 'UDA5';
+        if (empty($bd)) {
+            return ['ids' => 'UDA5', 'type' => 'inland'];
+        }
         $maxRate = 0.0;
         foreach ($bd as $b) {
             if ((float) $b['rate'] > $maxRate) $maxRate = (float) $b['rate'];
         }
-        if ($maxRate >= 20.5) return 'UDA5';
-        if ($maxRate >= 11.5) return 'UDA5_12';
-        return 'UNX';
+        if ($maxRate >= $this->highBoundary($invoice)) return ['ids' => 'UDA5',    'type' => 'inland'];
+        if ($maxRate >= 11.5)                          return ['ids' => 'UDA5_12', 'type' => 'inland'];
+        return ['ids' => 'UNX', 'type' => 'nonSubsume'];
     }
 
     private function resolveClient(array $invoice): array
     {
-        // Live data ze clients tabulky jako defensive base (pro legacy faktury
-        // s prázdným snapshotem nebo snapshoty bez všech polí — chybějící
-        // street/city/zip/country v Pohoda XML by jinak vyrobilo prázdný
-        // partner address). Snapshot vyhrává nad live (zachovává historický
-        // stav vystavené faktury). Stejný pattern jako v IsdocExporter.
-        $live = $this->loadLiveClient((int) ($invoice['client_id'] ?? 0));
-        if (!empty($invoice['client_snapshot'])) {
-            $snap = is_string($invoice['client_snapshot']) ? json_decode($invoice['client_snapshot'], true) : $invoice['client_snapshot'];
-            if (is_array($snap)) {
-                return array_merge($live, $snap);
-            }
-        }
-        if (empty($live)) {
-            return [
-                'company_name' => $invoice['client_company_name'] ?? '',
-                'ic' => $invoice['client_ic'] ?? '',
-                'dic' => $invoice['client_dic'] ?? '',
-                'main_email' => $invoice['client_main_email'] ?? '',
-                'country_iso2' => 'CZ',
-            ];
-        }
-        return $live;
-    }
-
-    private function loadLiveClient(int $clientId): array
-    {
-        if ($clientId <= 0) return [];
-        $stmt = $this->db->pdo()->prepare(
-            'SELECT c.*, co.iso2 AS country_iso2, co.name_cs AS country_name_cs, co.name_en AS country_name_en
-               FROM clients c JOIN countries co ON co.id = c.country_id WHERE c.id = ?'
-        );
-        $stmt->execute([$clientId]);
-        return $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        return $this->dataResolver->client($invoice);
     }
 
     private function fmt(float $value): string
@@ -376,12 +384,12 @@ final class PohodaXmlExporter
      * @param list<array{rate: float, base: float, vat: float}> $breakdown
      * @return array{none: float, low: float, lowVat: float, high: float, highVat: float}
      */
-    private function bucketsFromBreakdown(array $breakdown): array
+    private function bucketsFromBreakdown(array $breakdown, float $highBoundary): array
     {
         $out = ['none' => 0.0, 'low' => 0.0, 'lowVat' => 0.0, 'high' => 0.0, 'highVat' => 0.0];
         foreach ($breakdown as $b) {
             $r = (float) $b['rate'];
-            if ($r >= 20.5) {
+            if ($r >= $highBoundary) {
                 $out['high']    += (float) $b['base'];
                 $out['highVat'] += (float) $b['vat'];
             } elseif ($r >= 11.5) {
@@ -398,12 +406,12 @@ final class PohodaXmlExporter
      * @param array{breakdown: list<array{rate: float, base_czk: float, vat_czk: float}>} $recap
      * @return array{none: float, low: float, lowVat: float, high: float, highVat: float}
      */
-    private function bucketsFromCzkRecap(array $recap): array
+    private function bucketsFromCzkRecap(array $recap, float $highBoundary): array
     {
         $out = ['none' => 0.0, 'low' => 0.0, 'lowVat' => 0.0, 'high' => 0.0, 'highVat' => 0.0];
         foreach ($recap['breakdown'] ?? [] as $b) {
             $r = (float) $b['rate'];
-            if ($r >= 20.5) {
+            if ($r >= $highBoundary) {
                 $out['high']    += (float) $b['base_czk'];
                 $out['highVat'] += (float) $b['vat_czk'];
             } elseif ($r >= 11.5) {

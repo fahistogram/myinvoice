@@ -34,6 +34,8 @@ const supplier = ref({
   email: '',
   phone: '',
   web: '',
+  commercial_register: '',
+  taxpayer_type: '' as '' | 'fo' | 'po',
   is_vat_payer: true,
   default_currency: 'CZK',
   default_payment_due_days: 7,
@@ -49,6 +51,52 @@ const supplier = ref({
 // ARES lookup state
 const aresLoading = ref(false)
 const aresMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null)
+
+// Bankovní účet z registru plátců DPH (CRPDPH) — stav
+const bankLoading = ref(false)
+const bankMessage = ref<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null)
+const bankAccounts = ref<import('@/api/clients').CrpDphAccount[]>([])
+
+function applyBankAccount(acc: import('@/api/clients').CrpDphAccount) {
+  if (acc.iban) {
+    supplier.value.bank_currency = 'EUR'
+    supplier.value.iban = acc.iban
+  } else {
+    supplier.value.bank_currency = 'CZK'
+    supplier.value.account_number = acc.prefix ? `${acc.prefix}-${acc.number}` : acc.number
+    supplier.value.bank_code = acc.bank_code
+  }
+}
+
+async function lookupBank() {
+  const dic = (supplier.value.dic || '').replace(/\D/g, '')
+  if (!/^\d{8,10}$/.test(dic)) {
+    bankMessage.value = { type: 'error', text: t('supplier.bank_lookup_no_dic') }
+    return
+  }
+  bankLoading.value = true
+  bankMessage.value = null
+  bankAccounts.value = []
+  try {
+    const r = await authApi.setupCrpdphLookup(dic)
+    bankAccounts.value = r.accounts
+    if (r.accounts.length === 0) {
+      bankMessage.value = { type: 'error', text: t('supplier.bank_lookup_none') }
+    } else {
+      applyBankAccount(r.accounts[0])
+      bankMessage.value = r.accounts.length === 1
+        ? { type: 'success', text: t('supplier.bank_lookup_one') }
+        : { type: 'success', text: t('supplier.bank_lookup_many', { n: r.accounts.length }) }
+    }
+    if (r.unreliable === true) {
+      bankMessage.value = { type: 'warning', text: t('supplier.bank_lookup_unreliable') }
+    }
+  } catch (e: any) {
+    bankMessage.value = { type: 'error', text: e?.response?.data?.error?.message || t('supplier.bank_lookup_failed') }
+  } finally {
+    bankLoading.value = false
+  }
+}
 
 async function goToApp() {
   // Po setupu je backend session vytvořená (auto-login). Refresh auth store + hard reload na /.
@@ -79,6 +127,8 @@ async function lookupAres() {
     supplier.value.ic           = d.ic           || ic
     supplier.value.dic          = d.dic          || supplier.value.dic
     supplier.value.is_vat_payer = d.is_vat_payer
+    supplier.value.commercial_register = d.commercial_register || supplier.value.commercial_register
+    if (d.taxpayer_type === 'fo' || d.taxpayer_type === 'po') supplier.value.taxpayer_type = d.taxpayer_type
     aresMessage.value = { type: 'success', text: t('supplier.ares_loaded', { name: d.company_name }) }
   } catch (e: any) {
     aresMessage.value = { type: 'error', text: e?.response?.data?.error?.message || t('supplier.ares_failed') }
@@ -142,6 +192,8 @@ async function submit() {
         phone: supplier.value.phone || undefined,
         web: supplier.value.web || undefined,
         is_vat_payer: supplier.value.is_vat_payer,
+        commercial_register: supplier.value.commercial_register || undefined,
+        taxpayer_type: supplier.value.taxpayer_type || undefined,
         default_currency: supplier.value.default_currency,
         default_payment_due_days: supplier.value.default_payment_due_days,
         default_hourly_rate: supplier.value.default_hourly_rate,
@@ -202,7 +254,7 @@ async function submit() {
 <template>
   <AppShell :title="t('setup.title')">
     <div class="w-full max-w-xl">
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-6">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-6">
         <!-- Progress -->
         <div class="flex items-center mb-6 text-sm">
           <span :class="step >= 1 ? 'text-primary-600 font-medium' : 'text-neutral-400'">1. {{ t('setup.step_admin') }}</span>
@@ -293,7 +345,7 @@ async function submit() {
               <div v-if="aresMessage" class="mt-2 text-xs px-2 py-1 rounded"
                 :class="aresMessage.type === 'success' ? 'bg-success-50 text-success-600' : 'bg-danger-50 text-danger-500'">
                 {{ aresMessage.text }}
-                <span v-if="aresMessage.type === 'success' && !supplier.email" class="block mt-0.5 text-warning-700">
+                <span v-if="aresMessage.type === 'success' && !supplier.email" class="block mt-0.5 text-warning-600">
                   {{ t('supplier.ares_loaded_email_hint') }}
                 </span>
               </div>
@@ -329,14 +381,39 @@ async function submit() {
                 <input v-model="supplier.city" required :class="['w-full h-10 px-3 border rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none', fieldErrors['supplier.city'] ? 'border-danger-500' : 'border-neutral-300']" />
                 <p v-if="fieldErrors['supplier.city']" class="text-xs text-danger-500 mt-1">{{ fieldErrors['supplier.city'][0] }}</p>
               </div>
+              <div class="sm:col-span-2">
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.commercial_register') }}</label>
+                <input v-model="supplier.commercial_register" :placeholder="t('settings.commercial_register_placeholder')" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+              </div>
             </div>
 
             <div class="border-t border-neutral-200 pt-4">
-              <h3 class="text-sm font-semibold mb-3">{{ t('settings.account_cz') }} {{ t('common.optional') }}</h3>
+              <div class="flex items-center justify-between mb-3 gap-2">
+                <h3 class="text-sm font-semibold">{{ t('settings.account_cz') }} {{ t('common.optional') }}</h3>
+                <button type="button" @click="lookupBank" :disabled="bankLoading"
+                  class="cursor-pointer h-8 px-3 text-xs bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 disabled:opacity-50 inline-flex items-center gap-1.5 shrink-0">
+                  <span v-if="bankLoading">…</span>
+                  {{ bankLoading ? t('common.loading') : t('supplier.bank_lookup') }}
+                </button>
+              </div>
+              <div v-if="bankMessage" class="mb-3 text-xs px-2 py-1 rounded"
+                :class="{
+                  'bg-success-50 text-success-600': bankMessage.type === 'success',
+                  'bg-danger-50 text-danger-500': bankMessage.type === 'error',
+                  'bg-warning-50 text-warning-600': bankMessage.type === 'warning',
+                }">
+                {{ bankMessage.text }}
+              </div>
+              <div v-if="bankAccounts.length > 1" class="mb-3 flex flex-wrap gap-1.5">
+                <button v-for="(acc, i) in bankAccounts" :key="i" type="button" @click="applyBankAccount(acc)"
+                  class="cursor-pointer px-2 py-1 text-xs font-mono border border-neutral-300 rounded hover:bg-primary-50 hover:border-primary-300">
+                  {{ acc.display }}
+                </button>
+              </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('common.currency') }}</label>
-                  <select v-model="supplier.bank_currency" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+                  <select v-model="supplier.bank_currency" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
                     <option value="CZK">CZK</option>
                     <option value="EUR">EUR</option>
                   </select>
@@ -402,7 +479,7 @@ async function submit() {
           <h2 class="text-xl font-semibold mb-2">{{ t('common.success') }}</h2>
           <p class="text-neutral-500 mb-2">{{ locale === 'cs' ? 'Admin účet byl vytvořen a jste přihlášen.' : 'Admin account created and you are signed in.' }}</p>
 
-          <div v-if="requireTotp" class="mb-6 inline-block bg-warning-50 border border-warning-500/40 rounded-md px-4 py-2 text-sm text-warning-700 text-left">
+          <div v-if="requireTotp" class="mb-6 inline-block bg-warning-50 border border-warning-500/40 rounded-md px-4 py-2 text-sm text-warning-600 text-left">
             {{ locale === 'cs'
               ? 'Vynucení 2FA je aktivní. Po pokračování budeš přesměrován na nastavení TOTP.'
               : '2FA enforcement is active. You will be redirected to TOTP setup next.' }}

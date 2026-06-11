@@ -7,6 +7,8 @@ namespace MyInvoice\Action\Client;
 use MyInvoice\Http\Json;
 use MyInvoice\Http\SupplierGuard;
 use MyInvoice\Middleware\AuthMiddleware;
+use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Repository\ClientEmailContactRepository;
 use MyInvoice\Repository\ClientRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
@@ -20,6 +22,7 @@ final class UpdateClientAction
         private readonly ClientRepository $repo,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
+        private readonly ClientEmailContactRepository $emailContacts,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -36,15 +39,36 @@ final class UpdateClientAction
         }
 
         try {
-            $this->repo->update($id, $body);
+            $backfilled = $this->repo->update($id, $body);
         } catch (\InvalidArgumentException $e) {
             return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         }
 
+        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        // E-mailové kontakty dle účelu (#86) — replace-all, jen pokud klíč v payloadu je
+        // (partial update bez klíče kontakty nemění). Změny do activity logu.
+        $contactsChanged = false;
+        if (isset($body['email_contacts']) && is_array($body['email_contacts'])) {
+            try {
+                $this->emailContacts->replaceForClient($id, $supplierId, $body['email_contacts']);
+                $contactsChanged = true;
+            } catch (\DomainException $e) {
+                return Json::error($response, 'invalid_email_contacts', $e->getMessage(), 422);
+            }
+        }
+
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
-        $this->logger->log('client.updated', $user['id'] ?? null, 'client', $id, null, $ip, $request->getHeaderLine('User-Agent'));
+        $this->logger->log('client.updated', $user['id'] ?? null, 'client', $id,
+            $contactsChanged ? ['email_contacts' => $body['email_contacts']] : null,
+            $ip, $request->getHeaderLine('User-Agent'));
 
-        return Json::ok($response, $this->repo->find($id));
+        // *_category_backfilled = počet faktur, do kterých byla doplněna nově nastavená
+        // výchozí kategorie nákladu / tržby (frontend ukáže toast).
+        $client = $this->repo->find($id) ?? [];
+        $client['email_contacts'] = $this->emailContacts->listForClient($id, $supplierId);
+        $client['expense_category_backfilled'] = $backfilled['expense'];
+        $client['revenue_category_backfilled'] = $backfilled['revenue'];
+        return Json::ok($response, $client);
     }
 }

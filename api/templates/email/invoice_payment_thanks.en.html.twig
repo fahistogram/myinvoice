@@ -1,0 +1,62 @@
+{% extends '_layout.html.twig' %}
+
+{% block content %}
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:#15131D;">
+  {% if is_test %}<span style="color:#E8A547;">[TEST] </span>{% endif %}Thank you for your payment
+</h1>
+
+<p style="margin:0 0 16px;">
+  {% if is_proforma %}we confirm receipt of your advance payment for proforma invoice{% else %}we confirm receipt of your payment for invoice{% endif %}
+  <strong>No. {{ invoice.varsymbol }}</strong>. Thank you!
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;background:{{ accent_soft }};border-radius:8px;margin:16px 0;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#403B52;">
+        <tr>
+          <td style="padding:4px 0;color:#7A748C;width:42%;">Variable symbol</td>
+          <td style="padding:4px 0;font-family:monospace;font-weight:600;color:#15131D;">{{ invoice.varsymbol }}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;color:#7A748C;">Payment date</td>
+          <td style="padding:4px 0;font-weight:600;">{{ paid_at|date('M j, Y') }}</td>
+        </tr>
+        {% if payment_method == 'card' %}
+        <tr><td style="padding:4px 0;color:#7A748C;">Payment method</td><td style="padding:4px 0;">card</td></tr>
+        {% elseif payment_method == 'cash' %}
+        <tr><td style="padding:4px 0;color:#7A748C;">Payment method</td><td style="padding:4px 0;">cash</td></tr>
+        {% endif %}
+        <tr>
+          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">Paid</td>
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:#2E7D32;font-family:monospace;">
+            {{ amount_paid|number_format(2, '.', ',') }} {{ currency }} ✓
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+{% if is_proforma %}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:8px 0;">
+  <tr>
+    <td style="padding:14px 18px;background:#E8F5E9;border-left:3px solid #2E7D32;border-radius:4px;font-size:14px;color:#1B5E20;">
+      Your advance payment has been received. The follow-up tax document will be sent separately as agreed.
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+{% if not is_test %}
+<p style="margin:24px 0 0;font-size:13px;color:#7A748C;">
+  We appreciate your payment and your business.
+</p>
+{% endif %}
+
+{% if is_test %}
+<p style="margin:24px 0 0;padding:12px;background:#FDF6E9;border-left:2px solid #E8A547;font-size:13px;color:#8B6420;">
+  <strong>This is a TEST email.</strong> The client did not receive it.
+</p>
+{% endif %}
+{% endblock %}

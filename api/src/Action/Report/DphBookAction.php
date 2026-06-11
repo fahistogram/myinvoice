@@ -44,7 +44,7 @@ final class DphBookAction
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
         try {
-            $result = $this->builder->build($supplierId, $year, $month);
+            $result = $this->builder->build($supplierId, $year, $month, $this->parsePeriodType($request));
         } catch (\Throwable $e) {
             return Json::error($response, 'build_failed', $e->getMessage(), 500);
         }
@@ -63,20 +63,25 @@ final class DphBookAction
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
         try {
-            $data = $this->builder->build($supplierId, $year, $month);
+            $data = $this->builder->build($supplierId, $year, $month, $this->parsePeriodType($request));
             $pdf = $this->renderer->render($data);
         } catch (\Throwable $e) {
             return Json::error($response, 'build_failed', $e->getMessage(), 500);
         }
         $userId = (int) ($user['id'] ?? 0);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $periodType = (string) ($data['period']['period_type'] ?? 'monthly');
+        $quarter = $data['period']['quarter'] ?? null;
         $this->logger->log('report.dph_book_downloaded', $userId, null, null, [
-            'period' => sprintf('%04d-%02d', $year, $month),
+            'period' => $quarter !== null ? sprintf('%04d-Q%d', $year, $quarter) : sprintf('%04d-%02d', $year, $month),
+            'period_type' => $periodType,
             'sections' => count($data['sections']),
             'total_rows' => array_sum(array_map(fn ($s) => count($s['rows']), $data['sections'])),
         ], $ip, $request->getHeaderLine('User-Agent'));
 
-        $filename = sprintf('kniha-dph-%04d-%02d.pdf', $year, $month);
+        $filename = $quarter !== null
+            ? sprintf('kniha-dph-%04d-Q%d.pdf', $year, $quarter)
+            : sprintf('kniha-dph-%04d-%02d.pdf', $year, $month);
         $response->getBody()->write($pdf);
         return $response
             ->withHeader('Content-Type', 'application/pdf')
@@ -96,5 +101,11 @@ final class DphBookAction
             return [null, null];
         }
         return [$year, $month];
+    }
+
+    private function parsePeriodType(Request $request): ?string
+    {
+        $p = (string) ($request->getQueryParams()['period'] ?? '');
+        return in_array($p, ['monthly', 'quarterly'], true) ? $p : null;
     }
 }

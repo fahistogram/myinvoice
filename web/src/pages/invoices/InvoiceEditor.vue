@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem } from '@/api/invoices'
+import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem, type InvoiceAttachment } from '@/api/invoices'
 import { useHotkey } from '@/composables/useHotkey'
+import { focusLastRow } from '@/composables/useRowFocus'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
 
@@ -14,7 +15,9 @@ import { clientsApi, type Client, type ViesLookupResult } from '@/api/clients'
 import { projectsApi, type Project } from '@/api/projects'
 import { codebooksApi, type VatRate, type Currency, type Unit } from '@/api/codebooks'
 import { vatClassificationsApi, type VatClassification } from '@/api/vatClassifications'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { formatMoney, formatPercent } from '@/composables/useFormat'
+import { evalMath } from '@/directives/vMath'
 import { apiErrorMessage } from '@/api/errors'
 import { useSupplierStore } from '@/stores/supplier'
 import SearchableSelect from '@/components/ui/SearchableSelect.vue'
@@ -34,6 +37,13 @@ const submitting = ref(false)
 const loadedRate = ref<{ rate: number; date: string; currency: string } | null>(null)
 const error = ref('')
 const isForce = computed(() => route.query.force === '1')
+
+// Předvolba typu dokladu z URL (`/invoices/new?type=proforma`). Whitelist — nesmí
+// projít nic jiného než povolené typy, jinak fallback na běžnou vydanou fakturu.
+const queryDocType = computed<'proforma' | 'credit_note' | null>(() => {
+  const q = route.query.type
+  return q === 'proforma' || q === 'credit_note' ? q : null
+})
 const editedStatus = ref<string>('draft')
 const editedVarsymbol = ref<string | null>(null)
 // Náhled čísla, které dostane faktura při Vystavení (pokud user nezadá ruční override).
@@ -55,10 +65,45 @@ const varsymbolLabelKey = computed(() => {
   return 'invoice.varsymbol_label'
 })
 
-const clients = ref<Client[]>([])
+const clients = ref<Client[]>([])  // akumulovaná cache (výsledky hledání + vybraný) — čtou z ní defaults/VIES
+// Server-side našeptávač klientů (zákazníků) — SearchableSelect v remote režimu.
+const clientOptions = ref<{ value: number; label: string; secondary?: string }[]>([])
+const clientsLoading = ref(false)
+const selectedClientOption = ref<{ value: number; label: string; secondary?: string } | null>(null)
+function clientToOption(c: Client) {
+  return { value: c.id, label: c.company_name, secondary: c.ic ?? undefined }
+}
+function mergeClients(list: Client[]) {
+  const byId = new Map(clients.value.map(c => [c.id, c]))
+  for (const c of list) byId.set(c.id, c)
+  clients.value = Array.from(byId.values())
+}
+async function onClientSearch(q: string) {
+  clientsLoading.value = true
+  try {
+    const res = await clientsApi.list({ q: q || undefined, role: 'customers', archived: false, per_page: 50 })
+    mergeClients(res.data)
+    clientOptions.value = res.data.map(clientToOption)
+  } catch { /* ignore */ } finally {
+    clientsLoading.value = false
+  }
+}
+// Edit / pre-select: dotáhni klienta podle id (do cache + label), fallback na denorm jméno z faktury.
+async function ensureClientLoaded(id: number, fallbackName?: string | null, fallbackIc?: string | null) {
+  const existing = clients.value.find(c => c.id === id)
+  if (existing) { selectedClientOption.value = clientToOption(existing); return }
+  try {
+    const full = await clientsApi.get(id)
+    mergeClients([full])
+    selectedClientOption.value = clientToOption(full)
+  } catch {
+    selectedClientOption.value = { value: id, label: fallbackName ?? `#${id}`, secondary: fallbackIc ?? undefined }
+  }
+}
 const projects = ref<Project[]>([])
 const vatRates = ref<VatRate[]>([])
 const vatClassifications = ref<VatClassification[]>([])
+const revenueCategories = ref<RevenueCategory[]>([])
 const currencies = ref<Currency[]>([])
 const units = ref<Unit[]>([])
 
@@ -69,16 +114,30 @@ function defaultItemUnit(): string {
 
 // Aktivní dodavatel — pokud není plátce DPH, fakturuje bez DPH (žádné DPH UI ani v PDF).
 const supplierIsVatPayer = computed(() => supplierStore.currentSupplier?.is_vat_payer ?? true)
+// Identifikovaná osoba (§ 6g–6l ZDPH, #94) — neplátce, který ale služby do EU
+// fakturuje s přenesenou daňovou povinností (čl. 196 směrnice) a podává SHV.
+const supplierIsIdentified = computed(() => supplierStore.currentSupplier?.is_identified ?? false)
 
-// RC zobrazit jen když:
-//   - dodavatel je plátce DPH (neplátce nemůže RC vystavit) A
-//   - klient není vybraný NEBO má RC povolenou v profilu
-const showReverseChargeUI = computed(() => {
-  if (!supplierIsVatPayer.value) return false
-  if (!form.value.client_id) return true
-  const c = clients.value.find(c => c.id === form.value.client_id)
-  return !!c?.reverse_charge
-})
+// „Osvobozeno od daně z příjmů" má smysl jen pro OSVČ (FO): osvobození dle § 4 ZDP
+// platí výhradně pro fyzické osoby, u s.r.o. (PO) žádný § 4 není a prodej majetku je
+// vždy zdanitelný výnos. U PO proto checkbox skryjeme. Ponecháme ho ale, pokud už je
+// příznak zaškrtnutý (legacy/import), aby šel zrušit.
+const showIncomeTaxExemptUI = computed(
+  () => supplierStore.currentSupplier?.taxpayer_type === 'fo' || form.value.income_tax_exempt,
+)
+
+// RC je volba na konkrétním plnění (přenesení daň. povinnosti), ne natvrdo vlastnost
+// odběratele → checkbox zobrazíme vždy, když je dodavatel plátce DPH (čistý neplátce
+// RC vystavit nemůže) NEBO identifikovaná osoba (#94 — RC u služeb do EU je její
+// hlavní use-case). Příznak `reverse_charge` v profilu klienta slouží jen jako default
+// předvyplnění při výběru klienta (viz applyClientDefaults), uživatel ho může přepnout.
+const showReverseChargeUI = computed(() => supplierIsVatPayer.value || supplierIsIdentified.value)
+
+// Neplátce/IO s RC: částky na dokladu JSOU základ daně (ceny bez DPH) — DPH si
+// samovyměří odběratel sazbou své země, česká sazba se neuvádí. Sloupec proto
+// místo neutrálního „Celkem" pojmenujeme „Bez DPH", ať je to z dokladu zřejmé.
+const nonPayerTotalLabel = computed(() =>
+  form.value.reverse_charge ? t('invoice.totals.without_vat') : t('invoice.totals.total'))
 
 const form = ref<{
   invoice_type: 'invoice' | 'proforma' | 'credit_note'
@@ -91,16 +150,21 @@ const form = ref<{
   currency_id: number
   currency: string
   reverse_charge: boolean
+  prices_include_vat: boolean
+  income_tax_exempt: boolean
+  income_tax_exempt_reason: string
   language: 'cs' | 'en'
   note_above_items: string
   note_below_items: string
   advance_paid_amount: number
   discount_percent: number
   payment_method: 'bank_transfer' | 'card' | 'cash' | 'other'
+  auto_send_reminders: boolean
   exchange_rate: number | null
   varsymbol: string  // Ruční override čísla faktury (prázdný = generuje se při issue)
   vat_classification_code: string | null
   revenue_category: string | null
+  revenue_category_id: number | null
   items: InvoiceItem[]
 }>({
   invoice_type: 'invoice',
@@ -109,22 +173,37 @@ const form = ref<{
   project_id: null,
   issue_date: today(),
   tax_date: today(),
-  due_date: addDays(today(), 7),
+  due_date: supplierDueDate(today()),
   currency_id: 0,
   currency: 'CZK',
   reverse_charge: false,
+  prices_include_vat: false,
+  income_tax_exempt: false,
+  income_tax_exempt_reason: '',
   language: 'cs',
   note_above_items: '',
   note_below_items: '',
   advance_paid_amount: 0,
   discount_percent: 0,
   payment_method: 'bank_transfer',
+  auto_send_reminders: true,
   exchange_rate: null,
   varsymbol: '',
   vat_classification_code: null,
   revenue_category: null,
+  revenue_category_id: null,
   items: [],
 })
+
+// Per-faktura přepínač automatických upomínek má smysl jen když je posílá dodavatel
+// i klient (cron je AND přes všechny tři úrovně, viz cron-send-reminders.php). Jakmile
+// je kterákoli z těch dvou vypnutá, faktuře se auto-upomínky stejně neodešlou → přepínač
+// by nic nedělal, proto ho v takovém případě skryjeme. Ruční odeslání funguje vždy.
+const remindersAvailable = computed(() =>
+  (supplierStore.currentSupplier?.auto_send_reminders ?? true)
+  && !!form.value.client_id
+  && (clients.value.find(c => c.id === form.value.client_id)?.auto_send_reminders ?? true),
+)
 
 function today(): string {
   return new Date().toISOString().slice(0, 10)
@@ -136,27 +215,47 @@ function addDays(date: string, days: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-function defaultVatRateId(reverseCharge = false): number {
+// +N kalendářních měsíců se zachováním dne; pokud cílový měsíc nemá takový den
+// (31.1. + 1 měsíc → "31.2."), vrátí poslední den cílového měsíce (28./29.2.).
+// Datumy parsujeme jako YYYY-MM-DD bez TZ posunu (new Date('2026-01-31') by v záporných
+// TZ skočilo na 30.1., pak +1 měsíc = 28.2. místo 1.3.).
+function addMonths(date: string, months: number): string {
+  const [y, m, d] = date.split('-').map(Number)
+  const targetMonthIdx = (m - 1) + months
+  const targetYear = y + Math.floor(targetMonthIdx / 12)
+  const normalizedMonth = ((targetMonthIdx % 12) + 12) % 12
+  const lastDay = new Date(targetYear, normalizedMonth + 1, 0).getDate()
+  const day = Math.min(d, lastDay)
+  return `${String(targetYear).padStart(4, '0')}-${String(normalizedMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+type DueUnit = 'days' | 'month'
+
+function computeDueDate(issueDate: string, value: number, unit: DueUnit): string {
+  return unit === 'month' ? addMonths(issueDate, value) : addDays(issueDate, value)
+}
+
+// Splatnost z výchozího nastavení dodavatele (hodnota + jednotka). Fallback 7 dnů,
+// dokud supplier store není načtený (např. hard-reload přímo na /invoices/new) —
+// onMounted ji pak přepočítá na skutečný supplier default.
+function supplierDueDate(issueDate: string): string {
+  const sup = supplierStore.currentSupplier
+  const value = sup?.default_payment_due_days ?? 7
+  const unit: DueUnit = (sup?.default_payment_due_unit ?? 'days') as DueUnit
+  return computeDueDate(issueDate, value, unit)
+}
+
+// RC (přenesená daň. povinnost) je teď jen hlavičkový příznak `reverse_charge` — položky si
+// drží nominální sazbu (21 %), daň vynuluje backend (InvoiceMath). Default sazby RC neřeší,
+// proto se položky při zaškrtnutí RC už nepřepisují na 0% „CZ-RC".
+function defaultVatRateId(): number {
   // Neplátce DPH → vždy 0% Osvobozeno (rate_percent=0, !is_reverse_charge).
   if (!supplierIsVatPayer.value) {
     const zero = vatRates.value.find(v => Number(v.rate_percent) === 0 && !v.is_reverse_charge)
     if (zero) return zero.id
   }
-  if (reverseCharge) {
-    const rc = vatRates.value.find(v => v.is_reverse_charge)
-    if (rc) return rc.id
-  }
   const def = vatRates.value.find(v => v.is_default)
   return def?.id ?? vatRates.value[0]?.id ?? 0
-}
-
-// Když se přepne RC (z klienta nebo ručním checkboxem) nebo je dodavatel neplátce,
-// sjednoť vat_rate_id všech položek s novým defaultem — display by jinak ukazoval
-// 21 % zatímco totals už počítají 0 %.
-function syncItemsVatRateToReverseCharge() {
-  const target = defaultVatRateId(form.value.reverse_charge)
-  if (!target) return
-  for (const it of form.value.items) it.vat_rate_id = target
 }
 
 function vatRateLabel(r: VatRate): string {
@@ -164,6 +263,11 @@ function vatRateLabel(r: VatRate): string {
   if (r.is_reverse_charge) return t('invoice.vat_rate_label.reverse_charge')
   return t('invoice.vat_rate_label.exempt')
 }
+
+// Řádkový výběr už nenabízí „Reverse charge" (0% CZ-RC) — RC se řeší hlavičkovým checkboxem,
+// který nechá nominální sazbu (21 %) a vynuluje daň. Volba RC na řádku by jinak dala 0 %
+// bez automatické poznámky „Daň odvede zákazník".
+const selectableVatRates = computed(() => vatRates.value.filter(r => !r.is_reverse_charge))
 
 function blankItem(): InvoiceItem {
   // Dobropis = záporné množství (sleva/refundace), default -1
@@ -179,16 +283,10 @@ function blankItem(): InvoiceItem {
     quantity: qty,
     unit: defaultItemUnit(),
     unit_price_without_vat: rate,
-    vat_rate_id: defaultVatRateId(form.value.reverse_charge),
+    vat_rate_id: defaultVatRateId(),
     order_index: form.value.items.length,
   }
 }
-
-// Ruční toggle RC checkboxu → resync vat_rate_id u položek s aktuálním defaultem.
-// Loaded guard chrání edit-mode init před přepsáním uložených sazeb.
-watch(() => form.value.reverse_charge, (newVal, oldVal) => {
-  if (loaded.value && newVal !== oldVal) syncItemsVatRateToReverseCharge()
-})
 
 // Náhled čísla faktury — backend zná aktuální counter pro per-supplier templ.
 // Volá se při mount + při změně typu / data; cancellation nemá číslo.
@@ -199,7 +297,11 @@ async function loadVarsymbolPreview() {
     return
   }
   try {
-    const r = await invoicesApi.previewVarsymbol(form.value.invoice_type, form.value.issue_date)
+    const r = await invoicesApi.previewVarsymbol(
+      form.value.invoice_type,
+      form.value.issue_date,
+      form.value.client_id ?? undefined,
+    )
     varsymbolAutoPreview.value = r.varsymbol
     varsymbolAutoHasTemplate.value = r.has_template
   } catch {
@@ -207,24 +309,41 @@ async function loadVarsymbolPreview() {
     varsymbolAutoHasTemplate.value = false
   }
 }
-watch(() => [form.value.invoice_type, form.value.issue_date], () => {
+watch(() => [form.value.invoice_type, form.value.issue_date, form.value.client_id], () => {
   if (loaded.value && editedStatus.value === 'draft') loadVarsymbolPreview()
 })
 
-// Při změně Vystaveno přepočti Splatnost — projekt přebíjí klienta. Jen pro draft / nový
-// (po `loaded`), abys nepřepsal uloženou hodnotu při hydrataci nebo u vystavených dokladů.
+// Při změně Vystaveno přepočti Splatnost — projekt přebíjí klienta, klient přebíjí supplier.
+// Jen pro draft / nový (po `loaded`), abys nepřepsal uloženou hodnotu při hydrataci nebo
+// u vystavených dokladů. Projekt má jen `payment_due_days` (vždy v dnech), klient a
+// supplier mají i `unit` ('days' nebo 'month').
 watch(() => form.value.issue_date, (newIssue) => {
   if (!loaded.value || editedStatus.value !== 'draft' || !newIssue) return
-  let days: number | null = null
+  // Zakázka přebíjí vše — má vlastní hodnotu i jednotku (NULL unit = dny).
   if (form.value.project_id) {
     const p = projects.value.find(x => x.id === form.value.project_id)
-    if (p && typeof p.payment_due_days === 'number') days = p.payment_due_days
+    if (p && typeof p.payment_due_days === 'number') {
+      form.value.due_date = computeDueDate(newIssue, p.payment_due_days, (p.payment_due_unit ?? 'days') as DueUnit)
+      return
+    }
   }
-  if (days === null && form.value.client_id) {
-    const c = clients.value.find(x => x.id === form.value.client_id)
-    if (c && typeof c.payment_due_default === 'number') days = c.payment_due_default
+  // Klient s vlastní hodnotou → jeho jednotka (bez vlastní = dny, ne supplier),
+  // jinak plně dědí supplier default (hodnotu i jednotku).
+  const c = form.value.client_id ? clients.value.find(x => x.id === form.value.client_id) : null
+  if (c && typeof c.payment_due_default === 'number') {
+    form.value.due_date = computeDueDate(newIssue, c.payment_due_default, (c.payment_due_unit ?? 'days') as DueUnit)
+  } else {
+    form.value.due_date = supplierDueDate(newIssue)
   }
-  if (days !== null) form.value.due_date = addDays(newIssue, days)
+})
+
+// Přepnutí „Vydaná faktura" (/invoices/new) ⇄ „Zálohová faktura" (?type=proforma) z menu je
+// stejná route → komponenta se recykluje, onMounted už neproběhne. Bez tohoto watcheru by typ
+// zůstal z prvního otevření. Jen v režimu nového dokladu (edit netknutý). Promítne se i do
+// titulku, čísla dokladu (loadVarsymbolPreview) a skrytí DUZP u proformy.
+watch(() => route.query.type, () => {
+  if (isEdit.value) return
+  form.value.invoice_type = queryDocType.value ?? 'invoice'
 })
 
 // Při přepnutí typu na credit_note převrať množství všech existujících položek na záporná.
@@ -242,16 +361,18 @@ watch(() => form.value.invoice_type, (newType, oldType) => {
 })
 
 onMounted(async () => {
-  const [vr, cur, un, vc] = await Promise.all([
+  const [vr, cur, un, vc, rcat] = await Promise.all([
     codebooksApi.vatRates('CZ'),
     codebooksApi.currencies(),
     codebooksApi.units(),
     vatClassificationsApi.list('sale'),
+    revenueCategoriesApi.list(false),
   ])
   vatRates.value = vr
   currencies.value = cur
   units.value = un
   vatClassifications.value = vc
+  revenueCategories.value = rcat
   if (form.value.currency_id === 0) {
     const def = cur.find(c => c.is_default && c.code === 'CZK') || cur[0]
     if (def) {
@@ -260,9 +381,7 @@ onMounted(async () => {
     }
   }
 
-  // Load clients (for dropdown)
-  const cl = await clientsApi.list({ archived: false })
-  clients.value = cl.data
+  // Klienti se hledají server-side (onClientSearch); cache `clients` se plní výsledky + vybraným.
 
   if (isEdit.value && invoiceId.value) {
     const inv = await invoicesApi.get(invoiceId.value)
@@ -281,12 +400,16 @@ onMounted(async () => {
       currency_id: inv.currency_id,
       currency: inv.currency,
       reverse_charge: inv.reverse_charge,
+      prices_include_vat: (inv as { prices_include_vat?: boolean }).prices_include_vat ?? false,
+      income_tax_exempt: (inv as { income_tax_exempt?: boolean }).income_tax_exempt ?? false,
+      income_tax_exempt_reason: (inv as { income_tax_exempt_reason?: string | null }).income_tax_exempt_reason ?? '',
       language: inv.language,
       note_above_items: inv.note_above_items ?? '',
       note_below_items: inv.note_below_items ?? '',
       advance_paid_amount: inv.advance_paid_amount,
       discount_percent: inv.discount_percent ?? 0,
       payment_method: inv.payment_method ?? 'bank_transfer',
+      auto_send_reminders: (inv as { auto_send_reminders?: boolean }).auto_send_reminders ?? true,
       // Slevové položky (item_kind='discount') jsou generované z discount_percent —
       // do editovatelného seznamu nepatří (jinak by se editovaly / zdvojily při uložení).
       items: inv.items.filter(i => i.item_kind !== 'discount').map(i => ({ ...i })),
@@ -294,21 +417,29 @@ onMounted(async () => {
       varsymbol: inv.varsymbol ?? '',
       vat_classification_code: (inv as any).vat_classification_code ?? null,
       revenue_category: (inv as any).revenue_category ?? null,
+      revenue_category_id: (inv as any).revenue_category_id ?? null,
     })
     loadedRate.value = (inv.exchange_rate && inv.currency !== 'CZK')
       ? { rate: inv.exchange_rate, date: (inv.exchange_rate_date ?? inv.issue_date).slice(0, 10), currency: inv.currency }
       : null
     if (inv.client_id) {
+      await ensureClientLoaded(inv.client_id, (inv as any).client_company_name, (inv as any).client_ic)
       await loadProjects(inv.client_id)
       await verifyClientVies(inv.client_id)
     }
     // Načti existující work_report (pokud existuje)
     await loadWorkReport()
+    await loadAttachments()
     if (editedStatus.value === 'draft') await loadVarsymbolPreview()
   } else {
     // New invoice — pre-select from query
+    // Typ dokladu z URL (?type=proforma → zálohová faktura), jinak zůstává 'invoice'.
+    if (queryDocType.value) form.value.invoice_type = queryDocType.value
+    // Výchozí režim cen z nastavení dodavatele (0 = bez DPH; 1 = ceny s DPH).
+    form.value.prices_include_vat = supplierStore.currentSupplier?.default_prices_include_vat ?? false
     if (route.query.client_id) {
       form.value.client_id = Number(route.query.client_id)
+      await ensureClientLoaded(form.value.client_id!)
       await loadProjects(form.value.client_id!)
       await applyClientDefaults(form.value.client_id!)
     }
@@ -322,6 +453,11 @@ onMounted(async () => {
     }
     if (form.value.items.length === 0) {
       form.value.items = [blankItem()]
+    }
+    // Bez klienta i zakázky: splatnost z výchozího nastavení dodavatele
+    // (supplier store je teď spolehlivě načtený, na rozdíl od init form refu).
+    if (!form.value.client_id && !form.value.project_id) {
+      form.value.due_date = supplierDueDate(form.value.issue_date)
     }
     await loadVarsymbolPreview()
   }
@@ -338,9 +474,9 @@ const clientModalOpen = ref(false)
 const projectModalOpen = ref(false)
 
 async function onClientCreatedInModal(client: Client) {
-  // Vlož na začátek pole (typicky čerstvě přidaný klient bývá vybraný),
-  // setni v editoru a spusť defaults/projects/VIES.
-  clients.value = [client, ...clients.value.filter(c => c.id !== client.id)]
+  // Čerstvě přidaný klient → do cache + rovnou vybrat (defaults/projects/VIES v onClientChange).
+  mergeClients([client])
+  selectedClientOption.value = clientToOption(client)
   form.value.client_id = client.id
   clientModalOpen.value = false
   await onClientChange()
@@ -356,6 +492,8 @@ async function onProjectCreatedInModal(project: Project) {
 async function onClientChange() {
   form.value.project_id = null
   if (form.value.client_id) {
+    const c = clients.value.find(cc => cc.id === form.value.client_id)
+    if (c) selectedClientOption.value = clientToOption(c)
     await loadProjects(form.value.client_id)
     await applyClientDefaults(form.value.client_id)
     await verifyClientVies(form.value.client_id)
@@ -364,6 +502,7 @@ async function onClientChange() {
       await applyProjectDefaults(form.value.project_id)
     }
   } else {
+    selectedClientOption.value = null
     viesResult.value = null
   }
 }
@@ -374,13 +513,31 @@ async function applyClientDefaults(clientId: number) {
   form.value.currency_id = c.currency_default_id
   form.value.currency = c.currency_default
   form.value.language = c.language
-  // Neplátce DPH nikdy nevystavuje RC fakturu — ignorujeme klientský flag.
-  const newRc = supplierIsVatPayer.value ? c.reverse_charge : false
-  const rcChanged = form.value.reverse_charge !== newRc
-  form.value.reverse_charge = newRc
-  if (rcChanged) syncItemsVatRateToReverseCharge()
-  if (c.payment_due_default) {
-    form.value.due_date = addDays(form.value.issue_date, c.payment_due_default)
+  // Čistý neplátce DPH nikdy nevystavuje RC fakturu — ignorujeme klientský flag.
+  // RC jen přepne hlavičkový příznak; sazby položek (nominální) se nemění.
+  // Identifikovaná osoba (#94): u EU klienta s DIČ je RC její hlavní use-case
+  // (služby § 9/1, čl. 196 směrnice) → zapnout automaticky a předvyplnit
+  // klasifikaci 22 (EU služby → souhrnné hlášení). Klient ze 3. země RC nemá —
+  // plnění je mimo předmět DPH, žádná klauzule ani SHV.
+  if (supplierIsVatPayer.value) {
+    form.value.reverse_charge = c.reverse_charge
+  } else if (supplierIsIdentified.value && c.country_is_eu && c.country_iso2 !== 'CZ' && (c.dic || '').trim() !== '') {
+    form.value.reverse_charge = true
+    if (!form.value.vat_classification_code) form.value.vat_classification_code = '22'
+  } else {
+    form.value.reverse_charge = false
+  }
+  // Výchozí kategorie tržby klienta — předvyplň, jen pokud uživatel ještě nevybral
+  // (project default má přednost a aplikuje se až v applyProjectDefaults).
+  if (form.value.revenue_category_id == null && c.default_revenue_category_id != null) {
+    form.value.revenue_category_id = c.default_revenue_category_id
+  }
+  // Klient s vlastní hodnotou → jeho jednotka (bez vlastní = dny, ne supplier),
+  // jinak plně dědí supplier default (hodnotu i jednotku).
+  if (typeof c.payment_due_default === 'number') {
+    form.value.due_date = computeDueDate(form.value.issue_date, c.payment_due_default, (c.payment_due_unit ?? 'days') as DueUnit)
+  } else {
+    form.value.due_date = supplierDueDate(form.value.issue_date)
   }
   // Klientská sazba — fallback pro faktury bez zakázky (project rate přepíše později).
   // „Prázdná položka" = prázdný popis; rate mohl naplnit předchozí klient/projekt, přesto chceme refresh.
@@ -430,7 +587,13 @@ async function applyProjectDefaults(projectId: number) {
   if (!p) return
   form.value.currency_id = p.currency_id
   form.value.currency = p.currency
-  form.value.due_date = addDays(form.value.issue_date, p.payment_due_days)
+  form.value.due_date = computeDueDate(form.value.issue_date, p.payment_due_days, (p.payment_due_unit ?? 'days') as DueUnit)
+  // Výchozí kategorie tržby zakázky — PŘEDNOST před klientem. Aplikuje se při výběru
+  // zakázky (konzistentní s tím, že zakázka přepisuje měnu/splatnost). Když zakázka
+  // default nemá, ponecháme hodnotu z klienta.
+  if (p.default_revenue_category_id != null) {
+    form.value.revenue_category_id = p.default_revenue_category_id
+  }
   // Pokud má jen jednu prázdnou položku (bez popisu), refresh sazby z projektu.
   if (form.value.items.length === 1 && (form.value.items[0].description || '').trim() === '') {
     form.value.items[0].unit_price_without_vat = p.hourly_rate
@@ -445,6 +608,7 @@ async function applyProjectDefaults(projectId: number) {
 
 function addItem() {
   form.value.items.push(blankItem())
+  focusLastRow('[data-row-input="inv-item"]')
 }
 
 function removeItem(index: number) {
@@ -468,14 +632,25 @@ function moveDown(index: number) {
 
 // Live výpočet sumace na frontendu (server přepočítá při uložení)
 const computed_totals = computed(() => {
+  const pricesIncl = form.value.prices_include_vat && supplierIsVatPayer.value
   const breakdown = new Map<number, { rate: number; base: number; vat: number }>()
 
   for (const item of form.value.items) {
     const vatRate = (form.value.reverse_charge || !supplierIsVatPayer.value)
       ? 0
       : vatRates.value.find(v => v.id === item.vat_rate_id)?.rate_percent ?? 0
-    const base = round2(item.quantity * item.unit_price_without_vat)
-    const vat = round2(base * (vatRate / 100))
+    // amount = cena bez DPH (zdola) / cena s DPH (shora, „ceny položek včetně DPH")
+    const amount = round2(item.quantity * item.unit_price_without_vat)
+    let base: number
+    let vat: number
+    if (pricesIncl) {
+      vat = round2(amount * vatRate / (100 + vatRate))
+      base = round2(amount - vat)
+    } else {
+      base = amount
+      // base*rate/100 (dělit až nakonec), shodně s backendem InvoiceMath — viz issue #82.
+      vat = round2(base * vatRate / 100)
+    }
 
     if (!breakdown.has(vatRate)) {
       breakdown.set(vatRate, { rate: vatRate, base: 0, vat: 0 })
@@ -487,16 +662,31 @@ const computed_totals = computed(() => {
 
   // Sleva na úrovni dokladu — odečte se na každé sazbě zvlášť (zrcadlí backend
   // materializaci záporné položky „Sleva X %" na každou sazbu). Server přepočítá
-  // autoritativně při uložení; tohle je jen live náhled.
+  // autoritativně při uložení; tohle je jen live náhled. discountAmount = úbytek
+  // základu (bez DPH) v obou režimech.
   const pct = Math.min(100, Math.max(0, form.value.discount_percent || 0))
   let discountAmount = 0
   if (pct > 0) {
     for (const b of breakdown.values()) {
-      const disc = round2(b.base * (pct / 100))
-      if (disc === 0) continue
-      b.base = round2(b.base - disc)
-      b.vat = round2(b.vat - round2(disc * (b.rate / 100)))
-      discountAmount = round2(discountAmount + disc)
+      if (pricesIncl) {
+        // V režimu „ceny s DPH" je sleva procento z hrubé částky; daň se dopočte
+        // shora z hrubé částky po slevě (koeficient), konzistentně s backendem.
+        const gross = round2(b.base + b.vat)
+        const discGross = round2(gross * (pct / 100))
+        if (discGross === 0) continue
+        const newGross = round2(gross - discGross)
+        const newVat = round2(newGross * b.rate / (100 + b.rate))
+        const newBase = round2(newGross - newVat)
+        discountAmount = round2(discountAmount + round2(b.base - newBase))
+        b.base = newBase
+        b.vat = newVat
+      } else {
+        const disc = round2(b.base * (pct / 100))
+        if (disc === 0) continue
+        b.base = round2(b.base - disc)
+        b.vat = round2(b.vat - round2(disc * (b.rate / 100)))
+        discountAmount = round2(discountAmount + disc)
+      }
     }
   }
 
@@ -540,9 +730,52 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
+/**
+ * Řádkové „Celkem" — u plátce DPH včetně DPH (aby bylo vidět, že sazba DPH má efekt;
+ * net základ + DPH je v souhrnu níže). U neplátce / reverse-charge je sazba 0 → = základ.
+ */
 function itemTotal(item: InvoiceItem): number {
-  return round2(item.quantity * item.unit_price_without_vat)
+  const amount = round2(Number(item.quantity) * Number(item.unit_price_without_vat))
+  // Režim „ceny s DPH": unit_price_without_vat nese cenu S DPH → řádkové „Celkem s DPH" = amount.
+  if (form.value.prices_include_vat && supplierIsVatPayer.value) return amount
+  const vatRate = (form.value.reverse_charge || !supplierIsVatPayer.value)
+    ? 0
+    : (vatRates.value.find(v => v.id === item.vat_rate_id)?.rate_percent ?? 0)
+  // base*rate/100 (dělit až nakonec), shodně s backendem InvoiceMath — viz issue #82.
+  return round2(amount + round2(amount * vatRate / 100))
 }
+
+/**
+ * Zadání částky s DPH na řádku „Celkem s DPH" → dopočte jednotkovou cenu.
+ * Přepínač „ceny s DPH" záměrně NEpřepínáme — respektujeme aktuální režim faktury:
+ *  • režim „ceny s DPH" zapnutý → unit_price nese gross → uložíme gross / množství,
+ *  • režim vypnutý (běžný) → z gross odečteme DPH shora a uložíme netto / množství.
+ * Server přepočítá autoritativně. Podporuje výrazy přes evalMath.
+ */
+function setItemGross(item: InvoiceItem, raw: string): void {
+  const gross = evalMath(raw)
+  if (gross === null) return
+  const qty = Number(item.quantity) || 0
+  if (qty === 0) return
+  if (form.value.prices_include_vat && supplierIsVatPayer.value) {
+    // unit_price_without_vat nese cenu S DPH → ulož gross jako jednotkovou cenu.
+    item.unit_price_without_vat = round2(gross / qty)
+    return
+  }
+  // Běžný režim: dopočti netto odečtením DPH shora (u neplátce / RC je sazba 0).
+  const vatRate = (form.value.reverse_charge || !supplierIsVatPayer.value)
+    ? 0
+    : (vatRates.value.find(v => v.id === item.vat_rate_id)?.rate_percent ?? 0)
+  const net = gross / (1 + vatRate / 100)
+  item.unit_price_without_vat = round2(net / qty)
+}
+
+// Přepínač „ceny s DPH" má smysl jen pro plátce DPH (u neplátce/RC je sazba 0 → gross = net).
+const showPricesIncludeVatUI = computed(() => supplierIsVatPayer.value)
+// Záhlaví sloupce jednotkové ceny — v režimu „ceny s DPH" je to cena včetně DPH.
+const unitPriceHeaderLabel = computed(() => form.value.prices_include_vat && supplierIsVatPayer.value
+  ? t('invoice.items_table.unit_price_gross')
+  : t('invoice.items_table.unit_price'))
 
 // ─── WORK REPORT ────────────────────────────────────────────────
 const wrOpen = ref(false)
@@ -576,6 +809,7 @@ function addWrItem() {
     : (previousRate && previousRate > 0) ? previousRate
     : 1500
   wrItems.value.push({ description: '', hours: 1, rate: defaultRate, order_index: wrItems.value.length })
+  focusLastRow('[data-row-input="inv-wr"]')
 }
 function removeWrItem(idx: number) {
   wrItems.value.splice(idx, 1)
@@ -603,7 +837,7 @@ function openWorkReport() {
 function pushWrToInvoiceItem() {
   if (wrItemsValid.value.length === 0) return
   const totalAmount = wrTotalAmount.value
-  const defaultVatId = defaultVatRateId(form.value.reverse_charge)
+  const defaultVatId = defaultVatRateId()
   const description = wrTitle.value || t('invoice.work_report')
   // Cíleně "ks" (kus) — výkaz se přenáší jako 1 × celková suma.
   // Když uživatel "ks" v číselníku nemá, fallback na literál (přidá free-text).
@@ -697,6 +931,80 @@ function checkWorkReportSync(): string | null {
   return null
 }
 
+// ── Přílohy faktury ────────────────────────────────────────────────────
+// Nová faktura: upload potřebuje id, které vznikne až po create → soubory
+//   držíme v prohlížeči (pendingAttachments) a nahrajeme je v submit() po create.
+// Editace: id už existuje → načteme existující a přidání/mazání řešíme hned (jako detail).
+// Limity musí sedět s api UploadAttachmentAction.
+const ATTACH_MAX_FILE = 10 * 1024 * 1024   // 10 MiB / soubor
+const ATTACH_MAX_TOTAL = 20 * 1024 * 1024  // 20 MiB celkem
+const pendingAttachments = ref<File[]>([])          // staging u nové faktury
+const attachments = ref<InvoiceAttachment[]>([])     // existující (edit mód)
+const attachmentsBusy = ref(false)
+const attachmentDragOver = ref(false)
+const attachmentsAllowed = computed(() =>
+  ['invoice', 'proforma', 'credit_note'].includes(form.value.invoice_type))
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} kB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+async function loadAttachments() {
+  if (!invoiceId.value) return
+  try { attachments.value = await invoicesApi.listAttachments(invoiceId.value) } catch { /* ignore */ }
+}
+// Editace: id existuje → nahraj rovnou (server validuje mime/velikost).
+async function uploadNow(files: File[]) {
+  if (!invoiceId.value || files.length === 0) return
+  attachmentsBusy.value = true
+  try {
+    const r = await invoicesApi.uploadAttachments(invoiceId.value, files)
+    attachments.value = r.items
+    toast.success(t('invoice.attachments.upload_done', { n: r.created.length }))
+  } catch (e: any) {
+    toast.error(apiErrorMessage(e, t('invoice.attachments.upload_failed')))
+  } finally {
+    attachmentsBusy.value = false
+  }
+}
+// Nová faktura: ulož do prohlížeče (klientská kontrola limitů), nahraje se po create.
+function stagePending(files: File[]) {
+  let total = pendingAttachments.value.reduce((s, f) => s + f.size, 0)
+  for (const f of files) {
+    if (f.size > ATTACH_MAX_FILE) { toast.warning(t('invoice.attachments.too_large', { name: f.name })); continue }
+    if (total + f.size > ATTACH_MAX_TOTAL) { toast.warning(t('invoice.attachments.total_too_large')); break }
+    pendingAttachments.value.push(f)
+    total += f.size
+  }
+}
+function addAttachmentFiles(files: File[]) {
+  if (files.length === 0) return
+  if (isEdit.value) void uploadNow(files)
+  else stagePending(files)
+}
+function removePendingAttachment(i: number) { pendingAttachments.value.splice(i, 1) }
+async function deleteAttachment(att: InvoiceAttachment) {
+  if (!invoiceId.value) return
+  if (!window.confirm(t('invoice.attachments.confirm_delete', { name: att.original_name }))) return
+  try {
+    await invoicesApi.deleteAttachment(invoiceId.value, att.id)
+    attachments.value = attachments.value.filter(a => a.id !== att.id)
+  } catch (e: any) {
+    toast.error(apiErrorMessage(e, t('invoice.attachments.delete_failed')))
+  }
+}
+function onAttachmentInputChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (input.files) addAttachmentFiles(Array.from(input.files))
+  input.value = ''
+}
+function onAttachmentDrop(e: DragEvent) {
+  e.preventDefault()
+  attachmentDragOver.value = false
+  if (e.dataTransfer?.files) addAttachmentFiles(Array.from(e.dataTransfer.files))
+}
+
 async function submit() {
   // Tiše vyhoď prázdné řádky (bez popisu i bez ceny) — uživatel přidal řádek a nezapsal ho.
   // Zároveň smaž z form.value.items, ať checkWorkReportSync vidí stejnou množinu jako payload.
@@ -726,12 +1034,16 @@ async function submit() {
       due_date: form.value.due_date,
       currency_id: form.value.currency_id,
       reverse_charge: form.value.reverse_charge,
+      prices_include_vat: form.value.prices_include_vat,
+      income_tax_exempt: form.value.income_tax_exempt,
+      income_tax_exempt_reason: form.value.income_tax_exempt ? (form.value.income_tax_exempt_reason || null) : null,
       language: form.value.language,
       note_above_items: form.value.note_above_items || null,
       note_below_items: form.value.note_below_items || null,
       advance_paid_amount: form.value.advance_paid_amount,
       discount_percent: form.value.discount_percent || 0,
       payment_method: form.value.payment_method,
+      auto_send_reminders: form.value.auto_send_reminders,
       // Pošli kurz jen pokud uživatel ho má nastavený a měna není CZK — backend bere
       // explicit hodnotu jako manuální override (nepřepočítá z ČNB).
       exchange_rate: (form.value.currency !== 'CZK' && form.value.exchange_rate && form.value.exchange_rate > 0)
@@ -741,6 +1053,7 @@ async function submit() {
       varsymbol: form.value.varsymbol.trim(),
       vat_classification_code: form.value.vat_classification_code,
       revenue_category: form.value.revenue_category,
+      revenue_category_id: form.value.revenue_category_id,
       items: form.value.items.map((it, i) => ({
         description: it.description,
         quantity: it.quantity,
@@ -792,9 +1105,23 @@ async function submit() {
         return
       }
     }
+    // Přílohy nasbírané u nové faktury (držené v prohlížeči) — nahraj teď, když známe id.
+    // Selhání uploadu nesmí shodit už vytvořenou fakturu → jen upozorni, pokračuj na detail.
+    if (pendingAttachments.value.length > 0) {
+      try {
+        await invoicesApi.uploadAttachments(saved.id, pendingAttachments.value)
+        pendingAttachments.value = []
+      } catch (e: any) {
+        toast.warning(apiErrorMessage(e, t('invoice.attachments.post_save_failed')))
+      }
+    }
     router.push(`/invoices/${saved.id}`)
   } catch (e: any) {
     error.value = apiErrorMessage(e, t('common.save_failed'))
+    // Toast + scroll k bannéru — uživatel může být odscrollovaný dole u tlačítka Uložit.
+    toast.error(error.value)
+    await nextTick()
+    document.querySelector('[data-error-banner]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   } finally {
     submitting.value = false
   }
@@ -848,12 +1175,12 @@ async function deleteDraft() {
     <form @submit.prevent="submit" class="space-y-4">
       <!-- Klient + zakázka + datumy -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.client') }} &amp; {{ t('invoice.project') }}</h3>
           <div class="space-y-3">
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.doc_type') }} *</label>
-              <select v-model="form.invoice_type" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
+              <select v-model="form.invoice_type" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
                 <option value="invoice">{{ t('invoice.doc_invoice') }}</option>
                 <option value="proforma">{{ t('invoice.doc_proforma') }}</option>
                 <option value="credit_note">{{ t('invoice.doc_credit_note') }}</option>
@@ -869,7 +1196,11 @@ async function deleteDraft() {
                   <SearchableSelect
                     :model-value="form.client_id"
                     @update:model-value="(v) => { form.client_id = v; onClientChange() }"
-                    :options="clients.filter(c => c.is_customer !== false).map(c => ({ value: c.id, label: c.company_name, secondary: c.ic ?? undefined }))"
+                    remote
+                    :loading="clientsLoading"
+                    :options="clientOptions"
+                    :selected-option="selectedClientOption"
+                    @search="onClientSearch"
                     :placeholder="t('invoice.select_client')"
                     :clearable="false"
                   />
@@ -930,13 +1261,13 @@ async function deleteDraft() {
               <div>
                 <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.currency') }}</label>
                 <select v-model.number="form.currency_id" @change="onCurrencyChange"
-                  class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
+                  class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
                   <option v-for="c in currencies" :key="c.id" :value="c.id">{{ c.label }}</option>
                 </select>
               </div>
               <div>
                 <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.language') }}</label>
-                <select v-model="form.language" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
+                <select v-model="form.language" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
                   <option value="cs">CZ</option>
                   <option value="en">EN</option>
                 </select>
@@ -944,7 +1275,7 @@ async function deleteDraft() {
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('payment_method.label') }}</label>
-              <select v-model="form.payment_method" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
+              <select v-model="form.payment_method" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
                 <option value="bank_transfer">{{ t('payment_method.bank_transfer') }}</option>
                 <option value="card">{{ t('payment_method.card') }}</option>
                 <option value="cash">{{ t('payment_method.cash') }}</option>
@@ -954,14 +1285,44 @@ async function deleteDraft() {
                 {{ t('payment_method.hint') }}
               </p>
             </div>
-            <label v-if="showReverseChargeUI" class="flex items-center gap-2 text-sm text-neutral-700">
-              <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-              <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
-            </label>
+            <div v-if="showReverseChargeUI">
+              <label class="flex items-center gap-2 text-sm text-neutral-700">
+                <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
+              </label>
+              <!-- IO (#94): vysvětlení, proč na RC dokladu není sazba DPH — částky jsou
+                   základ daně, samovyměřuje odběratel sazbou své země. -->
+              <p v-if="!supplierIsVatPayer && form.reverse_charge" class="text-xs text-neutral-500 mt-1 ml-6">
+                {{ t('invoice.reverse_charge_io_hint') }}
+              </p>
+            </div>
+            <div v-if="showPricesIncludeVatUI">
+              <label class="flex items-center gap-2 text-sm text-neutral-700">
+                <input v-model="form.prices_include_vat" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                <span>{{ t('invoice.prices_include_vat') }}</span>
+              </label>
+              <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('invoice.prices_include_vat_hint') }}</p>
+            </div>
+            <div v-if="showIncomeTaxExemptUI">
+              <label class="flex items-center gap-2 text-sm text-neutral-700">
+                <input v-model="form.income_tax_exempt" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                <span>{{ t('invoice.income_tax_exempt') }}</span>
+              </label>
+              <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('invoice.income_tax_exempt_hint') }}</p>
+              <div v-if="form.income_tax_exempt" class="ml-6 mt-2">
+                <input
+                  v-model="form.income_tax_exempt_reason"
+                  type="text"
+                  maxlength="190"
+                  :placeholder="t('invoice.income_tax_exempt_reason_placeholder')"
+                  class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm"
+                />
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.dates_section') }}</h3>
           <div class="space-y-3">
             <!-- Ruční override čísla faktury — jen u draftu; prázdné = vygeneruje se při Vystavení.
@@ -974,6 +1335,9 @@ async function deleteDraft() {
                 class="w-full h-10 px-3 border border-neutral-300 rounded-md font-mono" />
               <p v-if="!form.varsymbol && !varsymbolAutoHasTemplate" class="text-xs text-warning-600 mt-1">
                 {{ t('invoice.varsymbol_no_template') }}
+              </p>
+              <p v-else-if="form.varsymbol.trim()" class="text-xs text-warning-600 mt-1">
+                {{ t('invoice.varsymbol_manual_warning') }}
               </p>
               <p v-else class="text-xs text-neutral-500 mt-1">{{ t('invoice.varsymbol_hint') }}</p>
             </div>
@@ -996,6 +1360,13 @@ async function deleteDraft() {
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.due_date') }} *</label>
               <input v-model="form.due_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
+            <div v-if="form.invoice_type !== 'credit_note' && remindersAvailable">
+              <label class="flex items-center gap-2 text-sm text-neutral-700">
+                <input v-model="form.auto_send_reminders" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                <span>{{ t('invoice.auto_send_reminders') }}</span>
+              </label>
+              <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('invoice.auto_send_reminders_hint') }}</p>
+            </div>
             <div v-if="form.currency !== 'CZK' && form.exchange_rate !== null && form.exchange_rate > 0">
               <label class="block text-sm font-medium text-neutral-700 mb-1">
                 {{ t('invoice.exchange_rate_label', { currency: form.currency }) }}
@@ -1011,7 +1382,7 @@ async function deleteDraft() {
       </div>
 
       <!-- Položky -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
         <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.items') }}</h3>
           <button type="button" @click="addItem" class="px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md">
@@ -1030,43 +1401,45 @@ async function deleteDraft() {
               <th class="px-3 py-2 text-left font-medium">{{ t('invoice.items_table.description') }}</th>
               <th class="px-3 py-2 text-right font-medium w-20">{{ t('invoice.items_table.qty') }}</th>
               <th class="px-3 py-2 text-left font-medium w-16">{{ t('invoice.items_table.unit') }}</th>
-              <th class="px-3 py-2 text-right font-medium w-32">{{ t('invoice.items_table.unit_price') }}</th>
+              <th class="px-3 py-2 text-right font-medium w-32">{{ unitPriceHeaderLabel }}</th>
               <th v-if="supplierIsVatPayer" class="px-3 py-2 text-center font-medium w-24">{{ t('invoice.totals.vat') }}</th>
-              <th class="px-3 py-2 text-right font-medium w-32">{{ t('invoice.totals.total') }}</th>
+              <th class="px-3 py-2 text-right font-medium w-32">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : nonPayerTotalLabel }}</th>
               <th class="px-3 py-2 w-12"></th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-neutral-100">
+          <tbody class="divide-y divide-neutral-200">
             <tr v-for="(item, i) in form.items" :key="i" :class="itemHasBothNegative(item) ? 'bg-danger-50' : ''">
               <td class="px-2 py-2 text-center text-xs text-neutral-400">
                 <button type="button" @click="moveUp(i)" :disabled="i === 0" class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▲</button>
                 <button type="button" @click="moveDown(i)" :disabled="i === form.items.length - 1" class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
               </td>
               <td class="px-3 py-2">
-                <textarea v-model="item.description" rows="1" :placeholder="t('invoice.items_table.description')"
-                  class="w-full px-2 py-1.5 border border-neutral-200 rounded text-sm resize-y min-h-[36px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
+                <textarea v-model="item.description" rows="1" data-row-input="inv-item" :placeholder="t('invoice.items_table.description')"
+                  class="w-full px-2 py-1.5 border border-neutral-300 rounded text-sm resize-y min-h-[36px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
               </td>
               <td class="px-3 py-2">
                 <input v-model="item.quantity" v-math type="text" inputmode="decimal"
-                  :class="['w-full h-9 px-2 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-200']" />
+                  :class="['w-full h-9 px-2 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-300']" />
               </td>
               <td class="px-3 py-2">
-                <select v-model="item.unit" class="w-full h-9 px-1 border border-neutral-200 rounded text-sm bg-white">
+                <select v-model="item.unit" class="w-full h-9 px-1 border border-neutral-300 rounded text-sm bg-surface">
                   <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
                   <option v-if="item.unit && !units.some(u => u.code === item.unit)" :value="item.unit">{{ item.unit }}</option>
                 </select>
               </td>
               <td class="px-3 py-2">
                 <input v-model="item.unit_price_without_vat" v-math type="text" inputmode="decimal"
-                  :class="['w-full h-9 px-2 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-200']" />
+                  :class="['w-full h-9 px-2 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-300']" />
               </td>
               <td v-if="supplierIsVatPayer" class="px-3 py-2">
-                <select v-model.number="item.vat_rate_id" class="w-full h-9 px-1 border border-neutral-200 rounded text-sm bg-white">
-                  <option v-for="r in vatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
+                <select v-model.number="item.vat_rate_id" class="w-full h-9 px-1 border border-neutral-300 rounded text-sm bg-surface">
+                  <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
                 </select>
               </td>
-              <td class="px-3 py-2 text-right font-mono text-sm">
-                {{ formatMoney(itemTotal(item), form.currency) }}
+              <td class="px-3 py-2">
+                <input :value="itemTotal(item)" @change="setItemGross(item, ($event.target as HTMLInputElement).value)"
+                  type="text" inputmode="decimal" :title="t('invoice.items_table.gross_edit_hint')"
+                  class="w-full h-9 px-2 border border-neutral-300 rounded text-right font-mono text-sm" />
               </td>
               <td class="px-2 py-2 text-center">
                 <button type="button" @click="removeItem(i)" class="text-danger-500 hover:text-danger-600 text-lg leading-none">×</button>
@@ -1082,7 +1455,7 @@ async function deleteDraft() {
         </div>
 
         <!-- Mobile: stack karet (každé pole na vlastním řádku, čitelné inputy) -->
-        <div class="md:hidden divide-y divide-neutral-100">
+        <div class="md:hidden divide-y divide-neutral-200">
           <div v-if="form.items.length === 0" class="px-4 py-6 text-center text-neutral-400 text-sm">
             {{ t('invoice.no_items') }} <button type="button" @click="addItem" class="text-primary-600 hover:underline">{{ t('invoice.add_first') }}</button>
           </div>
@@ -1090,25 +1463,25 @@ async function deleteDraft() {
             <div class="flex items-center justify-between text-xs text-neutral-500">
               <span class="font-mono">#{{ i + 1 }}</span>
               <div class="flex items-center gap-2">
-                <button type="button" @click="moveUp(i)" :disabled="i === 0" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-200 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▲</button>
-                <button type="button" @click="moveDown(i)" :disabled="i === form.items.length - 1" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-200 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▼</button>
+                <button type="button" @click="moveUp(i)" :disabled="i === 0" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▲</button>
+                <button type="button" @click="moveDown(i)" :disabled="i === form.items.length - 1" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▼</button>
                 <button type="button" @click="removeItem(i)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded text-lg leading-none">×</button>
               </div>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.description') }}</label>
-              <textarea v-model="item.description" rows="2" :placeholder="t('invoice.items_table.description')"
-                class="w-full px-3 py-2 border border-neutral-200 rounded text-sm resize-y min-h-[44px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
+              <textarea v-model="item.description" rows="2" data-row-input="inv-item" :placeholder="t('invoice.items_table.description')"
+                class="w-full px-3 py-2 border border-neutral-300 rounded text-sm resize-y min-h-[44px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.qty') }}</label>
                 <input v-model="item.quantity" v-math type="text" inputmode="decimal"
-                  :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-200']" />
+                  :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-300']" />
               </div>
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.unit') }}</label>
-                <select v-model="item.unit" class="w-full h-10 px-2 border border-neutral-200 rounded text-sm bg-white">
+                <select v-model="item.unit" class="w-full h-10 px-2 border border-neutral-300 rounded text-sm bg-surface">
                   <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
                   <option v-if="item.unit && !units.some(u => u.code === item.unit)" :value="item.unit">{{ item.unit }}</option>
                 </select>
@@ -1116,32 +1489,34 @@ async function deleteDraft() {
             </div>
             <div :class="supplierIsVatPayer ? 'grid grid-cols-2 gap-2' : ''">
               <div>
-                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.items_table.unit_price') }}</label>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ unitPriceHeaderLabel }}</label>
                 <input v-model="item.unit_price_without_vat" v-math type="text" inputmode="decimal"
-                  :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-200']" />
+                  :class="['w-full h-10 px-3 border rounded text-right font-mono text-sm', itemHasBothNegative(item) ? 'border-danger-400' : 'border-neutral-300']" />
               </div>
               <div v-if="supplierIsVatPayer">
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.totals.vat') }}</label>
-                <select v-model.number="item.vat_rate_id" class="w-full h-10 px-2 border border-neutral-200 rounded text-sm bg-white">
-                  <option v-for="r in vatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
+                <select v-model.number="item.vat_rate_id" class="w-full h-10 px-2 border border-neutral-300 rounded text-sm bg-surface">
+                  <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
                 </select>
               </div>
             </div>
-            <div class="flex items-baseline justify-between pt-1 border-t border-neutral-100">
-              <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('invoice.totals.total') }}</span>
-              <span class="font-mono font-semibold">{{ formatMoney(itemTotal(item), form.currency) }}</span>
+            <div class="flex items-baseline justify-between pt-1 border-t border-neutral-200">
+              <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : nonPayerTotalLabel }}</span>
+              <input :value="itemTotal(item)" @change="setItemGross(item, ($event.target as HTMLInputElement).value)"
+                type="text" inputmode="decimal" :title="t('invoice.items_table.gross_edit_hint')"
+                class="w-32 h-9 px-2 border border-neutral-300 rounded text-right font-mono text-sm font-semibold" />
             </div>
           </div>
         </div>
       </div>
 
       <!-- Klasifikace (VAT pro DPH přiznání + volitelný revenue tag) -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-medium text-neutral-700 mb-3">{{ t('invoice.classification.title') }}</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label class="block text-xs text-neutral-500 mb-1">{{ t('invoice.classification.vat_classification') }}</label>
-            <select v-model="form.vat_classification_code" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+            <select v-model="form.vat_classification_code" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
               <option :value="null">— {{ t('invoice.classification.no_vat_class') }} —</option>
               <option v-for="vc in vatClassifications" :key="vc.id" :value="vc.code">
                 {{ vc.code }} — {{ vc.label.length > 60 ? vc.label.slice(0, 60) + '…' : vc.label }}
@@ -1151,9 +1526,12 @@ async function deleteDraft() {
           </div>
           <div>
             <label class="block text-xs text-neutral-500 mb-1">{{ t('invoice.classification.revenue_category') }}</label>
-            <input v-model="form.revenue_category" type="text" maxlength="40"
-                   class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm"
-                   :placeholder="t('invoice.classification.revenue_category_placeholder')" />
+            <select v-model="form.revenue_category_id" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+              <option :value="null">— {{ t('invoice.classification.revenue_category_none') }} —</option>
+              <option v-for="rc in revenueCategories" :key="rc.id" :value="rc.id">
+                {{ rc.label }} ({{ rc.code }})
+              </option>
+            </select>
             <p class="text-xs text-neutral-500 mt-1">{{ t('invoice.classification.revenue_category_hint') }}</p>
           </div>
         </div>
@@ -1162,23 +1540,23 @@ async function deleteDraft() {
       <!-- Sumace + poznámky -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="md:col-span-2 space-y-4">
-          <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+          <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.note_above') }}</label>
             <textarea v-model="form.note_above_items" rows="2" class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm"></textarea>
           </div>
-          <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+          <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.note_below') }}</label>
             <textarea v-model="form.note_below_items" rows="2" class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm"></textarea>
           </div>
         </div>
 
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.summary') }}</h3>
           <div class="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-neutral-100">
             <label for="discount_percent" class="text-sm text-neutral-700">{{ t('invoice.discount.label') }}</label>
             <div class="relative w-28">
               <input id="discount_percent" v-model.number="form.discount_percent" type="number" min="0" max="100" step="0.01"
-                class="w-full h-9 pl-2 pr-7 border border-neutral-200 rounded text-right font-mono text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                class="w-full h-9 pl-2 pr-7 border border-neutral-300 rounded text-right font-mono text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
               <span class="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 text-sm pointer-events-none">%</span>
             </div>
           </div>
@@ -1232,7 +1610,7 @@ async function deleteDraft() {
       </div>
 
       <!-- Výkaz víceprací -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report') }}</h3>
           <div class="flex items-center gap-2">
@@ -1242,7 +1620,7 @@ async function deleteDraft() {
               {{ t('invoice.wr_add') }}
             </button>
             <button v-if="wrOpen && wrItems.length > 0" type="button" @click="pushWrToInvoiceItem"
-              class="cursor-pointer px-4 h-9 text-sm bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-md inline-flex items-center gap-1.5 shadow-sm">
+              class="cursor-pointer px-4 h-9 text-sm bg-success-600 hover:bg-success-600 text-white font-semibold rounded-md inline-flex items-center gap-1.5 shadow-sm">
               <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
               {{ t('invoice.wr_push_to_item') }}
             </button>
@@ -1269,7 +1647,7 @@ async function deleteDraft() {
                 <th class="px-2 py-2 w-10"></th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-neutral-100">
+            <tbody class="divide-y divide-neutral-200">
               <tr v-for="(it, i) in wrItems" :key="i">
                 <td class="px-2 py-2 text-center text-xs text-neutral-400">
                   <button type="button" @click="moveWrItem(i, -1)" :disabled="i === 0"
@@ -1280,16 +1658,16 @@ async function deleteDraft() {
                           class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
                 </td>
                 <td class="px-2 py-1.5">
-                  <input v-model="it.description" type="text" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm" />
+                  <input v-model="it.description" type="text" data-row-input="inv-wr" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                 </td>
                 <td class="px-2 py-1.5">
-                  <input v-model="it.work_date" type="date" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm font-mono" />
+                  <input v-model="it.work_date" type="date" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm font-mono" />
                 </td>
                 <td class="px-2 py-1.5">
-                  <input v-model.number="it.hours" type="number" step="0.25" min="0" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
+                  <input v-model.number="it.hours" type="number" step="0.25" min="0" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
                 </td>
                 <td class="px-2 py-1.5">
-                  <input v-model.number="it.rate" type="number" step="1" min="0" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
+                  <input v-model.number="it.rate" type="number" step="1" min="0" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
                 </td>
                 <td class="px-3 py-1.5 text-right font-mono text-neutral-700">
                   {{ formatMoney((Number(it.hours) || 0) * (Number(it.rate) || 0), form.currency) }}
@@ -1345,22 +1723,22 @@ async function deleteDraft() {
               </div>
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_description') }}</label>
-                <input v-model="it.description" type="text" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm bg-white" />
+                <input v-model="it.description" type="text" data-row-input="inv-wr" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm bg-surface" />
               </div>
               <div class="grid grid-cols-2 gap-2">
                 <div>
                   <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_date') }}</label>
-                  <input v-model="it.work_date" type="date" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm font-mono bg-white" />
+                  <input v-model="it.work_date" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm font-mono bg-surface" />
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_hours') }}</label>
-                  <input v-model.number="it.hours" type="number" inputmode="decimal" step="0.25" min="0" class="w-full h-10 px-3 border border-neutral-200 rounded text-right font-mono text-sm bg-white" />
+                  <input v-model.number="it.hours" type="number" inputmode="decimal" step="0.25" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm bg-surface" />
                 </div>
               </div>
               <div class="grid grid-cols-2 gap-2 items-end">
                 <div>
                   <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_rate') }}</label>
-                  <input v-model.number="it.rate" type="number" inputmode="decimal" step="1" min="0" class="w-full h-10 px-3 border border-neutral-200 rounded text-right font-mono text-sm bg-white" />
+                  <input v-model.number="it.rate" type="number" inputmode="decimal" step="1" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm bg-surface" />
                 </div>
                 <div class="text-right pb-2">
                   <div class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('invoice.wr_total') }}</div>
@@ -1387,13 +1765,73 @@ async function deleteDraft() {
         </div>
       </div>
 
-      <div v-if="error" class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">
+      <!-- Přílohy — u nové faktury držené v prohlížeči (nahrají se po vytvoření),
+           u existující faktury rovnou nahrávané / mazané -->
+      <div v-if="attachmentsAllowed"
+           class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.attachments.title') }}</h3>
+            <p class="text-xs text-neutral-500 mt-0.5">{{ isEdit ? t('invoice.attachments.hint') : t('invoice.attachments.pending_hint') }}</p>
+          </div>
+          <span class="text-xs text-neutral-400">{{ attachments.length + pendingAttachments.length }}</span>
+        </header>
+
+        <!-- Existující přílohy (editace) -->
+        <ul v-if="attachments.length > 0" class="divide-y divide-neutral-100">
+          <li v-for="a in attachments" :key="a.id" class="px-5 py-2.5 text-sm flex items-center gap-3">
+            <svg class="w-4 h-4 text-neutral-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 1 0 2.828 2.828l6.414-6.414a4 4 0 1 0-5.656-5.656L5.05 11.05a6 6 0 1 0 8.486 8.486L20 13"/>
+            </svg>
+            <span class="text-neutral-700 text-xs flex-1 truncate" :title="a.original_name">{{ a.original_name }}</span>
+            <span class="text-neutral-400 text-xs whitespace-nowrap">{{ formatBytes(a.size_bytes) }}</span>
+            <a :href="invoicesApi.attachmentUrl(invoiceId!, a.id, false)" target="_blank"
+               class="text-xs text-primary-600 hover:text-primary-700 font-medium">{{ t('common.view') }}</a>
+            <a :href="invoicesApi.attachmentUrl(invoiceId!, a.id, true)"
+               class="text-xs text-primary-600 hover:text-primary-700 font-medium">{{ t('common.download') }}</a>
+            <button @click="deleteAttachment(a)" type="button"
+                    class="text-xs text-danger-500 hover:text-danger-600 cursor-pointer">{{ t('common.delete') }}</button>
+          </li>
+        </ul>
+
+        <!-- Nové soubory (čekají na vytvoření faktury) -->
+        <ul v-if="pendingAttachments.length > 0" class="divide-y divide-neutral-100">
+          <li v-for="(f, i) in pendingAttachments" :key="`p-${f.name}-${i}`" class="px-5 py-2.5 text-sm flex items-center gap-3">
+            <svg class="w-4 h-4 text-neutral-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 1 0 2.828 2.828l6.414-6.414a4 4 0 1 0-5.656-5.656L5.05 11.05a6 6 0 1 0 8.486 8.486L20 13"/>
+            </svg>
+            <span class="text-neutral-700 text-xs flex-1 truncate" :title="f.name">{{ f.name }}</span>
+            <span class="text-neutral-400 text-xs whitespace-nowrap">{{ formatBytes(f.size) }}</span>
+            <button @click="removePendingAttachment(i)" type="button"
+                    class="text-xs text-danger-500 hover:text-danger-600 cursor-pointer">{{ t('common.delete') }}</button>
+          </li>
+        </ul>
+
+        <div class="px-5 py-3"
+             :class="attachmentDragOver ? 'bg-primary-50' : 'bg-neutral-50/50'"
+             @dragover.prevent="attachmentDragOver = true"
+             @dragleave.prevent="attachmentDragOver = false"
+             @drop="onAttachmentDrop">
+          <label class="flex flex-col md:flex-row items-stretch md:items-center gap-2 md:gap-3 cursor-pointer">
+            <input type="file" multiple class="hidden" @change="onAttachmentInputChange" />
+            <span class="inline-flex items-center justify-center px-3 h-9 text-sm border border-primary-300 rounded-md text-primary-600 hover:bg-primary-50">
+              <svg class="w-4 h-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+              </svg>
+              {{ attachmentsBusy ? t('invoice.attachments.uploading') : t('invoice.attachments.add') }}
+            </span>
+            <span class="text-xs text-neutral-500">{{ t('invoice.attachments.drop_here') }}</span>
+          </label>
+        </div>
+      </div>
+
+      <div v-if="error" data-error-banner class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">
         {{ error }}
       </div>
 
       <!-- Action bar -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-4 flex justify-between items-center sticky bottom-3 shadow-md">
-        <RouterLink to="/invoices" class="text-sm text-neutral-600 hover:text-neutral-900">{{ t('common.cancel') }}</RouterLink>
+      <div class="bg-surface border border-neutral-200 rounded-lg p-4 flex justify-between items-center shadow-sm">
+        <RouterLink to="/invoices" class="px-4 py-2 text-sm text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-colors">{{ t('common.back') }}</RouterLink>
         <button type="submit" :disabled="submitting"
           class="px-5 h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md">
           {{ submitting ? t('common.saving') : (isEdit ? t('common.save') : t('common.create')) }}

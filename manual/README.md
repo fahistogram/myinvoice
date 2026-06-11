@@ -10,8 +10,8 @@ Adresář `manual/` obsahuje uživatelskou dokumentaci v MD souborech. Z nich:
 ```
 manual/
 ├── INDEX.md                  # navigace + grupy (zdroj pro sidebar TOC)
-├── 01_Uvod.md                # 17 kapitol, NN_Nazev.md
-├── 02_Instalace.md
+├── 01_Uvod.md                # kapitoly NN_Nazev.md (řazené dle menu aplikace)
+├── 02_Instalace_Quickstart.md
 ├── ...
 ├── 99_Reseni_problemu.md
 ├── img/                      # screenshoty (WEBP po konverzi z PNG)
@@ -46,8 +46,8 @@ php tools/exportManualToPdf.php
 ### Přidání nové kapitoly
 
 1. Vytvoř `manual/NN_Nazev.md` (NN = pořadové dvojcifré číslo).
-2. Přidej řádek do `manual/INDEX.md` ve správné grupě (### Začínáme / ### Práce
-   s daty / …).
+2. Přidej řádek do `manual/INDEX.md` ve správné grupě (### Instalace a start /
+   ### Prodej / ### Nákup / ### Finance / ### Dokumenty / ### Daně / ### Systém).
 3. `php tools/generateManualHtml.php && php tools/exportManualToPdf.php`.
 
 ### Reorganizace pořadí
@@ -69,8 +69,8 @@ zachytí.)
   - `> 💡 Tip: ...` — užitečný tip
   - `> 🛈 Pozn: ...` — poznámka (info)
   - `> ⚠️ Pozor: ...` — varování / důležité
-- **Cross-reference**: `[Detail klienta](07_Klienti.md)` — generátor přepíše na
-  `?ch=06_Klienti`
+- **Cross-reference**: `[Detail klienta](13_Klienti.md)` — generátor přepíše na
+  `?ch=14_Klienti`
 
 ## Servírování
 

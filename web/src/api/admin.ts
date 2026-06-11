@@ -21,6 +21,106 @@ export interface ActivityLogResponse {
   actions: Array<{ action: string; cnt: number }>
 }
 
+export interface SentEmail {
+  id: number
+  action: string
+  /** Logický typ e-mailu = success akce (i u failed řádku) — podle něj se vybírá popisek/badge. */
+  type: string
+  status: 'sent' | 'failed'
+  created_at: string
+  user_name: string | null
+  user_email: string | null
+  invoice_id: number | null
+  invoice_varsymbol: string | null
+  client_company_name: string | null
+  recipients: string[]
+  smtp_response: string | null
+  /** Chybový text u status='failed', jinak null. */
+  error: string | null
+}
+
+export interface SentEmailsResponse {
+  data: SentEmail[]
+  total: number
+  limit: number
+  offset: number
+  types: Array<{ action: string; cnt: number; failed: number }>
+  failed_total: number
+}
+
+/** Jedna jednotná událost z logu poštovního serveru (kind: submission|delivery|notice). */
+export interface SmtpLogEvent {
+  ts: string
+  kind: 'submission' | 'delivery' | 'notice'
+  status: 'delivered' | 'queued' | 'deferred' | 'rejected' | 'error' | 'info'
+  mail_from: string | null
+  recipients: string[]
+  remote_host: string | null
+  remote_ip: string | null
+  code: number | null
+  response: string | null
+  message_id: string | null
+  source_file: string
+  session: string
+  subject: string | null
+  /** Doplněno korelací s activity_log (odeslané e-maily aplikace), jinak null. */
+  invoice_id: number | null
+  invoice_varsymbol: string | null
+}
+
+export interface SmtpLogRecipientRollup {
+  recipient: string
+  delivered: number
+  deferred: number
+  rejected: number
+  error: number
+  last_ts: string
+  last_status: string
+}
+
+export interface SmtpLogAnalysis {
+  enabled: boolean
+  reason: string | null
+  path?: string
+  glob_matched?: number
+  connector: { key: string; label: string } | null
+  connectors: Array<{ key: string; label: string }>
+  window?: { files_total: number; files_parsed: number; limited: boolean }
+  scanned: Array<{ file: string; size: number | null; truncated: boolean; events: number }>
+  summary: {
+    total_events: number
+    deliveries: number
+    submissions: number
+    by_status: Record<string, number>
+    by_day: Record<string, Record<string, number>>
+    by_host: Record<string, Record<string, number>>
+    recipients: SmtpLogRecipientRollup[]
+    problems: SmtpLogEvent[]
+  }
+  events: SmtpLogEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** SMTP analýza vázaná na fakturu (box v detailu faktury). */
+export interface InvoiceSmtpLog {
+  enabled: boolean
+  sent: boolean
+  connector: { key: string; label: string } | null
+  sends: Array<{ ts: string; recipients: string[]; action: string }>
+  recipients: Array<{
+    recipient: string
+    delivered: number
+    deferred: number
+    rejected: number
+    error: number
+    last_status: string | null
+    last_ts: string
+  }>
+  events: SmtpLogEvent[]
+}
+
 export interface AdminUser {
   id: number
   email: string
@@ -35,6 +135,18 @@ export interface AdminUser {
 export const adminApi = {
   activityLog: (params: { action?: string; user_id?: number; entity_type?: string; entity_id?: number; limit?: number; offset?: number } = {}) =>
     api.get<ActivityLogResponse>('/admin/activity-log', { params }).then(r => r.data),
+
+  sentEmails: (params: { type?: string; status?: 'sent' | 'failed'; limit?: number; offset?: number } = {}) =>
+    api.get<SentEmailsResponse>('/admin/sent-emails', { params }).then(r => r.data),
+
+  smtpLogAnalysis: (params: { date_from?: string; date_to?: string; status?: string; kind?: string; search?: string; limit?: number; offset?: number } = {}) =>
+    api.get<SmtpLogAnalysis>('/admin/smtp-log-analysis', { params }).then(r => r.data),
+
+  smtpLogStatus: () =>
+    api.get<{ enabled: boolean }>('/admin/smtp-log-analysis/status').then(r => r.data),
+
+  invoiceSmtpLog: (id: number) =>
+    api.get<InvoiceSmtpLog>(`/admin/invoices/${id}/smtp-log`).then(r => r.data),
 
   // Users
   listUsers: () => api.get<AdminUser[]>('/admin/users').then(r => r.data),

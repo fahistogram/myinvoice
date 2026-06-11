@@ -76,8 +76,16 @@ export interface ImportResult {
   duplicate: boolean
 }
 
+export interface BankStatementPage {
+  items: BankStatement[]
+  total: number
+  page: number
+  limit: number
+}
+
 export const bankApi = {
-  list: () => api.get<BankStatement[]>('/bank-statements').then(r => r.data),
+  list: (page = 1) =>
+    api.get<BankStatementPage>('/bank-statements', { params: { page } }).then(r => r.data),
   get: (id: number) => api.get<BankStatementDetail>(`/bank-statements/${id}`).then(r => r.data),
   upload: (file: File) => {
     const fd = new FormData()

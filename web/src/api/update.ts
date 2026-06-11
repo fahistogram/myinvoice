@@ -50,4 +50,7 @@ export const updateApi = {
     api
       .post<UpdateTriggerResponse>('/admin/update/trigger', { target_version: target_version ?? null })
       .then((r) => r.data),
+
+  /** Admin — zrušit zaseknutý „upgrade probíhá" flag (watcher neběží / upgrade proběhl ručně). */
+  cancel: () => api.post<{ status: string; cleared: boolean }>('/admin/update/cancel').then((r) => r.data),
 }

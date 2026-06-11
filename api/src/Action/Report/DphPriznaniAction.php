@@ -47,13 +47,16 @@ final class DphPriznaniAction
         }
         $supplierId = SupplierGuard::currentId($request);
         $stmt = $this->db->pdo()->prepare(
-            'SELECT vat_period, is_vat_payer, taxpayer_type, financial_office_code FROM supplier WHERE id = ?'
+            'SELECT vat_period, is_vat_payer, is_identified, taxpayer_type, financial_office_code FROM supplier WHERE id = ?'
         );
         $stmt->execute([$supplierId]);
         $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        $isIdentified = !((bool) ($row['is_vat_payer'] ?? false)) && (bool) ($row['is_identified'] ?? false);
         return Json::ok($response, [
-            'vat_period'            => $row['vat_period'] ?? null,
+            // Identifikovaná osoba podává vždy měsíčně — UI nedostane kvartální volbu.
+            'vat_period'            => $isIdentified ? 'monthly' : ($row['vat_period'] ?? null),
             'is_vat_payer'          => (bool) ($row['is_vat_payer'] ?? false),
+            'is_identified'         => $isIdentified,
             'taxpayer_type'         => $row['taxpayer_type'] ?? null,
             'has_financial_office'  => !empty($row['financial_office_code']),
         ]);
@@ -65,9 +68,10 @@ final class DphPriznaniAction
      *   { year, month, period, vat_output, vat_input, tax_due,
      *     sale_count, sale_draft_count, purchase_count, purchase_draft_count }
      *
-     * Pravidla:
-     * - Období vymezeno `COALESCE(tax_date, issue_date) BETWEEN start AND end`
-     *   (drafty často DUZP zatím nemají — `tax_date` může být NULL).
+     * Pravidla (zařazení do období řeší VatLedgerService — viz tam):
+     * - vystavené dle DUZP `COALESCE(tax_date, issue_date)`, přijaté dle pozdějšího
+     *   z (DUZP, vystavení) `GREATEST(...)` — odpočet nelze uplatnit dřív, než plátce
+     *   drží daňový doklad (§ 73 ZDPH). Drafty často DUZP nemají (`tax_date` NULL).
      * - sale (vydané): invoice_type IN (invoice, credit_note), status NOT IN
      *   (cancelled), tedy bere finalizované doklady i koncepty pro zvolené
      *   období.

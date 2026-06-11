@@ -5,7 +5,10 @@ import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { updateApi, type PublicVersion } from '@/api/update'
+import { settingsApi } from '@/api/settings'
 import SupplierSwitcher from './SupplierSwitcher.vue'
+import GlobalSearch from './GlobalSearch.vue'
+import ThemeToggle from './ThemeToggle.vue'
 
 const { t, locale } = useI18n()
 function setLocale(l: 'cs' | 'en') {
@@ -19,11 +22,41 @@ const auth = useAuthStore()
 const supplierStore = useSupplierStore()
 
 const mobileOpen = ref(false)
+const quickOpen = ref(false)
+const supportOpen = ref(false)
+const featureOpen = ref(false)
+const accountantSigningProfilesEnabled = ref(false)
+let signingSettingsRequest = 0
 
 async function logout() {
   await auth.logout()
   router.push('/login')
 }
+
+async function loadAccountantSigningMenu() {
+  const requestId = ++signingSettingsRequest
+  if (auth.user?.role !== 'accountant') {
+    accountantSigningProfilesEnabled.value = false
+    return
+  }
+
+  try {
+    const settings = await settingsApi.getSigningSettings()
+    if (requestId === signingSettingsRequest) {
+      accountantSigningProfilesEnabled.value = settings.accountant_profiles_enabled === true
+    }
+  } catch {
+    if (requestId === signingSettingsRequest) {
+      accountantSigningProfilesEnabled.value = false
+    }
+  }
+}
+
+watch(
+  () => [auth.user?.role, supplierStore.currentSupplierId] as const,
+  () => { void loadAccountantSigningMenu() },
+  { immediate: true },
+)
 
 interface NavItem {
   to: string
@@ -31,6 +64,8 @@ interface NavItem {
   icon: string
   /** True = externí odkaz (otevře se v novém tabu, ne RouterLink). Např. /manual. */
   external?: boolean
+  /** Cílová route pro rychlé „+" (vytvořit nový) vpravo u položky. Jen pro zapisující. */
+  newTo?: string
 }
 interface NavSection {
   /** Hlavička sekce; pokud chybí, položky jsou bez visual grouping */
@@ -53,6 +88,7 @@ const ACCENT_CLASSES: Record<NonNullable<NavSection['accent']>, string> = {
 const ICONS = {
   dashboard:  'M3 12l9-9 9 9M5 10v10h14V10',
   invoices:   'M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z',
+  proforma:   'M2.25 8.25h19.5M2.25 9v6.75A2.25 2.25 0 0 0 4.5 18h15a2.25 2.25 0 0 0 2.25-2.25V9A2.25 2.25 0 0 0 19.5 6.75h-15A2.25 2.25 0 0 0 2.25 9zM14 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
   recurring:  'M4 4v5h5M4 9a8 8 0 0 1 14.13-4.06M20 20v-5h-5M20 15a8 8 0 0 1-14.13 4.06',
   purchase:   'M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm-8 2a2 2 0 1 1-4 0 2 2 0 0 1 4 0z',
   bank:       'M3 9l9-7 9 7m-2 0v9a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9m4 11V13h4v7',
@@ -68,6 +104,7 @@ const ICONS = {
   exports:    'M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4',
   users:      'M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a3 3 0 0 1 5.356-1.857M15 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z',
   email:      'M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z',
+  sent_email: 'M6 12L3.269 3.126A59.768 59.768 0 0 1 21.485 12 59.77 59.77 0 0 1 3.27 20.876L5.999 12Zm0 0h7.5',
   approvals:  'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0 1 12 2.944a11.955 11.955 0 0 1-8.618 3.04A12.02 12.02 0 0 0 3 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',
   log:        'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 12h6m-6 4h4',
   cron:       'M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z',
@@ -75,6 +112,7 @@ const ICONS = {
   api_tokens: 'M15 7a2 2 0 0 1 2 2m4 0a6 6 0 0 1-7.743 5.743L11 17H9v2H7v2H4a1 1 0 0 1-1-1v-2.586a1 1 0 0 1 .293-.707l5.964-5.964A6 6 0 1 1 21 9z',
   help:       'M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827V14m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
   ai:         'M13 10V3L4 14h7v7l9-11h-7z',
+  documents:  'M7 21h10a2 2 0 0 0 2-2V9.414a1 1 0 0 0-.293-.707l-5.414-5.414A1 1 0 0 0 12.586 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2zM9 13h6m-6 4h6',
   // Daně sekce — různé ikony pro každý report
   tax_dph:    'M3 10h18M3 14h18M5 21V3a1 1 0 011-1h12a1 1 0 011 1v18M9 7h6M9 11h6M9 15h6',
   tax_kh:     'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
@@ -82,10 +120,13 @@ const ICONS = {
   tax_income: 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
   tax_archive: 'M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4',
   tax_book:   'M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25',
+  tax_optimizer: 'M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z',
 }
 
 const navSections = computed<NavSection[]>(() => {
   const isAdmin = auth.user?.role === 'admin'
+  // Daňový optimalizátor (paušál vs standardní režim) je jen pro OSVČ (fyzická osoba).
+  const isOsvc = supplierStore.currentSupplier?.taxpayer_type === 'fo'
   const sections: NavSection[] = [
     { items: [{ to: '/', label: t('nav.dashboard'), icon: ICONS.dashboard }] },
     {
@@ -94,9 +135,9 @@ const navSections = computed<NavSection[]>(() => {
       title: t('nav.section_sales'),
       accent: 'primary',
       items: [
-        { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices },
-        { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring },
-        { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients },
+        { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices,  newTo: '/invoices/new' },
+        { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring, newTo: '/recurring/new' },
+        { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients,   newTo: '/clients/new' },
         { to: '/projects',         label: t('nav.projects'),   icon: ICONS.projects },
         ...(isAdmin ? [{ to: '/admin/approvals',          label: t('nav.approvals'),         icon: ICONS.approvals }] : []),
         // Export vidí všichni vč. readonly (export dat = čtení), daňové výkazy taktéž (sekce Daně níže).
@@ -108,8 +149,8 @@ const navSections = computed<NavSection[]>(() => {
       title: t('nav.section_purchase'),
       accent: 'warning',
       items: [
-        { to: '/purchase-invoices',          label: t('nav.purchase_invoices'),  icon: ICONS.purchase },
-        { to: '/clients?role=vendors',       label: t('nav.vendors'),            icon: ICONS.suppliers },
+        { to: '/purchase-invoices',          label: t('nav.purchase_invoices'),  icon: ICONS.purchase, newTo: '/purchase-invoices/new' },
+        { to: '/clients?role=vendors',       label: t('nav.vendors'),            icon: ICONS.suppliers, newTo: '/clients/new?role=vendor' },
         { to: '/purchase-invoices/export',   label: t('nav.purchase_export'),    icon: ICONS.exports },
         ...(isAdmin ? [{ to: '/admin/import?tab=purchase',  label: t('nav.imports_purchase'), icon: ICONS.imports }] : []),
         ...(isAdmin ? [{ to: '/admin/integrations?tab=ai',  label: t('nav.ai_import'),        icon: ICONS.ai }] : []),
@@ -119,9 +160,17 @@ const navSections = computed<NavSection[]>(() => {
       title: t('nav.section_finance'),
       accent: 'success',
       items: [
-        { to: '/crm',   label: t('nav.crm'),   icon: ICONS.crm },
-        { to: '/stats', label: t('nav.stats'), icon: ICONS.stats },
-        { to: '/bank',  label: t('nav.bank'),  icon: ICONS.bank },
+        { to: '/crm',            label: t('nav.crm'),            icon: ICONS.crm },
+        { to: '/stats',          label: t('nav.stats'),          icon: ICONS.stats },
+        { to: '/purchase-stats', label: t('nav.purchase_stats'), icon: ICONS.purchase },
+        { to: '/bank',           label: t('nav.bank'),           icon: ICONS.bank },
+      ],
+    },
+    {
+      title: t('nav.section_documents'),
+      accent: 'neutral',
+      items: [
+        { to: '/documents', label: t('nav.documents'), icon: ICONS.documents },
       ],
     },
     {
@@ -133,7 +182,9 @@ const navSections = computed<NavSection[]>(() => {
         { to: '/reports/dph-book',    label: t('nav.reports_dph_book'),    icon: ICONS.tax_book },
         { to: '/reports/shv',         label: t('nav.reports_shv'),         icon: ICONS.tax_shv },
         { to: '/reports/income-tax',  label: t('nav.reports_income_tax'),  icon: ICONS.tax_income },
+        ...(isOsvc ? [{ to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer }] : []),
         { to: '/reports/submissions', label: t('nav.reports_submissions'), icon: ICONS.tax_archive },
+        { to: '/reports/monthly-export', label: t('nav.reports_monthly_export'), icon: ICONS.exports },
       ],
     },
   ]
@@ -146,14 +197,25 @@ const navSections = computed<NavSection[]>(() => {
       accent: 'neutral',
       items: [
         { to: '/admin/settings',         label: t('nav.settings'),        icon: ICONS.settings },
+        { to: '/admin/bank-accounts',    label: t('nav.bank_accounts'),   icon: ICONS.bank },
         { to: '/admin/codebooks',        label: t('nav.codebooks'),       icon: ICONS.codebooks },
-        { to: '/admin/integrations',     label: t('nav.integrations'),    icon: ICONS.api_tokens },
         { to: '/admin/users',            label: t('nav.users'),           icon: ICONS.users },
-        { to: '/admin/email-templates',  label: t('nav.email_templates'), icon: ICONS.email },
+        { to: '/admin/emails',           label: t('nav.emails'),          icon: ICONS.email },
         { to: '/admin/activity-log',     label: t('nav.log'),             icon: ICONS.log },
+        { to: '/admin/integrations',     label: t('nav.integrations'),    icon: ICONS.api_tokens },
         { to: '/admin/cron-jobs',        label: t('nav.cron_jobs'),       icon: ICONS.cron },
         { to: '/admin/update',           label: t('nav.updates'),         icon: ICONS.updates },
         { to: '/profile/api-tokens',     label: t('nav.api_tokens'),      icon: ICONS.api_tokens },
+      ],
+    })
+  }
+
+  if (!isAdmin && auth.user?.role === 'accountant' && accountantSigningProfilesEnabled.value) {
+    sections.push({
+      title: t('nav.system'),
+      accent: 'neutral',
+      items: [
+        { to: '/admin/electronic-signatures', label: t('nav.electronic_signatures'), icon: ICONS.approvals },
       ],
     })
   }
@@ -167,6 +229,21 @@ const navSections = computed<NavSection[]>(() => {
 
   return sections
 })
+
+/** Rychlé zkratky v topbaru (desktop) — ikony navazují na menu (ICONS). */
+const quickActions = computed(() => [
+  { to: '/invoices/new',          label: t('nav.quick_invoice'),   icon: ICONS.invoices },
+  { to: '/invoices/new?type=proforma', label: t('nav.quick_proforma'), icon: ICONS.proforma },
+  { to: '/recurring/new',         label: t('nav.quick_recurring'), icon: ICONS.recurring },
+  { to: '/clients/new',           label: t('nav.quick_client'),    icon: ICONS.clients },
+  { to: '/clients/new?role=vendor', label: t('nav.quick_vendor'), icon: ICONS.suppliers },
+  { to: '/purchase-invoices/new', label: t('nav.quick_purchase'), icon: ICONS.purchase },
+])
+
+/** Ploché položky menu pro globální search (našeptávač skáče přímo na body menu). */
+const flatNavItems = computed(() =>
+  navSections.value.flatMap(s => s.items.map(it => ({ to: it.to, label: it.label, icon: it.icon, external: it.external })))
+)
 
 function isActive(to: string): boolean {
   if (to === '/') return route.path === '/'
@@ -220,8 +297,8 @@ function isActive(to: string): boolean {
   return true
 }
 
-// Zavři mobile drawer po navigaci
-watch(() => route.path, () => { mobileOpen.value = false })
+// Zavři mobile drawer + rychlé menu po navigaci
+watch(() => route.path, () => { mobileOpen.value = false; quickOpen.value = false })
 
 const versionInfo = ref<PublicVersion | null>(null)
 onMounted(async () => {
@@ -233,7 +310,7 @@ onMounted(async () => {
   <div class="min-h-screen flex flex-col bg-neutral-50">
 
     <!-- ═════════════════════ TOPBAR ═════════════════════ -->
-    <header class="sticky top-0 z-30 bg-white border-b border-neutral-200">
+    <header class="sticky top-0 z-30 bg-surface border-b border-neutral-200">
       <div class="h-14 px-4 flex items-center justify-between gap-3">
         <!-- Logo -->
         <RouterLink to="/" class="flex items-center gap-2.5 shrink-0" @click="mobileOpen = false">
@@ -245,6 +322,45 @@ onMounted(async () => {
 
         <!-- Pravá strana topbaru -->
         <div class="flex items-center gap-2 text-sm">
+          <!-- Rychlé vytvoření (desktop, jen pro zapisující) — jedno decentní tlačítko s menu -->
+          <div v-if="auth.canWrite" class="relative hidden lg:block">
+            <button
+              type="button" @click="quickOpen = !quickOpen"
+              class="cursor-pointer inline-flex items-center gap-1.5 h-8 pl-2 pr-2.5 text-sm rounded-md border border-neutral-200 text-neutral-600 hover:bg-neutral-50 hover:text-primary-700 transition-colors"
+              :class="{ 'bg-neutral-50 text-primary-700': quickOpen }"
+              :aria-expanded="quickOpen" :aria-label="t('nav.quick_new')"
+            >
+              <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
+              </svg>
+              <span>{{ t('nav.quick_new') }}</span>
+              <svg class="w-3 h-3 ml-0.5 transition" :class="{ 'rotate-180': quickOpen }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            <transition
+              enter-active-class="transition duration-100 ease-out"
+              enter-from-class="opacity-0 scale-95" enter-to-class="opacity-100 scale-100"
+              leave-active-class="transition duration-75 ease-in"
+              leave-from-class="opacity-100 scale-100" leave-to-class="opacity-0 scale-95"
+            >
+              <div v-if="quickOpen" class="absolute right-0 mt-1 w-52 bg-surface border border-neutral-200 rounded-lg shadow-lg py-1 z-40">
+                <RouterLink
+                  v-for="s in quickActions" :key="s.to" :to="s.to" @click="quickOpen = false"
+                  class="flex items-center gap-2.5 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-50 hover:text-primary-700"
+                >
+                  <svg class="w-4 h-4 shrink-0 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" :d="s.icon" />
+                  </svg>
+                  <span>{{ s.label }}</span>
+                </RouterLink>
+              </div>
+            </transition>
+            <div v-if="quickOpen" @click="quickOpen = false" class="fixed inset-0 z-10" aria-hidden="true"></div>
+          </div>
+          <!-- Jemný předěl, aby „Vytvořit" nebylo nalepené na jméně uživatele -->
+          <span v-if="auth.canWrite" class="hidden lg:inline-block w-px h-5 bg-neutral-200 mx-1" aria-hidden="true"></span>
+
           <!-- Jméno uživatele (desktop) — link na profil (heslo + 2FA v záložkách). -->
           <RouterLink
             to="/profile/password"
@@ -279,6 +395,11 @@ onMounted(async () => {
                 <path d="M30,0 v30 M0,15 h60" stroke="#C8102E" stroke-width="6"/>
               </svg>
             </button>
+          </div>
+
+          <!-- Přepínač motivu (System / Light / Dark) — na mobilu je v drawer patičce -->
+          <div class="hidden sm:inline-flex">
+            <ThemeToggle />
           </div>
 
           <!-- Nápověda -->
@@ -336,7 +457,7 @@ onMounted(async () => {
       <!-- Mobile backdrop -->
       <div
         v-if="mobileOpen" @click="mobileOpen = false"
-        class="lg:hidden fixed inset-0 bg-neutral-900/30 z-20"
+        class="lg:hidden fixed inset-0 bg-black/50 z-20"
         aria-hidden="true"
       ></div>
 
@@ -345,13 +466,16 @@ onMounted(async () => {
         :class="[
           'fixed lg:sticky top-14 z-30 lg:z-auto',
           'h-[calc(100vh-3.5rem)] w-60 shrink-0',
-          'bg-white border-r border-neutral-200',
+          'bg-surface border-r border-neutral-200',
           'flex flex-col',
           'transition-transform duration-200 ease-in-out',
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
         ]"
       >
-        <nav class="flex-1 overflow-y-auto px-2.5 py-3">
+        <nav class="flex-1 overflow-y-auto scrollbar-slim px-2.5 py-3">
+          <!-- Globální vyhledávač (před Přehled) — našeptává menu + hledá klienty/faktury -->
+          <GlobalSearch :menu-items="flatNavItems" @navigated="mobileOpen = false" />
+
           <template v-for="(section, si) in navSections" :key="si">
             <!-- Section title — soft pill background v barvě sekce -->
             <div v-if="section.title" :class="si === 0 ? 'pt-1 pb-1.5' : 'pt-4 pb-1.5'">
@@ -378,21 +502,37 @@ onMounted(async () => {
                   <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4M14 4h6m0 0v6m0-6L10 14"/>
                 </svg>
               </a>
-              <RouterLink
-                v-else
-                :to="item.to"
-                active-class=""
-                exact-active-class=""
-                class="flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-sm transition-colors leading-tight"
-                :class="isActive(item.to)
-                  ? 'bg-primary-50 text-primary-700 font-medium'
-                  : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100'"
-              >
-                <svg class="w-[15px] h-[15px] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
-                </svg>
-                {{ item.label }}
-              </RouterLink>
+              <div v-else class="relative group">
+                <RouterLink
+                  :to="item.to"
+                  active-class=""
+                  exact-active-class=""
+                  class="flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-sm transition-colors leading-tight"
+                  :class="[
+                    isActive(item.to)
+                      ? 'bg-primary-50 text-primary-700 font-medium'
+                      : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100',
+                    item.newTo && auth.canWrite ? 'pr-8' : '',
+                  ]"
+                >
+                  <svg class="w-[15px] h-[15px] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
+                  </svg>
+                  {{ item.label }}
+                </RouterLink>
+                <!-- Rychlé „+" (vytvořit nový) — skryté, odhalí se až při hoveru nad položkou -->
+                <RouterLink
+                  v-if="item.newTo && auth.canWrite"
+                  :to="item.newTo"
+                  :title="t('nav.quick_new')"
+                  :aria-label="t('nav.quick_new')"
+                  class="absolute right-1.5 top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-5 h-5 rounded-md text-neutral-400 hover:text-primary-700 hover:bg-primary-100 transition-all opacity-100 lg:opacity-0 lg:group-hover:opacity-100 focus:opacity-100"
+                >
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v8m4-4H8M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+                  </svg>
+                </RouterLink>
+              </div>
             </template>
           </template>
         </nav>
@@ -429,7 +569,7 @@ onMounted(async () => {
             </div>
             <a
               href="/manual" target="_blank" rel="noopener"
-              class="inline-flex w-9 h-9 items-center justify-center rounded-md text-neutral-600 hover:bg-white"
+              class="inline-flex w-9 h-9 items-center justify-center rounded-md text-neutral-600 hover:bg-surface"
               :title="t('nav.help')"
             >
               <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -437,8 +577,12 @@ onMounted(async () => {
               </svg>
             </a>
           </div>
+          <!-- Přepínač motivu (System / Light / Dark) — mobilní varianta -->
+          <div class="flex">
+            <ThemeToggle />
+          </div>
           <div class="flex items-center justify-between gap-3">
-            <div class="inline-flex items-center border border-neutral-200 bg-white rounded-md overflow-hidden">
+            <div class="inline-flex items-center border border-neutral-200 bg-surface rounded-md overflow-hidden">
               <button
                 @click="setLocale('cs')" title="Čeština"
                 class="cursor-pointer h-9 px-3 inline-flex items-center"
@@ -467,7 +611,7 @@ onMounted(async () => {
             </div>
             <button
               @click="logout"
-              class="cursor-pointer px-4 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-white"
+              class="cursor-pointer px-4 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface"
             >{{ t('nav.logout') }}</button>
           </div>
         </div>
@@ -490,6 +634,73 @@ onMounted(async () => {
             </svg>
             <span>GitHub</span>
           </a>
+          <span aria-hidden="true">·</span>
+          <button type="button" @click="supportOpen = true"
+                  class="cursor-pointer hover:text-neutral-700">{{ t('support.author_link') }}</button>
+          <span aria-hidden="true">·</span>
+          <button type="button" @click="featureOpen = true"
+                  class="cursor-pointer hover:text-neutral-700">{{ t('support.feature_link') }}</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- ── MODÁL: Podpora autora ── -->
+    <div v-if="supportOpen" class="fixed inset-0 bg-black/40 z-50 flex items-start justify-center p-4 overflow-y-auto"
+         @click.self="supportOpen = false">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full my-8">
+        <header class="px-5 py-4 border-b border-neutral-200 flex items-baseline justify-between gap-3">
+          <h3 class="text-lg font-semibold">{{ t('support.author_title') }}</h3>
+          <button @click="supportOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-700 text-2xl leading-none">&times;</button>
+        </header>
+        <div class="p-5 space-y-4 text-sm text-neutral-700">
+          <p>{{ t('support.author_intro') }}</p>
+          <dl class="space-y-1.5">
+            <div class="flex flex-wrap gap-x-2">
+              <dt class="text-neutral-500 w-28 shrink-0">{{ t('support.account') }}</dt>
+              <dd class="font-medium">7700000038 / 6363 <span class="text-neutral-400 font-normal">({{ t('support.bank_name') }})</span></dd>
+            </div>
+            <div class="flex flex-wrap gap-x-2">
+              <dt class="text-neutral-500 w-28 shrink-0">{{ t('support.iban') }}</dt>
+              <dd class="font-medium">CZ21 6363 0000 0077 0000 0038</dd>
+            </div>
+            <div class="flex flex-wrap gap-x-2">
+              <dt class="text-neutral-500 w-28 shrink-0">{{ t('support.bic') }}</dt>
+              <dd class="font-medium">PTBNCZPP</dd>
+            </div>
+          </dl>
+          <div>
+            <p class="mb-2">{{ t('support.qr_hint') }}</p>
+            <img src="/manual/donate/qrcode.jpg" :alt="t('support.author_title')"
+                 class="w-full h-auto rounded-md border border-neutral-200"
+                 style="filter: brightness(1.08);" />
+          </div>
+        </div>
+        <footer class="px-5 py-4 border-t border-neutral-200 flex justify-end">
+          <button @click="supportOpen = false"
+                  class="cursor-pointer px-4 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface">{{ t('support.close') }}</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- ── MODÁL: Chcete jinou funkci? ── -->
+    <div v-if="featureOpen" class="fixed inset-0 bg-black/40 z-50 flex items-start justify-center p-4 overflow-y-auto"
+         @click.self="featureOpen = false">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full my-8">
+        <header class="px-5 py-4 border-b border-neutral-200 flex items-baseline justify-between gap-3">
+          <h3 class="text-lg font-semibold">{{ t('support.feature_title') }}</h3>
+          <button @click="featureOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-700 text-2xl leading-none">&times;</button>
+        </header>
+        <div class="p-5 space-y-3 text-sm text-neutral-700">
+          <p>{{ t('support.feature_intro') }}</p>
+          <p>{{ t('support.feature_text') }}</p>
+          <p class="rounded-md bg-primary-50 border border-primary-500/30 text-primary-800 font-medium px-3 py-2.5">{{ t('support.feature_text2') }}</p>
+          <p class="text-xs text-neutral-500 border-t border-neutral-200 pt-3">{{ t('support.feature_highlights') }}</p>
+        </div>
+        <footer class="px-5 py-4 border-t border-neutral-200 flex justify-end gap-2">
+          <button @click="featureOpen = false"
+                  class="cursor-pointer px-4 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface">{{ t('support.close') }}</button>
+          <a href="https://mywebdesign.cz/#kontakt" target="_blank" rel="noopener" @click="featureOpen = false"
+             class="cursor-pointer px-4 h-9 inline-flex items-center text-sm rounded-md bg-primary-600 hover:bg-primary-700 text-white font-medium">{{ t('support.feature_cta') }}</a>
         </footer>
       </div>
     </div>

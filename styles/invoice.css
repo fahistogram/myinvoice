@@ -38,6 +38,21 @@ body {
 .head td { vertical-align: middle; padding-bottom: 4mm; }
 td.logo { width: 55%; }
 td.logo img { max-width: 60mm; max-height: 20mm; }
+/* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name) — název je SOUSEDNÍ buňka
+   .head tabulky, ne vnořená tabulka (ta v mPDF rozbíjela border-collapse spodní čáru).
+   Logo-cell se zúží na obsah (width:1%) + padding-right = mezera k názvu. */
+/* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name): dvě sousední buňky .head,
+   žádná vnořená tabulka (ta v mPDF mazala spodní čáru hlavičky). Mezeru dělá pevná
+   šířka buňky loga — mPDF na buňce respektuje `width`, ne padding. */
+td.logo-img-cell { width: 14mm; }
+td.logo-img-cell img { max-width: 13mm; max-height: 18mm; }
+td.logo-name {
+    white-space: nowrap;
+    font-size: 14pt;
+    font-weight: bold;
+    color: #15131D;
+    line-height: 1.2;
+}
 td.meta { width: 45%; text-align: right; }
 .brand-name {
     font-size: 16pt;

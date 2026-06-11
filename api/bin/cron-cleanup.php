@@ -71,6 +71,37 @@ if (is_dir($logDir)) {
 }
 $report['log_files'] = $logDeleted;
 
+// 6) Měsíční exporty — smaž dokončené/neúspěšné/zrušené joby starší 7 dní
+//    vč. jejich ZIP souboru (retence: do ručního smazání, jinak reaper po 7 dnech).
+$exportBase = ($config->dataDir() ?? $rootDir) . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'monthly-exports';
+$stmt = $pdo->query(
+    "SELECT id, result_path FROM import_jobs
+      WHERE source = 'monthly_export'
+        AND status IN ('completed', 'failed', 'cancelled')
+        AND COALESCE(finished_at, created_at) < NOW() - INTERVAL 7 DAY"
+);
+$exportRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$exportFilesDeleted = 0;
+$exportIds = [];
+foreach ($exportRows as $r) {
+    $exportIds[] = (int) $r['id'];
+    $rel = (string) ($r['result_path'] ?? '');
+    if ($rel === '') continue;
+    $abs = realpath($exportBase . DIRECTORY_SEPARATOR . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $rel));
+    $baseReal = realpath($exportBase);
+    // Path-traversal guard — maž jen v rámci storage/monthly-exports.
+    if ($abs !== false && $baseReal !== false && is_file($abs)
+        && str_starts_with(strtolower($abs), strtolower($baseReal) . DIRECTORY_SEPARATOR)) {
+        if (@unlink($abs)) $exportFilesDeleted++;
+    }
+}
+if ($exportIds !== []) {
+    $in = implode(',', array_fill(0, count($exportIds), '?'));
+    $pdo->prepare("DELETE FROM import_jobs WHERE id IN ($in)")->execute($exportIds);
+}
+$report['monthly_export_jobs']  = count($exportIds);
+$report['monthly_export_files'] = $exportFilesDeleted;
+
 // Pročisti cron_runs — drž max 500 posledních záznamů na skript.
 $report['cron_runs_purged'] = CronRun::purgeOld($pdo, 500);
 

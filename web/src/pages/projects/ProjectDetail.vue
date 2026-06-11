@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -27,6 +28,18 @@ const invoicesPage = ref(1)
 const invoicesPages = ref(1)
 
 const canDelete = computed(() => (project.value?.invoices_count ?? 0) === 0)
+
+// Splatnost s jednotkou: měsíc → „Měsíc" / „N× měsíc", jinak „N dní".
+const dueLabel = computed(() => {
+  const p = project.value
+  if (!p) return ''
+  if (p.payment_due_unit === 'month') {
+    return p.payment_due_days === 1
+      ? t('project.payment_due_preset_month')
+      : `${p.payment_due_days}× ${t('project.payment_due_preset_month').toLowerCase()}`
+  }
+  return `${p.payment_due_days} ${t('common.days')}`
+})
 
 // Pro graf: primární měna = nejčastější v datech, fallback default zakázky
 const primaryCurrency = computed(() => {
@@ -112,8 +125,8 @@ async function deleteProject() {
         <div class="text-sm text-neutral-500 mt-1 flex items-center gap-2 flex-wrap">
           <span class="text-xs px-2 py-0.5 rounded"
             :class="{
-              'bg-emerald-50 text-emerald-700': project.status === 'active',
-              'bg-amber-50 text-amber-700': project.status === 'paused',
+              'bg-success-50 text-success-600': project.status === 'active',
+              'bg-warning-50 text-warning-600': project.status === 'paused',
               'bg-neutral-100 text-neutral-600': project.status === 'closed',
             }">{{ project.status }}</span>
           <span v-if="project.project_number" class="font-mono text-xs">{{ project.project_number }}</span>
@@ -125,16 +138,16 @@ async function deleteProject() {
         </div>
       </div>
       <div class="flex flex-wrap gap-2 md:justify-end">
+        <RouterLink v-if="auth.canWrite" :to="`/projects/${project.id}/edit`"
+          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+          {{ t('project.edit_project') }}
+        </RouterLink>
         <RouterLink v-if="(project.status === 'active') && auth.canWrite"
           :to="`/invoices/new?client_id=${project.client_id}&project_id=${project.id}`"
           class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
           {{ t('project.new_invoice') }}
-        </RouterLink>
-        <RouterLink v-if="auth.canWrite" :to="`/projects/${project.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('project.edit_project') }}
         </RouterLink>
         <RouterLink v-if="auth.canWrite" :to="`/clients/${project.client_id}/edit`"
           class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50 inline-flex items-center gap-1.5">
@@ -155,16 +168,16 @@ async function deleteProject() {
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('project.rates_due_section') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('project.hourly_rate') }}</dt><dd class="font-mono">{{ project.hourly_rate.toLocaleString('cs') }} {{ project.currency }}</dd></div>
-          <div class="flex justify-between"><dt class="text-neutral-500">{{ t('project.due_short') }}</dt><dd>{{ project.payment_due_days }} {{ t('common.days') }}</dd></div>
+          <div class="flex justify-between"><dt class="text-neutral-500">{{ t('project.due_short') }}</dt><dd>{{ dueLabel }}</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('common.currency') }}</dt><dd class="font-mono">{{ project.currency }}</dd></div>
         </dl>
       </div>
 
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('common.budgets') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('project.budget_total_short') }}</dt><dd class="font-mono">{{ project.budget_total?.toLocaleString('cs') ?? '—' }}</dd></div>
@@ -173,7 +186,7 @@ async function deleteProject() {
         </dl>
       </div>
 
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('project.reference_section') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('project.project_number') }}</dt><dd class="font-mono">{{ project.project_number || '—' }}</dd></div>
@@ -182,25 +195,37 @@ async function deleteProject() {
       </div>
     </div>
 
-    <div v-if="project.billing_emails.length" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="project.billing_emails.length" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('project.billing_emails') }}</h3>
       <ul class="space-y-1.5 text-sm">
-        <li v-for="b in project.billing_emails" :key="b.position" class="flex items-center justify-between border-b border-neutral-100 pb-1.5 last:border-b-0">
-          <span class="text-neutral-900">{{ b.email }}</span>
-          <span class="text-xs text-neutral-500">{{ b.label || '—' }}</span>
+        <li v-for="b in project.billing_emails" :key="b.position" class="flex items-center justify-between gap-2 flex-wrap border-b border-neutral-100 pb-1.5 last:border-b-0">
+          <span class="text-neutral-900 break-all">{{ b.email }}</span>
+          <span class="flex items-center gap-1.5 flex-wrap">
+            <!-- Účely (#86): prázdné/null = všechny typy zpráv -->
+            <template v-if="b.usages?.length">
+              <span v-for="u in b.usages" :key="u"
+                class="inline-flex px-1.5 py-0.5 rounded-full bg-primary-50 border border-primary-200 text-primary-700 text-[11px]">
+                {{ t(`client.email_contacts.usage.${u}`) }}
+              </span>
+            </template>
+            <span v-else class="inline-flex px-1.5 py-0.5 rounded-full bg-neutral-100 border border-neutral-200 text-neutral-500 text-[11px]">
+              {{ t('project.billing_email_all_usages') }}
+            </span>
+            <span class="text-xs text-neutral-500">{{ b.label || '—' }}</span>
+          </span>
         </li>
       </ul>
       <p class="text-xs text-neutral-400 mt-2">{{ t('project.client_main_email_note', { email: project.client_main_email }) }}</p>
     </div>
 
-    <div v-if="project.note" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="project.note" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-2">{{ t('project.note') }}</h3>
       <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ project.note }}</p>
     </div>
 
     <!-- KPI: nezaplaceno + po splatnosti -->
     <div v-if="(project.unpaid_summary?.length ?? 0) > 0" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.unpaid') }}</h3>
         <div class="space-y-1">
           <div v-for="u in project.unpaid_summary || []" :key="`u-${u.currency}`" class="flex items-baseline justify-between">
@@ -209,7 +234,7 @@ async function deleteProject() {
           </div>
         </div>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm" :class="overdueAny ? 'border-danger-500/40' : ''">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm" :class="overdueAny ? 'border-danger-500/40' : ''">
         <h3 class="text-sm font-semibold uppercase tracking-wide mb-3" :class="overdueAny ? 'text-danger-500' : 'text-neutral-500'">{{ t('client.overdue') }}</h3>
         <div class="space-y-1">
           <div v-for="u in project.unpaid_summary || []" :key="`o-${u.currency}`" class="flex items-baseline justify-between">
@@ -222,14 +247,14 @@ async function deleteProject() {
 
     <!-- Obrat: graf po měsících + sumace po letech -->
     <div v-if="(project.revenue_by_month?.length ?? 0) > 0" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="md:col-span-2 bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="md:col-span-2 bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-baseline justify-between mb-3">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.revenue_by_month') }}</h3>
           <span class="text-xs font-mono text-neutral-500">{{ primaryCurrency }}</span>
         </div>
         <MonthlyRevenueChart :labels="monthlyChart.labels" :values="monthlyChart.values" :currency="primaryCurrency" />
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.revenue_by_year') }}</h3>
         <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -246,7 +271,7 @@ async function deleteProject() {
     </div>
 
     <!-- Faktury -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="font-semibold">{{ t('nav.invoices') }} <span v-if="invoicesTotal" class="text-neutral-400 font-normal">({{ invoicesTotal }})</span></h3>
         <RouterLink v-if="(project.status === 'active') && auth.canWrite"
@@ -334,5 +359,6 @@ async function deleteProject() {
         </button>
       </div>
     </div>
+    <LinkedDocumentsPanel v-if="project" class="mt-4 block" entity-type="project" :entity-id="project.id" />
   </div>
 </template>

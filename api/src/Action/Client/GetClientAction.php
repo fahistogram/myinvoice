@@ -7,6 +7,7 @@ namespace MyInvoice\Action\Client;
 use MyInvoice\Http\Json;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Repository\ClientEmailContactRepository;
 use MyInvoice\Repository\ClientRepository;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -16,6 +17,7 @@ final class GetClientAction
     public function __construct(
         private readonly ClientRepository $repo,
         private readonly Connection $db,
+        private readonly ClientEmailContactRepository $emailContacts,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -27,6 +29,7 @@ final class GetClientAction
             return Json::error($response, 'not_found', 'Klient nenalezen.', 404);
         }
         $client['projects'] = $this->repo->projectsForClient($id);
+        $client['email_contacts'] = $this->emailContacts->listForClient($id, $sid);
         $pdo = $this->db->pdo();
         $stmt = $pdo->prepare('SELECT COUNT(*) FROM invoices WHERE client_id = ?');
         $stmt->execute([$id]);
@@ -145,6 +148,9 @@ final class GetClientAction
               WHERE i.client_id = ?
                 AND i.status IN ('issued','sent','reminded')
                 AND i.invoice_type IN ('invoice','credit_note')
+                -- Finální doklad k zaplacené proformě má amount_to_pay = 0 by design;
+                -- není pohledávka (dobropisy se záporným totálem ponecháváme).
+                AND (i.invoice_type NOT IN ('invoice','proforma') OR i.amount_to_pay > 0)
               GROUP BY cur.code"
         );
         $stmtU->execute([$id]);
@@ -154,6 +160,9 @@ final class GetClientAction
         // (cfg.php nastavení) ukazoval jen 3 z 11 faktur pro rok 2024.
         //
         // Pravidla: total_with_vat (jak jsme platili), vyloučit draft/cancelled.
+        // Spárované/zaplacené zálohy (advance) vyřazujeme — náklad nese vyúčtovací
+        // faktura, jinak by se započítaly 2× (shoda s CRM sp_recompute_crm_monthly_summary
+        // a CrmAggregationService::topVendors).
         // total_czk přes pi.exchange_rate (CZK fakturám necháme 1 přes COALESCE).
         $stmtCM = $pdo->prepare(
             "SELECT DATE_FORMAT(pi.issue_date, '%Y-%m') AS month,
@@ -165,6 +174,10 @@ final class GetClientAction
               WHERE pi.vendor_id = ?
                 AND pi.supplier_id = ?
                 AND pi.status NOT IN ('draft', 'cancelled')
+                AND NOT (COALESCE(pi.document_kind, '') = 'advance'
+                         AND (pi.status = 'paid'
+                              OR EXISTS (SELECT 1 FROM purchase_invoices adv_s
+                                          WHERE adv_s.advance_purchase_invoice_id = pi.id)))
                 AND pi.issue_date >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)
               GROUP BY month, cur.code
               ORDER BY month"
@@ -191,6 +204,10 @@ final class GetClientAction
               WHERE pi.vendor_id = ?
                 AND pi.supplier_id = ?
                 AND pi.status NOT IN ('draft', 'cancelled')
+                AND NOT (COALESCE(pi.document_kind, '') = 'advance'
+                         AND (pi.status = 'paid'
+                              OR EXISTS (SELECT 1 FROM purchase_invoices adv_s
+                                          WHERE adv_s.advance_purchase_invoice_id = pi.id)))
               GROUP BY year, cur.code
               ORDER BY year DESC"
         );

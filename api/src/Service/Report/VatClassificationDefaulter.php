@@ -30,7 +30,8 @@ final class VatClassificationDefaulter
     /** Hard-coded fallback (matchne seed v migrace 0037 pro CZ 2025-2026 sazby) */
     private const FALLBACK_SALE_TUZEMSKO    = ['21.0' => '1',  '12.0' => '2',  '0.0' => '3'];
     private const FALLBACK_PURCHASE_TUZEMSKO = ['21.0' => '40', '12.0' => '41', '0.0' => '42'];
-    private const FALLBACK_SALE_REVERSE      = '20';
+    private const FALLBACK_SALE_REVERSE_EU       = '20';   // RC + EU odběratel = dodání do JČS → ř.20 (dod_zb)
+    private const FALLBACK_SALE_REVERSE_DOMESTIC = '25s';  // RC + tuzemský odběratel = §92a dodavatel → ř.25 (pln_rez_pren), KH A.1
     private const FALLBACK_PURCHASE_REVERSE  = '5';
 
     /** @var array<string, string>|null In-memory cache code→cache key (per request) */
@@ -49,10 +50,15 @@ final class VatClassificationDefaulter
      * `$supplierId` (volitelné, default 0 = jen globální) — multi-tenant scope.
      * Volej s tenant ID aby tenant viděl své custom kódy ELL.GLOBÁLNÍ; ne kódy jiných tenantů.
      */
-    public function defaultForSale(float $vatRate, bool $reverseCharge = false, ?string $taxDate = null, int $supplierId = 0): string
+    public function defaultForSale(float $vatRate, bool $reverseCharge = false, ?string $taxDate = null, int $supplierId = 0, bool $customerEuForeign = false): string
     {
-        return $this->lookup('sale', $vatRate, $reverseCharge, $taxDate, $supplierId)
-            ?? ($reverseCharge ? self::FALLBACK_SALE_REVERSE : $this->byRateFallback($vatRate, self::FALLBACK_SALE_TUZEMSKO));
+        if ($reverseCharge) {
+            // Tuzemský §92a dodavatel → '25s' (ř.25); dodání do JČS (zahraniční EU odběratel) → '20' (ř.20).
+            return $this->lookup('sale', $vatRate, true, $taxDate, $supplierId)
+                ?? ($customerEuForeign ? self::FALLBACK_SALE_REVERSE_EU : self::FALLBACK_SALE_REVERSE_DOMESTIC);
+        }
+        return $this->lookup('sale', $vatRate, false, $taxDate, $supplierId)
+            ?? $this->byRateFallback($vatRate, self::FALLBACK_SALE_TUZEMSKO);
     }
 
     /**
@@ -138,7 +144,7 @@ final class VatClassificationDefaulter
      *
      * @param list<array{vat_rate?:float, total_with_vat?:float}> $items
      */
-    public function suggestHeaderForInvoice(array $items, bool $reverseCharge, string $direction, ?string $taxDate = null, int $supplierId = 0): string
+    public function suggestHeaderForInvoice(array $items, bool $reverseCharge, string $direction, ?string $taxDate = null, int $supplierId = 0, bool $customerEuForeign = false): string
     {
         // Najdi dominantní sazbu (s největší totální částkou)
         $byRate = [];
@@ -154,7 +160,7 @@ final class VatClassificationDefaulter
             $dominantRate = (float) array_key_first($byRate);
         }
         return $direction === 'sale'
-            ? $this->defaultForSale($dominantRate, $reverseCharge, $taxDate, $supplierId)
+            ? $this->defaultForSale($dominantRate, $reverseCharge, $taxDate, $supplierId, $customerEuForeign)
             : $this->defaultForPurchase($dominantRate, $reverseCharge, $taxDate, $supplierId);
     }
 }

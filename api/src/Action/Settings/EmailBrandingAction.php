@@ -69,7 +69,7 @@ final class EmailBrandingAction
         // Move do dočasné cesty pro zpracování
         $tmpDir = sys_get_temp_dir();
         if (!is_writable($tmpDir)) {
-            $tmpDir = Bootstrap::rootDir() . '/storage/supplier-logos';
+            $tmpDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos');
             if (!is_dir($tmpDir)) @mkdir($tmpDir, 0755, true);
         }
         $tmpPath = $tmpDir . '/.upload-' . bin2hex(random_bytes(8));
@@ -182,6 +182,10 @@ final class EmailBrandingAction
             'email_accent_color'     => (string) ($row['email_accent_color'] ?: '#3B2D83'),
             'logo_path'              => $row['logo_path'] ?: null,
         ];
+        $supplier['accent_soft'] = \MyInvoice\Service\Branding\AccentColor::emailBackground(
+            $supplier['email_branding_enabled'],
+            $supplier['email_accent_color'],
+        );
 
         // Pro preview embedneme logo jako data: URI (klient ho vidí přímo v iframe).
         // + spočítáme display rozměry pro HTML width/height (CSS max-height email
@@ -226,7 +230,7 @@ final class EmailBrandingAction
 {% block content %}
 <p>Hello,</p>
 <p>Please find attached invoice <strong>2026005</strong>.</p>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border:1px solid #E5E0F4;border-radius:8px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:{{ accent_soft }};border:1px solid #E5E0F4;border-radius:8px;">
   <tr><td style="padding:16px 20px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
       <tr><td style="padding:4px 0;color:#7A748C;">Due date</td><td style="padding:4px 0;font-weight:600;text-align:right;">2026-05-21</td></tr>
@@ -246,7 +250,7 @@ TWIG
 {% block content %}
 <p>Dobrý den,</p>
 <p>v příloze posíláme fakturu <strong>2026005</strong>.</p>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border:1px solid #E5E0F4;border-radius:8px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:{{ accent_soft }};border:1px solid #E5E0F4;border-radius:8px;">
   <tr><td style="padding:16px 20px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
       <tr><td style="padding:4px 0;color:#7A748C;">Splatnost</td><td style="padding:4px 0;font-weight:600;text-align:right;">21.05.2026</td></tr>

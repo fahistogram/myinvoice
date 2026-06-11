@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { reportsApi } from '@/api/reports'
 import { apiErrorMessage } from '@/api/errors'
 import { formatMoney } from '@/composables/useFormat'
 import { useYearOptions } from '@/composables/useYearOptions'
+import { useSupplierStore } from '@/stores/supplier'
 
 const { t } = useI18n()
+const supplierStore = useSupplierStore()
 
 const now = new Date()
 const year = ref(now.getFullYear() - 1) // typicky podáváme za uplynulý rok
-const taxpayerType = ref<'fo' | 'po'>('fo')
+// Typ poplatníka se NEPŘEPÍNÁ — odvozuje se z dodavatele (OSVČ → DPFO, s.r.o. → DPPO).
+const taxpayerType = computed<'fo' | 'po'>(() => supplierStore.currentSupplier?.taxpayer_type === 'po' ? 'po' : 'fo')
 
 const preview = ref<Awaited<ReturnType<typeof reportsApi.incomeTaxPreview>> | null>(null)
 const loading = ref(false)
@@ -30,6 +33,29 @@ async function loadPreview() {
 
 function downloadXml() {
   window.open(reportsApi.incomeTaxDownloadUrl(year.value, taxpayerType.value), '_blank')
+}
+
+// CSV podklad pro daňové přiznání (DP1) — orientační čísla z přehledu (klient-side).
+function exportCsv() {
+  if (!preview.value) return
+  const s = preview.value.summary
+  const rows: Array<[string, string | number]> = [
+    [t('reports.income_tax.csv_year'), s.year],
+    [t('reports.income_tax.csv_type'), s.taxpayer_type === 'po' ? 'DPPO' : 'DPFO'],
+    [t('reports.income_tax.revenue_orientacni'), s.revenue_orientacni],
+    [t('reports.income_tax.costs_orientacni'), s.costs_orientacni],
+    [t('reports.income_tax.profit_orientacni'), s.profit_orientacni],
+    [t('reports.income_tax.csv_vat'), s.is_vat_payer ? t('common.yes') : t('common.no')],
+    [t('reports.dph.deadline'), s.submission_deadline],
+  ]
+  const csv = '﻿' + rows.map(([k, v]) =>
+    `"${String(k).replace(/"/g, '""')}";"${String(v).replace(/"/g, '""')}"`).join('\r\n')
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `dan-z-prijmu-${s.taxpayer_type}-${s.year}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 // Distinct roky z dat (issue #33) — typicky se podává za uplynulý rok, ale
@@ -63,17 +89,19 @@ onMounted(loadPreview)
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('reports.income_tax.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2">
-        <div class="flex rounded-md border border-neutral-300 overflow-hidden text-sm">
-          <button type="button" @click="taxpayerType = 'fo'"
-            :class="taxpayerType === 'fo' ? 'bg-primary-600 text-white' : 'bg-white text-neutral-700 hover:bg-neutral-50'"
-            class="px-3 h-9 cursor-pointer">DPFO</button>
-          <button type="button" @click="taxpayerType = 'po'"
-            :class="taxpayerType === 'po' ? 'bg-primary-600 text-white' : 'bg-white text-neutral-700 hover:bg-neutral-50'"
-            class="px-3 h-9 cursor-pointer border-l border-neutral-300">DPPO</button>
-        </div>
-        <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <!-- Typ poplatníka odvozen z dodavatele (nastav v Nastavení), nepřepíná se. -->
+        <span class="px-3 h-9 inline-flex items-center rounded-md border border-neutral-300 bg-neutral-50 text-sm font-medium text-neutral-700"
+          :title="t('reports.income_tax.type_from_supplier')">
+          {{ taxpayerType === 'po' ? 'DPPO' : 'DPFO' }}
+        </span>
+        <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
         </select>
+        <button type="button" @click="exportCsv" :disabled="loading || !preview"
+          class="cursor-pointer h-9 px-3 border border-neutral-300 bg-surface hover:bg-neutral-50 disabled:opacity-50 text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          {{ t('reports.income_tax.export_csv') }}
+        </button>
         <button type="button" @click="downloadXml" :disabled="loading || !preview"
           class="cursor-pointer h-9 px-4 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
@@ -82,7 +110,7 @@ onMounted(loadPreview)
       </div>
     </div>
 
-    <div v-if="loading" class="bg-white border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">{{ t('common.loading') }}…</div>
+    <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">{{ t('common.loading') }}…</div>
     <div v-else-if="error" class="bg-danger-50 border border-danger-500/40 text-danger-500 rounded-md p-3 text-sm">{{ error }}</div>
 
     <div v-else-if="preview" class="space-y-4">
@@ -96,7 +124,7 @@ onMounted(loadPreview)
 
       <!-- Orientační čísla -->
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">{{ t('reports.income_tax.revenue_orientacni') }}</div>
           <div class="text-xl font-bold font-mono text-neutral-900">
             {{ formatMoney(preview.summary.revenue_orientacni, 'CZK') }}
@@ -105,8 +133,11 @@ onMounted(loadPreview)
             {{ t('reports.income_tax.revenue_hint') }} ·
             {{ preview.summary.is_vat_payer ? t('reports.income_tax.vat_base_excl') : t('reports.income_tax.vat_base_incl') }}
           </div>
+          <div v-if="(preview.summary.exempt_revenue_orientacni ?? 0) > 0" class="text-xs text-amber-700 mt-1">
+            {{ t('reports.income_tax.exempt_revenue_orientacni') }}: {{ formatMoney(preview.summary.exempt_revenue_orientacni, 'CZK') }}
+          </div>
         </div>
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">{{ t('reports.income_tax.costs_orientacni') }}</div>
           <div class="text-xl font-bold font-mono text-neutral-900">
             {{ formatMoney(preview.summary.costs_orientacni, 'CZK') }}
@@ -116,7 +147,7 @@ onMounted(loadPreview)
             {{ preview.summary.is_vat_payer ? t('reports.income_tax.vat_base_excl') : t('reports.income_tax.vat_base_incl') }}
           </div>
         </div>
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">{{ t('reports.income_tax.profit_orientacni') }}</div>
           <div class="text-xl font-bold font-mono"
             :class="preview.summary.profit_orientacni >= 0 ? 'text-success-600' : 'text-danger-500'">
@@ -124,7 +155,7 @@ onMounted(loadPreview)
           </div>
           <div class="text-xs text-neutral-500 mt-1">{{ t('reports.income_tax.profit_hint') }}</div>
         </div>
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">{{ t('reports.dph.deadline') }}</div>
           <div class="text-xl font-bold font-mono text-neutral-900">
             {{ preview.summary.submission_deadline }}

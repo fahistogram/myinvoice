@@ -72,7 +72,7 @@ export function statusBadgeClass(status: string): string {
   const classes: Record<string, string> = {
     draft:     'bg-neutral-100 text-neutral-600',
     issued:    'bg-primary-100 text-primary-700',
-    sent:      'bg-accent-100 text-accent-600',
+    sent:      'bg-teal-50 text-teal-600',
     reminded:  'bg-warning-50 text-warning-600',
     paid:      'bg-success-50 text-success-600',
     cancelled: 'bg-neutral-100 text-neutral-400',

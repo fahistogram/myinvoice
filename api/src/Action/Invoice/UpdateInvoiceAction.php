@@ -22,6 +22,8 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 
 final class UpdateInvoiceAction
 {
+    use HandlesVarsymbolDuplicate;
+
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly InvoiceDefaults $defaults,
@@ -58,9 +60,14 @@ final class UpdateInvoiceAction
         }
 
         $body = (array) ($request->getParsedBody() ?? []);
-        // Type a parent_invoice_id se nemění při update
-        $body['invoice_type']      = $existing['invoice_type'];
+        // parent_invoice_id se nikdy nemění při update (vazba dobropisu na původní doklad).
         $body['parent_invoice_id'] = $existing['parent_invoice_id'];
+        // Typ: u VYSTAVENÉ faktury je immutable (číslo + auditní stopa). U DRAFTu ho lze přepnout
+        // (faktura ↔ proforma ↔ dobropis), ale nikdy ne na storno/cancellation.
+        if ($existing['status'] !== 'draft'
+            || !in_array((string) ($body['invoice_type'] ?? ''), ['invoice', 'proforma', 'credit_note'], true)) {
+            $body['invoice_type'] = $existing['invoice_type'];
+        }
         // Varsymbol lze měnit jen u draftu — vystavená faktura má číslo immutable
         // (součást snapshotu pro účetní evidenci a PDF). Force=1 admin override
         // ho neodemyká — pokud chce změnit číslo, musí vytvořit dobropis nebo storno.
@@ -81,7 +88,14 @@ final class UpdateInvoiceAction
         // Auto-default VAT klasifikace pokud user nezadal (s multi-tenant scope)
         $this->applyVatClassificationDefaults($body, \MyInvoice\Http\SupplierGuard::currentId($request));
 
-        $this->repo->updateDraft($id, $body);
+        try {
+            $this->repo->updateDraft($id, $body);
+        } catch (\PDOException $e) {
+            if ($dupMsg = self::varsymbolDuplicateMessage($e, $body['varsymbol'] ?? null)) {
+                return Json::error($response, 'varsymbol_duplicate', $dupMsg, 409);
+            }
+            throw $e;
+        }
         $this->repo->replaceItems($id, (array) ($body['items'] ?? []));
         $this->calc->recompute($id);
 
@@ -133,6 +147,10 @@ final class UpdateInvoiceAction
     {
         $vatRates = $this->repo->vatRateMap();
         $reverseCharge = !empty($body['reverse_charge']);
+        // Country-aware RC: tuzemský odběratel → §92a (ř.25), zahraniční EU → dodání do JČS (ř.20).
+        $customerEuForeign = $reverseCharge
+            && (int) ($body['client_id'] ?? 0) > 0
+            && $this->repo->clientIsEuForeign((int) $body['client_id']);
 
         if (!empty($body['items']) && is_array($body['items'])) {
             foreach ($body['items'] as &$item) {
@@ -140,7 +158,7 @@ final class UpdateInvoiceAction
                 $rateId = (int) ($item['vat_rate_id'] ?? 0);
                 $rate = (float) ($vatRates[$rateId] ?? 0);
                 $taxDate = $body['tax_date'] ?? $body['issue_date'] ?? null;
-                $item['vat_classification_code'] = $this->vatDefaulter->defaultForSale($rate, $reverseCharge, $taxDate, $supplierId);
+                $item['vat_classification_code'] = $this->vatDefaulter->defaultForSale($rate, $reverseCharge, $taxDate, $supplierId, $customerEuForeign);
             }
             unset($item);
         }
@@ -159,6 +177,7 @@ final class UpdateInvoiceAction
                 'sale',
                 $body['tax_date'] ?? $body['issue_date'] ?? null,
                 $supplierId,
+                $customerEuForeign,
             );
         }
     }

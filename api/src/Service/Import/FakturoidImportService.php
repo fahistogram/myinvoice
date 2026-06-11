@@ -12,6 +12,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\PurchaseInvoiceRepository;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\PurchaseInvoiceCalculator;
+use MyInvoice\Service\Invoice\SnapshotBuilder;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -30,6 +31,10 @@ use Psr\Log\LoggerInterface;
  *   - Invoice má `subject_id` (foreign key) + `lines` (items array)
  *   - Lines: { name, quantity, unit_name, unit_price, vat_rate }
  *   - Subject type: "customer" | "supplier" | "both" → role mapping
+ *
+ * Platební stav (#121): doklady se zakládají jako draft, ale `status` z Fakturoidu
+ * 'paid'/'cancelled' se promítne hned při importu (paid_at = `paid_on`) — viz
+ * ImportedPaymentStateMapper. Ostatní stavy zůstávají draft (review flow).
  */
 final class FakturoidImportService
 {
@@ -47,6 +52,7 @@ final class FakturoidImportService
         private readonly Config $config,
         private readonly LoggerInterface $logger,
         private readonly PurchaseInvoiceCnbApplier $cnbApplier,
+        private readonly SnapshotBuilder $snapshots,
     ) {}
 
     public function run(int $jobId): void
@@ -240,12 +246,13 @@ final class FakturoidImportService
             'currency_id'    => $this->resolveCurrencyId((string) ($i['currency'] ?? 'CZK'), $supplierId, isActive: true),
             'reverse_charge' => !empty($i['transferred_tax_liability']),
             'language'       => 'cs',
-            'varsymbol'      => $this->sanitizeVarsymbol((string) ($i['variable_symbol'] ?? $i['number'] ?? '')),
+            'varsymbol'      => $this->uniqueVarsymbol((string) ($i['variable_symbol'] ?? $i['number'] ?? ''), $supplierId),
             'payment_method' => 'bank_transfer',
         ];
         $invoiceId = $this->invoices->createDraft($payload, $userId);
 
         $vatRates = $this->loadVatRateMap();
+        $defaultVatRateId = $this->matchVatRateId($vatRates, 21.0) ?? $this->matchVatRateId($vatRates, 0.0) ?? 0;
         $items = [];
         foreach (($i['lines'] ?? []) as $idx => $line) {
             $rate = (float) ($line['vat_rate'] ?? 0);
@@ -254,12 +261,82 @@ final class FakturoidImportService
                 'quantity'               => (float) ($line['quantity'] ?? 1),
                 'unit'                   => (string) ($line['unit_name'] ?? 'ks'),
                 'unit_price_without_vat' => (float) ($line['unit_price'] ?? 0),
-                'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate),
+                'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId,
                 'order_index'            => $idx,
             ];
         }
         if (!empty($items)) $this->invoices->replaceItems($invoiceId, $items);
+
+        // #121: promítni platební stav z Fakturoidu — zaplacené/stornované doklady
+        // nesmí zůstat viset jako nezaplacené pohledávky (a chytat upomínky).
+        $this->applyIssuedPaymentState(
+            $invoiceId,
+            $clientId,
+            (int) $payload['currency_id'],
+            $supplierId,
+            ImportedPaymentStateMapper::fromFakturoid($i),
+            (string) ($payload['tax_date'] ?? '') ?: (string) $payload['issue_date'],
+            (string) $payload['issue_date'],
+        );
         return $invoiceId;
+    }
+
+    /**
+     * Aplikuje namapovaný platební stav na čerstvě importovanou vydanou fakturu
+     * (issue #121). Jen pro doklady ve stavu 'draft' (guard v WHERE) — existující
+     * doklady, které už uživatel zpracoval, se nemění.
+     *
+     * Doklad opouští 'draft', proto dostává snapshoty (client/supplier/bank)
+     * stejně jako file import (InvoiceImportService) a IssueInvoiceAction —
+     * vystavené doklady musí mít zafixované údaje. sent_at = issue_date 12:00
+     * (stejná aproximace jako file import). Storno bez mirror `cancellation`
+     * záznamu — originál byl stornován už ve zdrojovém systému, interní storno
+     * doklad by tu byl jen šum.
+     *
+     * @param ?array{status:string, paid_at:?string} $state  null = ponechat draft
+     */
+    private function applyIssuedPaymentState(int $invoiceId, int $clientId, int $currencyId, int $supplierId, ?array $state, string $fallbackPaidAt, string $issueDate): void
+    {
+        if ($state === null) return;
+
+        $snapshots = $this->snapshots->build($clientId, $currencyId, $supplierId);
+
+        $snapshotSql = 'client_snapshot = ?, supplier_snapshot = ?, bank_snapshot = ?';
+        $snapshotParams = [
+            json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
+            json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
+            $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
+        ];
+
+        if ($state['status'] === 'paid') {
+            $this->db->pdo()->prepare(
+                "UPDATE invoices SET status = 'paid', paid_at = ?, sent_at = ?, {$snapshotSql}
+                  WHERE id = ? AND status = 'draft'"
+            )->execute(array_merge(
+                [$state['paid_at'] ?? $fallbackPaidAt, $issueDate . ' 12:00:00'],
+                $snapshotParams,
+                [$invoiceId],
+            ));
+        } elseif ($state['status'] === 'cancelled') {
+            $this->db->pdo()->prepare(
+                "UPDATE invoices SET status = 'cancelled', cancelled_at = NOW(), {$snapshotSql}
+                  WHERE id = ? AND status = 'draft'"
+            )->execute(array_merge($snapshotParams, [$invoiceId]));
+        }
+    }
+
+    /**
+     * Aplikuje 'paid' na čerstvě importovanou přijatou fakturu (issue #121).
+     * Guard na status='draft' — createExpense může přes dedup guard vrátit
+     * existující (už zpracovaný) doklad, ten nepřepisujeme.
+     */
+    private function applyPurchasePaymentState(int $purchaseId, int $supplierId, ?array $state, string $fallbackPaidAt): void
+    {
+        if ($state === null || $state['status'] !== 'paid') return;
+        $this->db->pdo()->prepare(
+            "UPDATE purchase_invoices SET status = 'paid', paid_at = ?
+              WHERE id = ? AND supplier_id = ? AND status = 'draft'"
+        )->execute([$state['paid_at'] ?? $fallbackPaidAt, $purchaseId, $supplierId]);
     }
 
     private function importExpenses(int $jobId, int $supplierId, int $userId, bool $dryRun, ?string $bookmarkSince, bool $downloadAttachments = false): void
@@ -336,7 +413,13 @@ final class FakturoidImportService
 
         $payload = [
             'vendor_id'             => $vendorId,
-            'vendor_invoice_number' => $this->sanitizeVendorNumber((string) ($e['number'] ?? $e['original_number'] ?? '')),
+            // #113: original_number = číslo dokladu dodavatele; number je jen interní číslo
+            // přidělené Fakturoidem — to použij jen jako fallback, když original_number chybí.
+            'vendor_invoice_number' => $this->sanitizeVendorNumber(
+                trim((string) ($e['original_number'] ?? '')) !== ''
+                    ? (string) $e['original_number']
+                    : (string) ($e['number'] ?? '')
+            ),
             'document_kind'         => 'invoice',
             'issue_date'            => $issueDate,
             'tax_date'              => $taxDate,
@@ -369,6 +452,14 @@ final class FakturoidImportService
             (string) ($e['currency'] ?? 'CZK'),
             (string) ($payload['tax_date'] ?? $payload['issue_date'] ?? ''),
             $payload['exchange_rate'] ?? null,
+        );
+        // #121: Fakturoid eviduje výdaj jako zaplacený → promítni (jen na čerstvě
+        // vytvořený doklad; dedup-vrácený existující doklad výše se nemění).
+        $this->applyPurchasePaymentState(
+            $id,
+            $supplierId,
+            ImportedPaymentStateMapper::fromFakturoid($e),
+            $taxDate ?: $issueDate,
         );
         return $id;
     }
@@ -405,11 +496,14 @@ final class FakturoidImportService
 
     private function loadVatRateMap(): array
     {
-        // vat_rates nemá is_active — platnost se řídí valid_from/valid_to (k dnešku).
+        // Bereme VŠECHNY sazby bez ohledu na valid_from/valid_to — importujeme
+        // historické doklady (2019+), kde platí dobové sazby (CZ-15 %, CZ-10 %,
+        // valid_to 2023-12-31, viz migrace 0049). Filtr k dnešku by je vyřadil →
+        // matchVatRateId by vrátil null → vat_rate_id=0 → fk_ii_vat violation.
+        // Konkrétní % se snapshotuje do invoice_items.vat_rate_snapshot, takže
+        // výpočty/výkazy zůstávají korektní.
         $rows = $this->db->pdo()->query(
-            'SELECT id, rate_percent FROM vat_rates
-              WHERE (valid_from IS NULL OR valid_from <= CURDATE())
-                AND (valid_to   IS NULL OR valid_to   >= CURDATE())'
+            'SELECT id, rate_percent FROM vat_rates'
         )->fetchAll(\PDO::FETCH_ASSOC);
         $map = [];
         foreach ($rows as $r) $map[(int) $r['id']] = (float) $r['rate_percent'];
@@ -427,6 +521,34 @@ final class FakturoidImportService
         $vs = preg_replace('/[^A-Za-z0-9_-]/', '', $vs) ?? '';
         if ($vs === '') return 'FAKT-' . substr((string) random_int(1000, 9999), 0, 4);
         return substr($vs, 0, 20);
+    }
+
+    /**
+     * Zajistí unikátnost varsymbolu vůči invoices(supplier_id, varsymbol).
+     * Fakturoid běžně sdílí variabilní symbol mezi proformou a ostrou fakturou
+     * (resp. dobropisem) → naše UNIQUE (uq_inv_supplier_varsymbol) by hodil
+     * 1062 duplicate. Při kolizi disambiguujeme suffixem -N (ořez na 20 znaků
+     * dle DB sloupce). Jako poslední záchrana null (UNIQUE povoluje více NULL).
+     */
+    private function uniqueVarsymbol(string $raw, int $supplierId): ?string
+    {
+        $base = $this->sanitizeVarsymbol($raw);
+        if (!$this->varsymbolTaken($base, $supplierId)) return $base;
+        for ($n = 2; $n <= 99; $n++) {
+            $suffix = '-' . $n;
+            $candidate = substr($base, 0, 20 - strlen($suffix)) . $suffix;
+            if (!$this->varsymbolTaken($candidate, $supplierId)) return $candidate;
+        }
+        return null;
+    }
+
+    private function varsymbolTaken(string $vs, int $supplierId): bool
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT 1 FROM invoices WHERE supplier_id = ? AND varsymbol = ? LIMIT 1'
+        );
+        $stmt->execute([$supplierId, $vs]);
+        return $stmt->fetchColumn() !== false;
     }
 
     private function sanitizeVendorNumber(string $vn): string
@@ -450,7 +572,7 @@ final class FakturoidImportService
         if ($archiveRoot === '') {
             $uploads = (string) $this->config->get('storage.uploads_dir', '');
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/invoices-imported'
-                : __DIR__ . '/../../../../storage/invoices-imported';
+                : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices-imported');
         }
         $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
         if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
@@ -485,7 +607,7 @@ final class FakturoidImportService
         if ($archiveRoot === '') {
             $uploads = (string) $this->config->get('storage.uploads_dir', '');
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/purchase-invoices'
-                : __DIR__ . '/../../../../storage/purchase-invoices';
+                : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
         }
         $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
         if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);

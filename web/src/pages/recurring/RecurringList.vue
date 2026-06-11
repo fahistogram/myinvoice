@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { recurringApi, type RecurringTemplate, type RecurringStatus, type RecurringSort, type RecurringSummary } from '@/api/recurring'
 import { useToast } from '@/composables/useToast'
+import { useRowLink } from '@/composables/useRowLink'
 import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
@@ -129,14 +130,15 @@ async function remove(tpl: RecurringTemplate) {
   } finally { busy.value = null }
 }
 
+const navigateRow = useRowLink()
 function gotoNew() {
   router.push({ name: 'recurring-new' })
 }
-function gotoDetail(id: number) {
-  router.push({ name: 'recurring-detail', params: { id } })
+function gotoDetail(id: number, e?: MouseEvent) {
+  navigateRow({ name: 'recurring-detail', params: { id } }, e)
 }
-function gotoClient(clientId: number) {
-  router.push({ name: 'client-detail', params: { id: clientId } })
+function gotoClient(clientId: number, e?: MouseEvent) {
+  navigateRow({ name: 'client-detail', params: { id: clientId } }, e)
 }
 </script>
 
@@ -153,9 +155,9 @@ function gotoClient(clientId: number) {
     </div>
 
     <!-- Filtry v boxu (sjednoceno s /invoices a /purchase-invoices) -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
       <div class="flex flex-wrap items-center gap-2">
-        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('common.all') ?? 'Vše' }} (status)</option>
           <option value="active">{{ t('recurring.status.active') }}</option>
           <option value="paused">{{ t('recurring.status.paused') }}</option>
@@ -170,7 +172,7 @@ function gotoClient(clientId: number) {
             </span>
           </div>
           <select v-model="sortBy" :title="t('recurring.sort.label')"
-            class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+            class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
             <option value="next_run">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.next_run') }}</option>
             <option value="client">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.client') }}</option>
             <option value="amount_czk">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.amount_czk') }}</option>
@@ -180,14 +182,14 @@ function gotoClient(clientId: number) {
     </div>
 
     <div v-if="loading" class="text-center py-12 text-neutral-400">…</div>
-    <div v-else-if="filtered.length === 0" class="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center shadow-sm">
+    <div v-else-if="filtered.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center shadow-sm">
       <p class="text-neutral-500 mb-4">{{ t('recurring.empty') }}</p>
       <button v-if="auth.canWrite" @click="gotoNew" class="cursor-pointer px-4 h-10 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">
         {{ t('recurring.create_first') }}
       </button>
     </div>
 
-    <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <!-- Desktop: tabulka -->
       <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm">
@@ -206,7 +208,7 @@ function gotoClient(clientId: number) {
           <tbody class="divide-y divide-neutral-100">
             <tr v-for="tpl in filtered" :key="tpl.id" class="hover:bg-neutral-50/50">
               <td class="px-4 py-3 align-top">
-                <button @click="gotoDetail(tpl.id)" class="cursor-pointer block text-left text-primary-700 font-medium hover:underline">
+                <button @click="gotoDetail(tpl.id, $event)" @auxclick.prevent="gotoDetail(tpl.id, $event)" class="cursor-pointer block text-left text-primary-700 font-medium hover:underline">
                   {{ tpl.name }}
                 </button>
                 <span v-if="tpl.last_error" :title="tpl.last_error"
@@ -220,7 +222,7 @@ function gotoClient(clientId: number) {
                 </span>
               </td>
               <td class="px-4 py-3 align-top">
-                <button @click="gotoClient(tpl.client_id)" class="cursor-pointer block text-left text-neutral-700 hover:underline">
+                <button @click="gotoClient(tpl.client_id, $event)" @auxclick.prevent="gotoClient(tpl.client_id, $event)" class="cursor-pointer block text-left text-neutral-700 hover:underline">
                   {{ tpl.client_company_name }}
                 </button>
                 <span v-if="tpl.project_name" class="block text-xs text-neutral-500">{{ tpl.project_name }}</span>
@@ -244,7 +246,7 @@ function gotoClient(clientId: number) {
                 {{ tpl.total_with_vat != null ? formatMoney(tpl.total_with_vat, tpl.currency ?? 'CZK') : '—' }}
               </td>
               <td class="px-4 py-3 text-right whitespace-nowrap align-top">
-                <button @click="gotoDetail(tpl.id)"
+                <button @click="gotoDetail(tpl.id, $event)" @auxclick.prevent="gotoDetail(tpl.id, $event)"
                   class="cursor-pointer inline-flex items-center gap-1 px-2.5 h-7 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded mr-1.5">
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
                   {{ t('recurring.actions.detail') }}
@@ -275,7 +277,7 @@ function gotoClient(clientId: number) {
         <div
           v-for="tpl in filtered"
           :key="`m-${tpl.id}`"
-          @click="gotoDetail(tpl.id)"
+          @click="gotoDetail(tpl.id, $event)" @auxclick.prevent="gotoDetail(tpl.id, $event)"
           class="cursor-pointer hover:bg-neutral-50 transition px-4 py-3"
         >
           <div class="flex items-baseline justify-between gap-2">
@@ -285,7 +287,7 @@ function gotoClient(clientId: number) {
             </span>
           </div>
           <div class="text-xs text-neutral-500 truncate mt-0.5">
-            <button @click.stop="gotoClient(tpl.client_id)" class="cursor-pointer hover:underline text-neutral-700">
+            <button @click.stop="gotoClient(tpl.client_id, $event)" @auxclick.stop.prevent="gotoClient(tpl.client_id, $event)" class="cursor-pointer hover:underline text-neutral-700">
               {{ tpl.client_company_name }}
             </button>
             <span v-if="tpl.project_name"> · {{ tpl.project_name }}</span>
@@ -318,7 +320,7 @@ function gotoClient(clientId: number) {
             </span>
           </div>
           <div class="flex items-center gap-1.5 mt-2.5">
-            <button @click.stop="gotoDetail(tpl.id)"
+            <button @click.stop="gotoDetail(tpl.id, $event)" @auxclick.stop.prevent="gotoDetail(tpl.id, $event)"
               class="cursor-pointer inline-flex items-center gap-1 px-2.5 h-7 text-xs border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded">
               <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
               {{ t('recurring.actions.detail') }}

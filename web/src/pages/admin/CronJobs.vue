@@ -140,7 +140,7 @@ const hasProblems = computed(() => jobs.value.some(j => j.health !== 'ok'))
       <p class="text-xs text-neutral-500 mt-2">
         <i18n-t keypath="cron_jobs.setup_hint" tag="span">
           <template #link>
-            <a href="/manual?ch=02_Instalace#24-cli-nastroje" target="_blank" rel="noopener" class="text-primary-600 hover:underline">{{ t('cron_jobs.setup_link') }}</a>
+            <a href="/manual?ch=05_Po_instalaci#55-cron-skripty" target="_blank" rel="noopener" class="text-primary-600 hover:underline">{{ t('cron_jobs.setup_link') }}</a>
           </template>
         </i18n-t>
       </p>
@@ -148,7 +148,7 @@ const hasProblems = computed(() => jobs.value.some(j => j.health !== 'ok'))
 
     <div v-if="loading && !jobs.length" class="text-center text-neutral-500 py-12 text-sm">{{ t('common.loading') }}</div>
 
-    <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <!-- Desktop tabulka -->
       <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm">
@@ -199,7 +199,7 @@ const hasProblems = computed(() => jobs.value.some(j => j.health !== 'ok'))
                 <td class="px-3 py-2 text-right whitespace-nowrap" @click.stop>
                   <button
                     type="button"
-                    class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 disabled:opacity-50 disabled:cursor-wait"
+                    class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-neutral-200 bg-surface hover:bg-neutral-50 text-neutral-700 disabled:opacity-50 disabled:cursor-wait"
                     :disabled="running[j.script]"
                     @click="runNow(j.script)"
                   >
@@ -297,7 +297,7 @@ const hasProblems = computed(() => jobs.value.some(j => j.health !== 'ok'))
           <div class="pt-1">
             <button
               type="button"
-              class="text-xs px-2 py-1 rounded border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 disabled:opacity-50 disabled:cursor-wait"
+              class="text-xs px-2 py-1 rounded border border-neutral-200 bg-surface hover:bg-neutral-50 text-neutral-700 disabled:opacity-50 disabled:cursor-wait"
               :disabled="running[j.script]"
               @click="runNow(j.script)"
             >

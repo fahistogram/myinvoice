@@ -34,10 +34,25 @@ async function onScan() {
     scanning.value = false
   }
 }
+const page = ref(1)
+const total = ref(0)
+const perPage = ref(50)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / perPage.value)))
+const rangeFrom = computed(() => (total.value === 0 ? 0 : (page.value - 1) * perPage.value + 1))
+const rangeTo = computed(() => Math.min(page.value * perPage.value, total.value))
+
 async function load() {
   loading.value = true
-  try { statements.value = await bankApi.list() }
-  finally { loading.value = false }
+  try {
+    const r = await bankApi.list(page.value)
+    statements.value = r.items
+    total.value = r.total
+    perPage.value = r.limit
+  } finally { loading.value = false }
+}
+function goToPage(p: number) {
+  const np = Math.min(Math.max(1, p), totalPages.value)
+  if (np !== page.value) { page.value = np; load() }
 }
 onMounted(load)
 
@@ -160,11 +175,11 @@ async function onFileSelected(e: Event) {
 
     <div v-if="loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('common.loading') }}</div>
 
-    <div v-else-if="!statements.length" class="bg-white border border-neutral-200 rounded-lg shadow-sm p-12 text-center text-neutral-500">
+    <div v-else-if="!statements.length" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-12 text-center text-neutral-500">
       {{ t('bank.no_data') }}
     </div>
 
-    <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <!-- Desktop: tabulka -->
       <div class="hidden md:block overflow-x-auto">
       <table class="w-full text-sm table-sticky-first">
@@ -281,5 +296,16 @@ async function onFileSelected(e: Event) {
         </template>
       </div>
     </div>
+
+    <nav v-if="!loading && total > perPage" class="mt-4 flex items-center justify-between gap-3 text-sm">
+      <span class="text-neutral-500">{{ t('common.pagination_range', { from: rangeFrom, to: rangeTo, total }) }}</span>
+      <div class="flex items-center gap-1">
+        <button type="button" :disabled="page <= 1" @click="goToPage(page - 1)"
+          class="cursor-pointer h-8 px-3 border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed">‹</button>
+        <span class="px-2 text-neutral-600">{{ page }} / {{ totalPages }}</span>
+        <button type="button" :disabled="page >= totalPages" @click="goToPage(page + 1)"
+          class="cursor-pointer h-8 px-3 border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed">›</button>
+      </div>
+    </nav>
   </div>
 </template>

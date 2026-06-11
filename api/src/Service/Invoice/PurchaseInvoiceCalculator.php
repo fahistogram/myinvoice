@@ -32,13 +32,22 @@ final class PurchaseInvoiceCalculator
     {
         $pdo = $this->db->pdo();
 
-        $stmt = $pdo->prepare('SELECT reverse_charge FROM purchase_invoices WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT reverse_charge, prices_include_vat, vat_overrides FROM purchase_invoices WHERE id = ?');
         $stmt->execute([$purchaseInvoiceId]);
         $header = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($header === false) {
             throw new \RuntimeException("Purchase invoice {$purchaseInvoiceId} not found");
         }
-        $reverseCharge = (bool) $header['reverse_charge'];
+        $reverseCharge    = (bool) $header['reverse_charge'];
+        $pricesIncludeVat = (bool) $header['prices_include_vat'];
+        // Ruční rekapitulace DPH dle dokladu (§ 73 ZDPH) — viz InvoiceMath::compute.
+        $vatOverrides = [];
+        if (!empty($header['vat_overrides'])) {
+            $decoded = json_decode((string) $header['vat_overrides'], true);
+            if (is_array($decoded)) {
+                $vatOverrides = $decoded;
+            }
+        }
 
         $stmt = $pdo->prepare(
             'SELECT id, quantity, unit_price_without_vat, vat_rate_snapshot
@@ -49,7 +58,7 @@ final class PurchaseInvoiceCalculator
         $stmt->execute([$purchaseInvoiceId]);
         $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        $computed = InvoiceMath::compute($items, $reverseCharge);
+        $computed = InvoiceMath::compute($items, $reverseCharge, $pricesIncludeVat, $vatOverrides);
 
         // Persist per-item totals
         $updateItem = $pdo->prepare(

@@ -10,9 +10,12 @@ use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\WorkReportRepository;
+use MyInvoice\Service\Bank\VariableSymbolNormalizer;
+use MyInvoice\Service\Branding\AccentColor;
 use MyInvoice\Service\Export\IsdocExporter;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
+use MyInvoice\Service\Signing\Pdf\PdfSigningService;
 use Twig\Environment;
 use Twig\Loader\FilesystemLoader;
 
@@ -27,6 +30,8 @@ use Twig\Loader\FilesystemLoader;
  */
 final class InvoicePdfRenderer
 {
+    use SignsPdf;
+
     private ?Environment $twig = null;
 
     public function __construct(
@@ -38,6 +43,7 @@ final class InvoicePdfRenderer
         private readonly SnapshotBuilder $snapshots,
         private readonly PdfArchiveService $archive,
         private readonly IsdocExporter $isdoc,
+        private readonly PdfSigningService $pdfSigning,
     ) {}
 
     /**
@@ -45,7 +51,7 @@ final class InvoicePdfRenderer
      *
      * @return string  absolutní cesta k vygenerovanému PDF
      */
-    public function render(int $invoiceId, bool $forceRegenerate = false): string
+    public function render(int $invoiceId, bool $forceRegenerate = false, ?int $userId = null): string
     {
         $invoice = $this->repo->find($invoiceId);
         if ($invoice === null) {
@@ -53,6 +59,12 @@ final class InvoicePdfRenderer
         }
 
         $cachedPath = $this->cachePath($invoice);
+        $supplierData = $this->getSupplierData((int) ($invoice['supplier_id'] ?? 0));
+        $signatureCacheDependsOnUser = $this->pdfSigning->outputDependsOnUserProfile(
+            $supplierData,
+            'invoice',
+            $invoiceId,
+        );
 
         // Cache je validní jen když je novější než šablona, CSS a kód renderu
         $tplMtime = max(
@@ -63,7 +75,7 @@ final class InvoicePdfRenderer
         $isFresh = static fn (string $p): bool =>
             is_file($p) && (@filemtime($p) ?: 0) >= $tplMtime;
 
-        if (!$forceRegenerate && $invoice['pdf_path'] && $isFresh($invoice['pdf_path'])) {
+        if (!$forceRegenerate && !$signatureCacheDependsOnUser && $invoice['pdf_path'] && $isFresh($invoice['pdf_path'])) {
             return $invoice['pdf_path'];
         }
         // cachePath fallback je orphan-recovery (pdf_path je null, ale soubor leží na
@@ -71,7 +83,7 @@ final class InvoicePdfRenderer
         // by invalidate() s uzamčeným souborem (Windows: PDF otevřené v prohlížeči →
         // rename a unlink selžou) skončila s pdf_path=NULL ale původní soubor zůstal
         // na disku, a tahle větev by ho zde znovu pickla → stale PDF.
-        if (!$forceRegenerate && !empty($invoice['pdf_generated_at']) && $isFresh($cachedPath)) {
+        if (!$forceRegenerate && !$signatureCacheDependsOnUser && !empty($invoice['pdf_generated_at']) && $isFresh($cachedPath)) {
             $this->updatePdfPath($invoiceId, $cachedPath);
             return $cachedPath;
         }
@@ -84,7 +96,7 @@ final class InvoicePdfRenderer
         }
 
         $rootDir = Bootstrap::rootDir();
-        $tmpDir = $rootDir . '/storage/cache/mpdf';
+        $tmpDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/mpdf');
         if (!is_dir($tmpDir)) {
             @mkdir($tmpDir, 0755, true);
         }
@@ -148,6 +160,17 @@ final class InvoicePdfRenderer
         // (když je starý PDF otevřený v Chrome PDF viewer, přepis přímo by selhal).
         $tmpPath = $cachedPath . '.new';
         $mpdf->Output($tmpPath, \Mpdf\Output\Destination::FILE);
+
+        // Podpis PDF (PAdES) — má-li dodavatel zapnuto; měkký fallback při chybě.
+        $tmpPath = $this->signPdfIfEnabled(
+            $tmpPath,
+            $supplierData,
+            $this->pdfSigning,
+            'invoice',
+            $invoiceId,
+            $userId,
+        );
+
         if (is_file($cachedPath)) {
             @unlink($cachedPath); // pokud locked, fail silently
         }
@@ -240,6 +263,10 @@ final class InvoicePdfRenderer
             'client'            => $clientData,
             'bank'              => $bankData,
             'qr_data_uri'       => $qrUri,
+            // Platební VS = jen číslice (max 10) — `varsymbol` může nést pomlčku z čísla
+            // dokladu, kterou banka nepřijme. Velký titulek dokladu zůstává s pomlčkou,
+            // ale do platebního řádku tiskneme validní VS (shodné s QR a párováním).
+            'payment_varsymbol' => VariableSymbolNormalizer::forPayment((string) ($invoice['varsymbol'] ?? '')),
             'is_paid'           => $isPaid,
             'payment_method'    => $paymentMethod,
             'locale'            => $locale,
@@ -252,6 +279,9 @@ final class InvoicePdfRenderer
             'thousand_sep'      => $locale === 'en' ? ',' : ' ',
             'css'               => $css,
             'logo_path'         => $logoPath,
+            // Opt-in: vedle loga vykreslit i název firmy (migrace 0058). Jen když logo
+            // reálně je — bez loga se název ukazuje vždy (textový brand-name fallback).
+            'logo_show_name'    => $logoPath !== null && !empty($supplierData['pdf_logo_show_name']),
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
         ]);
     }
@@ -269,23 +299,16 @@ final class InvoicePdfRenderer
      * Sémantické barvy (dobropis červená .head.credit-note, storno šedá .cancellation,
      * RC amber, UHRAZENO zelená) NEpřebarvujeme — credit-note/cancellation selektory mají
      * vyšší specificitu (2 třídy), takže tenhle 1-třídový override je nepřebije.
+     *
+     * Kromě popředí (texty/hlavičky) přebarvujeme i světlé plochy a tenké linky, které
+     * jsou v base napevno odvozené od defaultní fialové — světlé varianty akcentu počítá
+     * AccentColor::tint() (mix s bílou). Šedá paleta CZK rekapitulace (bg #F2F2F2/…) je
+     * záměrně neutrální, tu necháváme být — barvíme jen její fialové linky/text.
      */
     private function brandAccentCss(array $supplier): string
     {
-        if (empty($supplier['email_branding_enabled'])) return '';
-        $color = strtoupper(trim((string) ($supplier['email_accent_color'] ?? '')));
-        if (!preg_match('/^#[0-9A-F]{6}$/', $color) || $color === '#3B2D83') return '';
-
-        return "\n/* ─── Branding override (per-supplier accent color) ─── */\n"
-            . ".head { border-bottom-color: {$color}; }\n"
-            . ".brand-name, .doc-type { color: {$color}; }\n"
-            . ".parties h2, td.meta-label, .bank-label, .qr-box .qr-label { color: {$color}; }\n"
-            . "table.items th { background: {$color}; }\n"
-            . "table.totals-table tr.grand td { background: {$color}; }\n"
-            . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; }\n"
-            . "table.czk-recap td.czk-recap-title, table.czk-recap tr.grand td { color: {$color}; }\n"
-            . ".isdoc-badge { color: {$color}; }\n"
-            . ".wr-title, .wr-link { color: {$color}; }\n";
+        // Sdíleno s výkazem víceprací — viz PdfBranding::accentCss.
+        return PdfBranding::accentCss($supplier);
     }
 
     /**
@@ -398,7 +421,11 @@ final class InvoicePdfRenderer
 
     private function docTypeLabel(array $invoice, string $locale, array $supplier = []): string
     {
-        $isVatPayer = (bool) ($supplier['is_vat_payer'] ?? true);
+        // Identifikovaná osoba (§ 6g–6l, #94): její RC faktura do EU JE daňový
+        // doklad (povinnost ho vystavit do 15 dnů od konce měsíce, § 28) —
+        // label „daňový doklad" si zaslouží stejně jako plátcovská.
+        $isVatPayer = (bool) ($supplier['is_vat_payer'] ?? true)
+            || ((bool) ($supplier['is_identified'] ?? false) && !empty($invoice['reverse_charge']));
         $labels = [
             'cs' => [
                 'invoice'      => $isVatPayer ? 'Faktura — daňový doklad' : 'Faktura',
@@ -593,7 +620,7 @@ final class InvoicePdfRenderer
         $issueDate = new \DateTimeImmutable($invoice['issue_date']);
         // Multi-supplier: supplier subfolder zabraňuje kolizi varsymbolu mezi suppliery
         $supplierId = (int) ($invoice['supplier_id'] ?? 1);
-        $dir = $rootDir . '/storage/invoices/sup-' . $supplierId . '/' . $issueDate->format('Y-m');
+        $dir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices') . '/sup-' . $supplierId . '/' . $issueDate->format('Y-m');
 
         $vs = $invoice['varsymbol'] ?? ('draft-' . $invoice['id']);
         // Sanitize varsymbol pro filesystem — defense-in-depth proti path traversal

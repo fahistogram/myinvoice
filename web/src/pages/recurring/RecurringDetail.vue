@@ -62,16 +62,36 @@ function round2(n: number): number {
 const totals = computed(() => {
   if (!tpl.value?.items?.length) return { base: 0, vat: 0, total: 0 }
   const reverseCharge = tpl.value.reverse_charge
+  // V režimu „ceny s DPH" nese unit_price_without_vat brutto → DPH se počítá shora
+  // koeficientem (jako InvoiceMath / RecurringForm), jinak zdola ze základu.
+  const pricesIncl = tpl.value.prices_include_vat
   let base = 0
   let vat = 0
   for (const it of tpl.value.items) {
-    const lineBase = round2((Number(it.quantity) || 0) * (Number(it.unit_price_without_vat) || 0))
+    const amount = round2((Number(it.quantity) || 0) * (Number(it.unit_price_without_vat) || 0))
     const ratePct = reverseCharge ? 0 : (Number(it.vat_rate_percent) || 0)
-    base += lineBase
-    vat += round2(lineBase * (ratePct / 100))
+    if (pricesIncl) {
+      const lineVat = round2(amount * ratePct / (100 + ratePct))
+      base += round2(amount - lineVat)
+      vat += lineVat
+    } else {
+      base += amount
+      vat += round2(amount * (ratePct / 100))
+    }
   }
   return { base: round2(base), vat: round2(vat), total: round2(base + vat) }
 })
+
+// V režimu „ceny s DPH" nese unit_price_without_vat brutto; pro zobrazení ukážeme
+// netto dopočtené koeficientem (u šablon nemáme uložené řádkové základy).
+function displayUnitPriceNet(it: { unit_price_without_vat: number; vat_rate_percent?: number }): number {
+  const gross = Number(it.unit_price_without_vat) || 0
+  if (tpl.value?.prices_include_vat) {
+    const rate = tpl.value.reverse_charge ? 0 : (Number(it.vat_rate_percent) || 0)
+    return round2(gross * 100 / (100 + rate))
+  }
+  return gross
+}
 
 function statusBadgeClass(s: RecurringStatus) {
   return {
@@ -190,6 +210,11 @@ async function removeAction() {
           </h1>
         </div>
         <div class="flex flex-wrap gap-2">
+          <RouterLink v-if="auth.canWrite" :to="{ name: 'recurring-edit', params: { id: tpl.id } }"
+            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+            {{ t('recurring.actions.edit') }}
+          </RouterLink>
           <button v-if="tpl.status === 'active' && auth.canWrite" @click="openRunNow('issue')" :disabled="busy"
             class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
@@ -210,13 +235,8 @@ async function removeAction() {
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
             {{ t('recurring.actions.resume') }}
           </button>
-          <RouterLink v-if="auth.canWrite" :to="{ name: 'recurring-edit', params: { id: tpl.id } }"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-            {{ t('recurring.actions.edit') }}
-          </RouterLink>
           <button v-if="auth.canWrite" @click="removeAction" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-danger-500/40 rounded-md text-danger-700 hover:bg-danger-50">
+            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-danger-500/50 rounded-md text-danger-500 hover:bg-danger-50">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
             {{ t('recurring.actions.delete') }}
           </button>
@@ -232,7 +252,7 @@ async function removeAction() {
 
       <!-- Konfigurace -->
       <div class="grid md:grid-cols-3 gap-4">
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('recurring.section_periodicity') }}</h3>
           <dl class="space-y-1.5 text-sm">
             <div class="flex justify-between"><dt class="text-neutral-500">{{ t('recurring.frequency') }}</dt><dd>{{ freqLabel(tpl.frequency) }}</dd></div>
@@ -245,7 +265,7 @@ async function removeAction() {
           </dl>
         </div>
 
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('recurring.section_invoice_meta') }}</h3>
           <dl class="space-y-1.5 text-sm">
             <div class="flex justify-between">
@@ -263,11 +283,12 @@ async function removeAction() {
             <div class="flex justify-between"><dt class="text-neutral-500">{{ t('payment_method.label') }}</dt><dd>{{ t('payment_method.' + tpl.payment_method) }}</dd></div>
             <div class="flex justify-between"><dt class="text-neutral-500">{{ t('recurring.payment_due_days') }}</dt><dd>{{ tpl.payment_due_days }}</dd></div>
             <div v-if="tpl.discount_percent > 0" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.discount.label') }}</dt><dd>{{ tpl.discount_percent }} %</dd></div>
+            <div class="flex justify-between"><dt class="text-neutral-500">{{ t('recurring.revenue_category') }}</dt><dd>{{ tpl.revenue_category_id ? (tpl.revenue_category_label ?? `#${tpl.revenue_category_id}`) : t('recurring.revenue_category_fallback') }}</dd></div>
             <div class="flex justify-between"><dt class="text-neutral-500">{{ t('recurring.tax_date_mode') }}</dt><dd>{{ t('recurring.tax_date_mode_' + (tpl.tax_date_mode ?? 'same_as_issue')) }}</dd></div>
           </dl>
         </div>
 
-        <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('recurring.section_automation') }}</h3>
           <dl class="space-y-1.5 text-sm">
             <div class="flex justify-between gap-2">
@@ -285,8 +306,14 @@ async function removeAction() {
         </div>
       </div>
 
+      <!-- Poznámka nad položkami -->
+      <div v-if="tpl.note_above_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-2">{{ t('invoice.note_above') }}</h3>
+        <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ tpl.note_above_items }}</p>
+      </div>
+
       <!-- Položky šablony -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <div class="px-5 py-3 border-b border-neutral-200">
           <h3 class="font-semibold">{{ t('recurring.items') }}</h3>
         </div>
@@ -306,7 +333,7 @@ async function removeAction() {
               <td class="px-4 py-2">{{ it.description }}</td>
               <td class="px-4 py-2 text-right font-mono">{{ it.quantity }}</td>
               <td class="px-4 py-2">{{ it.unit }}</td>
-              <td class="px-4 py-2 text-right font-mono">{{ formatMoney(it.unit_price_without_vat, tpl.currency ?? '') }}</td>
+              <td class="px-4 py-2 text-right font-mono">{{ formatMoney(displayUnitPriceNet(it), tpl.currency ?? '') }}</td>
               <td class="px-4 py-2 text-center text-neutral-600">{{ Number(it.vat_rate_percent) > 0 ? it.vat_rate_percent + ' %' : '—' }}</td>
             </tr>
           </tbody>
@@ -332,8 +359,14 @@ async function removeAction() {
         </div>
       </div>
 
+      <!-- Poznámka pod položkami -->
+      <div v-if="tpl.note_below_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-2">{{ t('invoice.note_below') }}</h3>
+        <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ tpl.note_below_items }}</p>
+      </div>
+
       <!-- Vygenerované faktury -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
           <h3 class="font-semibold">
             {{ t('recurring.generated_invoices') }}
@@ -398,7 +431,7 @@ async function removeAction() {
     <!-- Run Now modal — date picker s defaultem dnes; varování pokud uživatel zvolí
          budoucí datum (issue_date = budoucnost je daňově problematické). -->
     <div v-if="runNowModal && tpl" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+      <div class="bg-surface rounded-lg shadow-xl max-w-md w-full p-6">
         <h2 class="text-lg font-semibold mb-1">{{ runNowMode === 'draft' ? t('recurring.run_now_draft_title') : t('recurring.run_now_title') }}</h2>
         <p class="text-sm text-neutral-600 mb-4">{{ tpl.name }}</p>
         <p v-if="runNowMode === 'draft'" class="text-xs text-neutral-500 mb-3 -mt-2">{{ t('recurring.run_now_draft_hint') }}</p>

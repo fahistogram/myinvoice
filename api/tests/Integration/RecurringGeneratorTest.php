@@ -44,6 +44,8 @@ final class RecurringGeneratorTest extends TestCase
     private array $createdTemplateIds = [];
     /** @var int[] faktury k vyčištění */
     private array $createdInvoiceIds = [];
+    /** Původní plátcovství supplier-a — test ho vynucuje na plátce (viz setUp). */
+    private ?array $origVatFlags = null;
 
     protected function setUp(): void
     {
@@ -104,10 +106,28 @@ final class RecurringGeneratorTest extends TestCase
         $this->userId = (int) $this->db->pdo()
             ->query("SELECT id FROM users ORDER BY id LIMIT 1")
             ->fetchColumn();
+
+        // Test předpokládá PLÁTCE (sazby 21 % na fakturách) — generátor neplátci/IO
+        // autoritativně přepíná položky na 0 % (applyNonVatPayerRate), takže reálné
+        // nastavení dodavatele v dev DB by test rozbilo. Vynutit a v tearDown vrátit.
+        $flags = $this->db->pdo()->query(
+            "SELECT is_vat_payer, is_identified FROM supplier WHERE id = {$this->supplierId}"
+        )->fetch(PDO::FETCH_ASSOC) ?: [];
+        $this->origVatFlags = $flags;
+        $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = 1, is_identified = 0 WHERE id = ?')
+            ->execute([$this->supplierId]);
     }
 
     protected function tearDown(): void
     {
+        if (isset($this->db) && $this->origVatFlags !== null && $this->supplierId > 0) {
+            $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ? WHERE id = ?')
+                ->execute([
+                    (int) ($this->origVatFlags['is_vat_payer'] ?? 1),
+                    (int) ($this->origVatFlags['is_identified'] ?? 0),
+                    $this->supplierId,
+                ]);
+        }
         if (empty($this->createdInvoiceIds) && empty($this->createdTemplateIds)) {
             if (isset($this->db)) $this->db->close();
             return;
@@ -342,6 +362,303 @@ final class RecurringGeneratorTest extends TestCase
         $snap = $this->db->pdo()->prepare('SELECT DISTINCT vat_rate_snapshot FROM invoice_items WHERE invoice_id = ?');
         $snap->execute([$result['invoice_id']]);
         $this->assertNotContains('0.00', $snap->fetchAll(PDO::FETCH_COLUMN), 'Položky musí mít reálný vat_rate_snapshot, ne 0');
+    }
+
+    /**
+     * Neplátce DPH: i když šablona drží nominální sazbu (21 %), vygenerovaná faktura
+     * musí mít DPH = 0 a položky 0% snapshot (generátor coercne sazbu na 0% Osvobozeno).
+     * Chrání šablony uložené dřív, než frontend začal pro neplátce vybírat 0% sazbu.
+     */
+    public function testGeneratorZeroesVatForNonVatPayerSupplier(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+
+        // Default sazba musí být >0 %, jinak by 0 DPH nic nedokázala.
+        $stmt = $this->db->pdo()->prepare('SELECT rate_percent FROM vat_rates WHERE id = ?');
+        $stmt->execute([$this->vatRateId]);
+        if ((float) $stmt->fetchColumn() <= 0.0) {
+            $this->markTestSkipped('Default sazba je 0 % — test neplátce nedává smysl.');
+        }
+        // Musí existovat 0% osvobozená sazba platná dnes, na kterou se coercne.
+        $zeroId = (int) $this->db->pdo()->query(
+            "SELECT id FROM vat_rates
+              WHERE rate_percent = 0 AND is_reverse_charge = 0
+                AND valid_from <= CURDATE() AND (valid_to IS NULL OR valid_to >= CURDATE())
+              ORDER BY valid_from DESC LIMIT 1"
+        )->fetchColumn();
+        if ($zeroId <= 0) {
+            $this->markTestSkipped('Žádná platná 0% osvobozená sazba v DB.');
+        }
+
+        // Šablona s nominální sazbou — jako kdyby ji založil neplátce před opravou.
+        $tplId = $this->repo->create([
+            'supplier_id'      => $this->supplierId,
+            'client_id'        => $this->clientId,
+            'name'             => 'TEST recurring neplátce DPH (PHPUnit)',
+            'frequency'        => 'monthly',
+            'end_of_month'     => false,
+            'anchor_date'      => $today,
+            'next_run_date'    => $today,
+            'invoice_type'     => 'invoice',
+            'currency_id'      => $this->currencyId,
+            'language'         => 'cs',
+            'payment_method'   => 'bank_transfer',
+            'payment_due_days' => 14,
+            'increment_month_in_descriptions' => false,
+            'auto_issue'       => false,
+            'auto_send_email'  => false,
+        ], $this->userId);
+        $this->createdTemplateIds[] = $tplId;
+        $this->repo->replaceItems($tplId, [[
+            'description' => 'Paušál',
+            'quantity' => 1.0,
+            'unit' => 'měs',
+            'unit_price_without_vat' => 1000.00,
+            'vat_rate_id' => $this->vatRateId, // nominální (>0 %)
+            'order_index' => 0,
+        ]]);
+
+        // Dočasně přepni dodavatele na neplátce DPH; v finally vrať původní hodnotu.
+        $orig = (int) $this->db->pdo()
+            ->query("SELECT is_vat_payer FROM supplier WHERE id = {$this->supplierId}")
+            ->fetchColumn();
+        $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = 0 WHERE id = ?')
+            ->execute([$this->supplierId]);
+        try {
+            $result = $this->generator->generate($tplId, $today, $this->userId, '127.0.0.1', 'phpunit');
+            $this->createdInvoiceIds[] = $result['invoice_id'];
+
+            $inv = $this->db->pdo()->prepare(
+                'SELECT total_without_vat, total_vat, total_with_vat FROM invoices WHERE id = ?'
+            );
+            $inv->execute([$result['invoice_id']]);
+            $invRow = $inv->fetch(PDO::FETCH_ASSOC);
+            $this->assertEqualsWithDelta(0.0, (float) $invRow['total_vat'], 0.001, 'Neplátce DPH → DPH = 0');
+            $this->assertEqualsWithDelta(1000.0, (float) $invRow['total_without_vat'], 0.001);
+            $this->assertEqualsWithDelta(1000.0, (float) $invRow['total_with_vat'], 0.001);
+
+            // Položky mají 0% snapshot a coercnuté vat_rate_id na 0% sazbu.
+            $items = $this->db->pdo()->prepare(
+                'SELECT vat_rate_id, vat_rate_snapshot, total_vat FROM invoice_items WHERE invoice_id = ?'
+            );
+            $items->execute([$result['invoice_id']]);
+            foreach ($items->fetchAll(PDO::FETCH_ASSOC) as $it) {
+                $this->assertSame($zeroId, (int) $it['vat_rate_id'], 'vat_rate_id coercnuto na 0% sazbu');
+                $this->assertEqualsWithDelta(0.0, (float) $it['vat_rate_snapshot'], 0.001);
+                $this->assertEqualsWithDelta(0.0, (float) $it['total_vat'], 0.001);
+            }
+        } finally {
+            $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = ? WHERE id = ?')
+                ->execute([$orig, $this->supplierId]);
+        }
+    }
+
+    /**
+     * Přenos šablony s `prices_include_vat=true` do VYDANÉ faktury: režim se musí
+     * propsat, DPH se počítá koeficientem (na haléř), unit_price_without_vat nese
+     * brutto, ale uložený řádkový základ + zobrazené netto sedí na haléř.
+     */
+    public function testGeneratorPricesIncludeVatInvoiceUsesCoefficientAndKeepsGrossUnitPrice(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $stmt = $this->db->pdo()->prepare('SELECT rate_percent FROM vat_rates WHERE id = ?');
+        $stmt->execute([$this->vatRateId]);
+        $rate = (float) $stmt->fetchColumn();
+        if ($rate <= 0.0) {
+            $this->markTestSkipped('Default sazba je 0 % — koeficient nelze ověřit.');
+        }
+
+        $tplId = $this->repo->create([
+            'supplier_id'      => $this->supplierId,
+            'client_id'        => $this->clientId,
+            'name'             => 'TEST recurring s DPH (PHPUnit)',
+            'frequency'        => 'monthly',
+            'end_of_month'     => false,
+            'anchor_date'      => $today,
+            'next_run_date'    => $today,
+            'invoice_type'     => 'invoice',
+            'currency_id'      => $this->currencyId,
+            'language'         => 'cs',
+            'payment_method'   => 'bank_transfer',
+            'reverse_charge'   => false,
+            'prices_include_vat' => true,
+            'payment_due_days' => 14,
+            'increment_month_in_descriptions' => false,
+            'auto_issue'       => false,
+            'auto_send_email'  => false,
+        ], $this->userId);
+        $this->createdTemplateIds[] = $tplId;
+
+        // 2 ks × 605 Kč S DPH → řádkový gross 1210.
+        $this->repo->replaceItems($tplId, [[
+            'description' => 'Paušál s DPH',
+            'quantity' => 2.0,
+            'unit' => 'ks',
+            'unit_price_without_vat' => 605.00, // v režimu s DPH = cena včetně DPH
+            'vat_rate_id' => $this->vatRateId,
+            'order_index' => 0,
+        ]]);
+
+        $result = $this->generator->generate($tplId, $today, $this->userId, '127.0.0.1', 'phpunit');
+        $this->createdInvoiceIds[] = $result['invoice_id'];
+
+        // Očekávané hodnoty koeficientem z grossu 1210.
+        $gross = 1210.00;
+        $expVat  = round($gross * $rate / (100.0 + $rate), 2);
+        $expBase = round($gross - $expVat, 2);
+
+        $inv = $this->db->pdo()->prepare(
+            'SELECT prices_include_vat, total_without_vat, total_vat, total_with_vat FROM invoices WHERE id = ?'
+        );
+        $inv->execute([$result['invoice_id']]);
+        $invRow = $inv->fetch(PDO::FETCH_ASSOC);
+        $this->assertSame(1, (int) $invRow['prices_include_vat'], 'Režim ceny s DPH se musí propsat do faktury');
+        $this->assertEqualsWithDelta($gross, (float) $invRow['total_with_vat'], 0.001, 'Celek s DPH musí sedět přesně na zadaný gross');
+        $this->assertEqualsWithDelta($expVat, (float) $invRow['total_vat'], 0.001);
+        $this->assertEqualsWithDelta($expBase, (float) $invRow['total_without_vat'], 0.001);
+
+        // Položka: unit_price_without_vat nese BRUTTO (605), ale řádkový základ je netto.
+        $it = $this->db->pdo()->prepare(
+            'SELECT quantity, unit_price_without_vat, total_without_vat, total_with_vat FROM invoice_items WHERE invoice_id = ?'
+        );
+        $it->execute([$result['invoice_id']]);
+        $itRow = $it->fetch(PDO::FETCH_ASSOC);
+        $this->assertEqualsWithDelta(605.00, (float) $itRow['unit_price_without_vat'], 0.001, 'V režimu s DPH drží unit_price brutto');
+        $this->assertEqualsWithDelta($expBase, (float) $itRow['total_without_vat'], 0.001);
+        $this->assertEqualsWithDelta($gross, (float) $itRow['total_with_vat'], 0.001);
+
+        // Zobrazené NETTO jednotkové ceny = base / množství; zpětně × množství × (1+sazba) = gross.
+        $displayNetUnit = round((float) $itRow['total_without_vat'] / (float) $itRow['quantity'], 2);
+        $this->assertEqualsWithDelta($gross, round($displayNetUnit * (float) $itRow['quantity'] * (1 + $rate / 100), 2), 0.02);
+
+        // ISDOC export: UnitPrice musí být NETTO (ne brutto), UnitPriceTaxInclusive brutto/ks.
+        try {
+            $isdoc = Bootstrap::buildApp()->getContainer()->get(\MyInvoice\Service\Export\IsdocExporter::class);
+        } catch (\Throwable $e) {
+            return; // exporter nedostupný v DI — zbytek testu stačí
+        }
+        $repoInv = Bootstrap::buildApp()->getContainer()->get(\MyInvoice\Repository\InvoiceRepository::class)->find($result['invoice_id']);
+        $xml = $isdoc->buildXml($repoInv);
+        $dom = new \DOMDocument();
+        $dom->loadXML($xml);
+        $unitPrice = $dom->getElementsByTagNameNS('*', 'UnitPrice')->item(0);
+        $unitPriceVat = $dom->getElementsByTagNameNS('*', 'UnitPriceTaxInclusive')->item(0);
+        $this->assertNotNull($unitPrice, 'ISDOC má UnitPrice');
+        $this->assertEqualsWithDelta($displayNetUnit, (float) $unitPrice->nodeValue, 0.02, 'ISDOC UnitPrice musí být NETTO');
+        $this->assertEqualsWithDelta(605.00, (float) $unitPriceVat->nodeValue, 0.02, 'ISDOC UnitPriceTaxInclusive = brutto/ks');
+    }
+
+    /**
+     * Stejný režim s DPH, ale invoice_type=proforma — musí se chovat identicky
+     * (přenos příznaku + koeficient).
+     */
+    public function testGeneratorPricesIncludeVatProformaPreservesFlagAndTotals(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $stmt = $this->db->pdo()->prepare('SELECT rate_percent FROM vat_rates WHERE id = ?');
+        $stmt->execute([$this->vatRateId]);
+        $rate = (float) $stmt->fetchColumn();
+        if ($rate <= 0.0) {
+            $this->markTestSkipped('Default sazba je 0 % — koeficient nelze ověřit.');
+        }
+
+        $tplId = $this->repo->create([
+            'supplier_id'      => $this->supplierId,
+            'client_id'        => $this->clientId,
+            'name'             => 'TEST recurring proforma s DPH (PHPUnit)',
+            'frequency'        => 'monthly',
+            'end_of_month'     => false,
+            'anchor_date'      => $today,
+            'next_run_date'    => $today,
+            'invoice_type'     => 'proforma',
+            'currency_id'      => $this->currencyId,
+            'language'         => 'cs',
+            'payment_method'   => 'bank_transfer',
+            'reverse_charge'   => false,
+            'prices_include_vat' => true,
+            'payment_due_days' => 14,
+            'increment_month_in_descriptions' => false,
+            'auto_issue'       => false,
+            'auto_send_email'  => false,
+        ], $this->userId);
+        $this->createdTemplateIds[] = $tplId;
+
+        // 1 ks × 1000 Kč S DPH.
+        $this->repo->replaceItems($tplId, [[
+            'description' => 'Záloha s DPH',
+            'quantity' => 1.0,
+            'unit' => 'ks',
+            'unit_price_without_vat' => 1000.00,
+            'vat_rate_id' => $this->vatRateId,
+            'order_index' => 0,
+        ]]);
+
+        $result = $this->generator->generate($tplId, $today, $this->userId, '127.0.0.1', 'phpunit');
+        $this->createdInvoiceIds[] = $result['invoice_id'];
+
+        $gross = 1000.00;
+        $expVat  = round($gross * $rate / (100.0 + $rate), 2);
+        $expBase = round($gross - $expVat, 2);
+
+        $inv = $this->db->pdo()->prepare(
+            'SELECT invoice_type, prices_include_vat, total_without_vat, total_vat, total_with_vat FROM invoices WHERE id = ?'
+        );
+        $inv->execute([$result['invoice_id']]);
+        $invRow = $inv->fetch(PDO::FETCH_ASSOC);
+        $this->assertSame('proforma', $invRow['invoice_type']);
+        $this->assertSame(1, (int) $invRow['prices_include_vat']);
+        $this->assertEqualsWithDelta($gross, (float) $invRow['total_with_vat'], 0.001);
+        $this->assertEqualsWithDelta($expVat, (float) $invRow['total_vat'], 0.001);
+        $this->assertEqualsWithDelta($expBase, (float) $invRow['total_without_vat'], 0.001);
+    }
+
+    /**
+     * Souhrn šablony v list() (TEMPLATE_TOTAL_SQL) musí v režimu „ceny s DPH" brát
+     * brutto jako celek a NEpřičítat DPH navrch. Regrese: dříve počítal zdola →
+     * total nafouknutý o DPH (1210 → 1210 + DPH).
+     */
+    public function testListTemplateTotalRespectsPricesIncludeVat(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $tplId = $this->repo->create([
+            'supplier_id'      => $this->supplierId,
+            'client_id'        => $this->clientId,
+            'name'             => 'TEST list total s DPH (PHPUnit)',
+            'frequency'        => 'monthly',
+            'end_of_month'     => false,
+            'anchor_date'      => $today,
+            'next_run_date'    => $today,
+            'invoice_type'     => 'invoice',
+            'currency_id'      => $this->currencyId,
+            'language'         => 'cs',
+            'payment_method'   => 'bank_transfer',
+            'reverse_charge'   => false,
+            'prices_include_vat' => true,
+            'discount_percent' => 0.0,
+            'payment_due_days' => 14,
+            'increment_month_in_descriptions' => false,
+            'auto_issue'       => false,
+            'auto_send_email'  => false,
+        ], $this->userId);
+        $this->createdTemplateIds[] = $tplId;
+
+        $this->repo->replaceItems($tplId, [[
+            'description' => 'Paušál s DPH',
+            'quantity' => 1.0,
+            'unit' => 'ks',
+            'unit_price_without_vat' => 1210.00, // brutto
+            'vat_rate_id' => $this->vatRateId,
+            'order_index' => 0,
+        ]]);
+
+        $res = $this->repo->list(['client_id' => $this->clientId], 1, 0, '', []);
+        $row = null;
+        foreach ($res['data'] as $r) {
+            if ((int) $r['id'] === $tplId) { $row = $r; break; }
+        }
+        $this->assertNotNull($row, 'Šablona musí být v listu');
+        // Brutto 1210 → celek 1210, NE 1210 + DPH (starý bug).
+        $this->assertEqualsWithDelta(1210.00, (float) $row['total_with_vat'], 0.01);
     }
 
     public function testGenerateForceDraftLeavesDraftDespiteAutoIssue(): void
@@ -1006,5 +1323,103 @@ final class RecurringGeneratorTest extends TestCase
 
         $tpl = $this->templateRow($tplId);
         $this->assertSame('2026-07-15', $tpl['next_run_date'], 'Neběžící šablona: next_run = nové anchor_date');
+    }
+
+    // ======================================================================
+    //  Kategorie tržby na šabloně (#119): override vs. fallback
+    // ======================================================================
+
+    /**
+     * Pevná kategorie šablony (revenue_category_id) musí PŘEBÍT default klienta;
+     * šablona bez kategorie (NULL) musí fallbacknout na default klienta (stávající
+     * chování). Kategorie se na fakturu ukládá jako snapshot při generování.
+     */
+    public function testGeneratorRevenueCategoryOverrideBeatsClientDefault(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $pdo = $this->db->pdo();
+
+        // Dvě dočasné kategorie: A = pevná na šabloně, B = default klienta.
+        $catIds = [];
+        foreach (['phpunit-tpl-a', 'phpunit-cli-b'] as $code) {
+            $pdo->prepare(
+                'INSERT INTO revenue_categories (supplier_id, code, label, display_order)
+                 VALUES (?, ?, ?, 999)'
+            )->execute([$this->supplierId, $code, 'TEST ' . $code]);
+            $catIds[] = (int) $pdo->lastInsertId();
+        }
+        [$catTemplate, $catClient] = $catIds;
+
+        // Default klienta dočasně přepnout na B; v finally vrátit.
+        $origDefault = $pdo->query(
+            "SELECT default_revenue_category_id FROM clients WHERE id = {$this->clientId}"
+        )->fetchColumn();
+        $pdo->prepare('UPDATE clients SET default_revenue_category_id = ? WHERE id = ?')
+            ->execute([$catClient, $this->clientId]);
+
+        try {
+            $item = [
+                'description' => 'Hosting',
+                'quantity' => 1.0,
+                'unit' => 'měs',
+                'unit_price_without_vat' => 500.00,
+                'vat_rate_id' => $this->vatRateId,
+                'order_index' => 0,
+            ];
+            $base = [
+                'supplier_id'      => $this->supplierId,
+                'client_id'        => $this->clientId,
+                'frequency'        => 'monthly',
+                'end_of_month'     => false,
+                'anchor_date'      => $today,
+                'next_run_date'    => $today,
+                'invoice_type'     => 'invoice',
+                'currency_id'      => $this->currencyId,
+                'language'         => 'cs',
+                'payment_method'   => 'bank_transfer',
+                'payment_due_days' => 14,
+                'increment_month_in_descriptions' => false,
+                'auto_issue'       => false,
+                'auto_send_email'  => false,
+            ];
+
+            // 1) Šablona s pevnou kategorií A → faktura má A (ne klientovo B).
+            $tplOverride = $this->repo->create($base + [
+                'name' => 'TEST recurring kategorie override (PHPUnit)',
+                'revenue_category_id' => $catTemplate,
+            ], $this->userId);
+            $this->createdTemplateIds[] = $tplOverride;
+            $this->repo->replaceItems($tplOverride, [$item]);
+
+            $found = $this->repo->find($tplOverride);
+            $this->assertSame($catTemplate, $found['revenue_category_id'], 'find() vrací uloženou kategorii šablony');
+
+            $r1 = $this->generator->generate($tplOverride, $today, $this->userId, '127.0.0.1', 'phpunit');
+            $this->createdInvoiceIds[] = $r1['invoice_id'];
+            $inv1 = $pdo->query("SELECT revenue_category_id FROM invoices WHERE id = {$r1['invoice_id']}")->fetchColumn();
+            $this->assertSame($catTemplate, (int) $inv1, 'Pevná kategorie šablony přebíjí default klienta');
+
+            // 2) Šablona BEZ kategorie (NULL) → fallback na default klienta B.
+            $tplFallback = $this->repo->create($base + [
+                'name' => 'TEST recurring kategorie fallback (PHPUnit)',
+            ], $this->userId);
+            $this->createdTemplateIds[] = $tplFallback;
+            $this->repo->replaceItems($tplFallback, [$item]);
+
+            $r2 = $this->generator->generate($tplFallback, $today, $this->userId, '127.0.0.1', 'phpunit');
+            $this->createdInvoiceIds[] = $r2['invoice_id'];
+            $inv2 = $pdo->query("SELECT revenue_category_id FROM invoices WHERE id = {$r2['invoice_id']}")->fetchColumn();
+            $this->assertSame($catClient, (int) $inv2, 'Šablona bez kategorie fallbackne na default klienta');
+        } finally {
+            $pdo->prepare('UPDATE clients SET default_revenue_category_id = ? WHERE id = ?')
+                ->execute([$origDefault !== false && $origDefault !== null ? (int) $origDefault : null, $this->clientId]);
+            // Faktury/šablony uklízí tearDown; kategorie se musí odpojit od faktur dřív,
+            // než by je delete() odmítl — tearDown maže faktury, ale běží AŽ PO finally,
+            // proto kategorie odpojíme tady ručně a smažeme.
+            $in = implode(',', $catIds);
+            $pdo->exec("UPDATE invoices SET revenue_category_id = NULL WHERE revenue_category_id IN ($in)");
+            $pdo->exec("UPDATE recurring_invoice_templates SET revenue_category_id = NULL WHERE revenue_category_id IN ($in)");
+            $pdo->exec("DELETE FROM revenue_categories WHERE id IN ($in)");
+        }
     }
 }

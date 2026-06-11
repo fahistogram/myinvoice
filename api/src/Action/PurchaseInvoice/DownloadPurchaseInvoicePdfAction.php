@@ -82,6 +82,12 @@ final class DownloadPurchaseInvoicePdfAction
         $downloadName = (string) ($invoice['pdf_original_name']
             ?? ('faktura-' . ($invoice['vendor_invoice_number'] ?? $id) . '.pdf'));
         $downloadName = preg_replace('/[\x00-\x1F"<>|*?:\\\\\/]/', '_', $downloadName) ?: 'invoice.pdf';
+        // Obsah je VŽDY PDF (Content-Type níže). U dříve importovaných fotek může mít
+        // pdf_original_name ještě obrázkovou příponu (.jpg) — vynuť .pdf, ať prohlížeč
+        // neuloží soubor jako „uctenka.jpg", který je uvnitř PDF.
+        if (!preg_match('/\.pdf$/i', $downloadName)) {
+            $downloadName = preg_replace('/\.[^.]+$/', '', $downloadName) . '.pdf';
+        }
 
         // Stream — pro velké soubory nestavíme do paměti
         $stream = fopen($fullPathReal, 'rb');
@@ -134,6 +140,6 @@ final class DownloadPurchaseInvoicePdfAction
         if ($dir !== '') return $dir;
         $uploads = (string) $this->config->get('storage.uploads_dir', '');
         if ($uploads !== '') return dirname($uploads) . '/purchase-invoices';
-        return __DIR__ . '/../../../../storage/purchase-invoices';
+        return \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
     }
 }

@@ -6,6 +6,8 @@ import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { projectsApi, type Project, type ProjectPayload, type BillingEmail } from '@/api/projects'
 import { clientsApi, type Client } from '@/api/clients'
 import { codebooksApi, type Currency } from '@/api/codebooks'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
+import { useToast } from '@/composables/useToast'
 
 /**
  * V `embedded` módu komponenta nečte route a vrací výsledek přes `@created`.
@@ -29,8 +31,10 @@ const isEdit = computed(() =>
 const projectId = computed(() => (isEdit.value ? Number(route.params.id) : null))
 const initialClientId = ref<number | null>(null)
 
+const toast = useToast()
 const client = ref<Client | null>(null)
 const currencies = ref<Currency[]>([])
+const revenueCategories = ref<RevenueCategory[]>([])
 const submitting = ref(false)
 const error = ref('')
 
@@ -38,6 +42,7 @@ const form = ref<ProjectPayload>({
   client_id: 0,
   name: '',
   payment_due_days: 7,
+  payment_due_unit: null,
   project_number: null,
   contract_number: null,
   budget_total: null,
@@ -48,17 +53,56 @@ const form = ref<ProjectPayload>({
   status: 'active',
   requires_work_report_approval: false,
   note: null,
+  default_revenue_category_id: null,
   billing_emails: [],
+  billing_emails_mode: 'auto',
 })
 
-const billingEmailInput = ref<{ position: 1 | 2 | 3; email: string; label: string }[]>([
-  { position: 1, email: '', label: '' },
-  { position: 2, email: '', label: '' },
-  { position: 3, email: '', label: '' },
+// usages (#86): pro které typy zpráv se e-mail použije; default vše zaškrtnuté.
+const PROJECT_EMAIL_USAGES = ['documents', 'reminders', 'approvals'] as const
+type ProjectEmailUsage = typeof PROJECT_EMAIL_USAGES[number]
+const allUsages = (): ProjectEmailUsage[] => [...PROJECT_EMAIL_USAGES]
+
+const billingEmailInput = ref<{ position: 1 | 2 | 3; email: string; label: string; usages: ProjectEmailUsage[] }[]>([
+  { position: 1, email: '', label: '', usages: allUsages() },
+  { position: 2, email: '', label: '', usages: allUsages() },
+  { position: 3, email: '', label: '', usages: allUsages() },
 ])
+
+function toggleBillingUsage(i: number, code: ProjectEmailUsage) {
+  const u = billingEmailInput.value[i].usages
+  billingEmailInput.value[i].usages = u.includes(code) ? u.filter(x => x !== code) : [...u, code]
+}
+
+// Splatnost zakázky — preset selector. Zakázka má vždy konkrétní hodnotu (žádné
+// „dědit"); 'month' = 1 kalendářní měsíc (days=1, unit='month'), 'custom' odhalí
+// číselný input ve dnech. NULL unit = dny (zpětná kompatibilita).
+type ProjectDuePreset = '7' | '14' | 'month' | 'custom'
+// 'custom' musí být „sticky" i když hodnota odpovídá presetu (7/14) — jinak by getter
+// spadl zpět na preset a číselný input by se nikdy neukázal.
+const dueCustom = ref(false)
+const projectDuePreset = computed<ProjectDuePreset>({
+  get() {
+    if (dueCustom.value) return 'custom'
+    const d = form.value.payment_due_days
+    const u = form.value.payment_due_unit
+    if (u === 'month' && d === 1) return 'month'
+    if ((u === 'days' || u == null) && d === 7) return '7'
+    if ((u === 'days' || u == null) && d === 14) return '14'
+    return 'custom'
+  },
+  set(v: ProjectDuePreset) {
+    dueCustom.value = (v === 'custom')
+    if (v === '7') { form.value.payment_due_days = 7; form.value.payment_due_unit = 'days' }
+    else if (v === '14') { form.value.payment_due_days = 14; form.value.payment_due_unit = 'days' }
+    else if (v === 'month') { form.value.payment_due_days = 1; form.value.payment_due_unit = 'month' }
+    else { if (form.value.payment_due_days == null || form.value.payment_due_unit === 'month') form.value.payment_due_days = 30; form.value.payment_due_unit = 'days' }
+  },
+})
 
 onMounted(async () => {
   currencies.value = await codebooksApi.currencies()
+  revenueCategories.value = await revenueCategoriesApi.list(false).catch(() => [] as RevenueCategory[])
   if (form.value.currency_id === 0) {
     const def = currencies.value.find(c => c.is_default && c.code === 'CZK') || currencies.value[0]
     if (def) form.value.currency_id = def.id
@@ -68,13 +112,14 @@ onMounted(async () => {
     const p = await projectsApi.get(projectId.value)
     Object.assign(form.value, sanitize(p))
     client.value = await clientsApi.get(p.client_id)
-    // Naplň billing inputy
+    // Naplň billing inputy (usages null/prázdné = všechny typy zpráv)
     for (let i = 0; i < 3; i++) {
       const found = p.billing_emails.find((b) => b.position === ((i + 1) as 1 | 2 | 3))
       billingEmailInput.value[i] = {
         position: (i + 1) as 1 | 2 | 3,
         email: found?.email || '',
         label: found?.label || '',
+        usages: found?.usages?.length ? [...found.usages] as ProjectEmailUsage[] : allUsages(),
       }
     }
   } else {
@@ -88,6 +133,7 @@ onMounted(async () => {
       form.value.client_id = cid
       form.value.currency_id = client.value.currency_default_id
       form.value.payment_due_days = client.value.payment_due_default ?? 7
+      form.value.payment_due_unit = client.value.payment_due_unit ?? null
       if (client.value.hourly_rate && client.value.hourly_rate > 0) {
         form.value.hourly_rate = client.value.hourly_rate
       }
@@ -102,6 +148,7 @@ function sanitize(p: Project): Partial<ProjectPayload> {
     client_id: p.client_id,
     name: p.name,
     payment_due_days: p.payment_due_days,
+    payment_due_unit: p.payment_due_unit ?? null,
     project_number: p.project_number ?? null,
     contract_number: p.contract_number ?? null,
     budget_total: p.budget_total ?? null,
@@ -112,6 +159,8 @@ function sanitize(p: Project): Partial<ProjectPayload> {
     status: p.status,
     requires_work_report_approval: !!p.requires_work_report_approval,
     note: p.note ?? null,
+    default_revenue_category_id: p.default_revenue_category_id ?? null,
+    billing_emails_mode: p.billing_emails_mode ?? 'auto',
   }
 }
 
@@ -119,13 +168,14 @@ async function submit() {
   submitting.value = true
   error.value = ''
   try {
-    // Připrav billing emails
+    // Připrav billing emails (usages: všechny tři / žádný → backend uloží NULL = vše)
     const emails: BillingEmail[] = billingEmailInput.value
       .filter((e) => e.email.trim())
       .map((e) => ({
         position: e.position,
         email: e.email.trim(),
         label: e.label.trim() || null,
+        usages: e.usages,
       }))
     form.value.billing_emails = emails
 
@@ -133,6 +183,10 @@ async function submit() {
       const { client_id, ...rest } = form.value
       void client_id
       const updated = await projectsApi.update(projectId.value, rest)
+      const revBackfilled = updated.revenue_category_backfilled ?? 0
+      if (revBackfilled > 0) {
+        toast.success(t('project.default_revenue_category_backfilled', { count: revBackfilled }))
+      }
       if (props.embedded) { emit('created', updated); return }
       router.push(`/projects/${projectId.value}`)
     } else {
@@ -163,7 +217,7 @@ async function submit() {
       {{ t('invoice.client') }}: <span class="font-medium text-neutral-900">{{ client.company_name }}</span>
     </div>
 
-    <form @submit.prevent="submit" autocomplete="off" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <form @submit.prevent="submit" autocomplete="off" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="p-5 space-y-4">
         <div>
           <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.name') }} *</label>
@@ -171,11 +225,24 @@ async function submit() {
             class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
         </div>
 
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.payment_due_days') }} *</label>
-            <input autocomplete="off" v-model.number="form.payment_due_days" type="number" min="1" max="365" required
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.payment_due_label') }} *</label>
+            <div class="flex gap-2 items-center">
+              <select v-model="projectDuePreset"
+                class="flex-1 min-w-0 h-10 px-2 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+                <option value="7">{{ t('project.payment_due_preset_7') }}</option>
+                <option value="14">{{ t('project.payment_due_preset_14') }}</option>
+                <option value="month">{{ t('project.payment_due_preset_month') }}</option>
+                <option value="custom">{{ t('project.payment_due_preset_custom') }}</option>
+              </select>
+              <div v-if="projectDuePreset === 'custom'" class="flex items-center gap-1.5 shrink-0">
+                <input autocomplete="off" v-model.number="form.payment_due_days" type="number" min="1" max="365"
+                  class="w-20 h-10 px-2 border border-neutral-300 rounded-md text-sm font-mono focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                <span class="text-xs text-neutral-500">{{ t('project.payment_due_custom_days_suffix') }}</span>
+              </div>
+            </div>
+            <p v-if="projectDuePreset === 'month'" class="text-xs text-neutral-500 mt-1">{{ t('project.payment_due_month_hint') }}</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.hourly_rate') }}</label>
@@ -185,14 +252,14 @@ async function submit() {
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.currency') }}</label>
             <select v-model.number="form.currency_id"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option v-for="c in currencies" :key="c.id" :value="c.id">{{ c.label }}</option>
             </select>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.status') }}</label>
             <select v-model="form.status"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option value="active">{{ t('common.active') }}</option>
               <option value="paused">{{ t('project.status_paused') }}</option>
               <option value="closed">{{ t('project.status_closed') }}</option>
@@ -231,21 +298,46 @@ async function submit() {
           </div>
         </div>
 
-        <!-- Billing emails -->
-        <div class="border-t border-neutral-200 pt-4">
-          <h3 class="text-sm font-semibold mb-1">{{ t('project.billing_emails') }}</h3>
-          <p class="text-xs text-neutral-500 mb-3">
-            {{ $i18n.locale === 'cs'
-              ? 'Vedle hlavního emailu klienta budou faktury chodit i na tyto adresy.'
-              : 'Invoices will be sent to these addresses in addition to the client\'s main email.' }}
-          </p>
-          <div class="space-y-2">
-            <div v-for="(_, i) in billingEmailInput" :key="i" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <!-- Billing emails — boxík ve stylu e-mailových kontaktů u klienta (#86) -->
+        <div class="border border-neutral-200 rounded-md p-3 space-y-3">
+          <div>
+            <div class="text-sm font-medium text-neutral-700">{{ t('project.billing_emails') }}</div>
+            <p class="text-xs text-neutral-500 mt-0.5">
+              {{ $i18n.locale === 'cs'
+                ? 'Vedle hlavního emailu klienta budou faktury chodit i na tyto adresy.'
+                : 'Invoices will be sent to these addresses in addition to the client\'s main email.' }}
+            </p>
+          </div>
+
+          <div v-for="(_, i) in billingEmailInput" :key="i"
+            :class="['rounded-md p-3 space-y-2', billingEmailInput[i].email.trim() ? 'border border-neutral-200 bg-neutral-50/50' : 'border border-dashed border-neutral-200']">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <input autocomplete="off" v-model="billingEmailInput[i].email" type="email" :placeholder="`Email #${i + 1}`"
-                class="sm:col-span-2 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                class="sm:col-span-2 h-9 px-2.5 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
               <input autocomplete="off" v-model="billingEmailInput[i].label" :placeholder="$i18n.locale === 'cs' ? 'Popisek (účetní, PM…)' : 'Label (accountant, PM…)'"
-                class="h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                class="h-9 px-2.5 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
             </div>
+            <!-- Účely (#86) — pro které typy zpráv se e-mail použije; vše zaškrtnuté = default -->
+            <div v-if="billingEmailInput[i].email.trim()" class="flex items-center gap-x-4 gap-y-1 flex-wrap text-sm">
+              <label v-for="code in PROJECT_EMAIL_USAGES" :key="code" class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" :checked="billingEmailInput[i].usages.includes(code)" @change="toggleBillingUsage(i, code)"
+                  class="rounded border-neutral-300 text-primary-600" />
+                <span class="text-neutral-700">{{ t(`client.email_contacts.usage.${code}`) }}</span>
+              </label>
+              <span v-if="!billingEmailInput[i].usages.length" class="text-xs text-neutral-400">{{ t('project.billing_email_no_usage_hint') }}</span>
+            </div>
+          </div>
+
+          <!-- Režim kombinace s kontakty/hlavním e-mailem klienta (#86) -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.billing_emails_mode') }}</label>
+            <select v-model="form.billing_emails_mode"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              <option value="auto">{{ t('project.billing_emails_mode_auto') }}</option>
+              <option value="append">{{ t('project.billing_emails_mode_append') }}</option>
+              <option value="replace">{{ t('project.billing_emails_mode_replace') }}</option>
+            </select>
+            <p class="text-xs text-neutral-500 mt-1">{{ t('project.billing_emails_mode_hint') }}</p>
           </div>
         </div>
 
@@ -261,6 +353,19 @@ async function submit() {
           </label>
         </div>
 
+        <!-- Výchozí kategorie tržby zakázky (přednost před klientem) -->
+        <div>
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.default_revenue_category') }}</label>
+          <select v-model="form.default_revenue_category_id"
+            class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+            <option :value="null">— {{ t('project.default_revenue_category_none') }} —</option>
+            <option v-for="c in revenueCategories" :key="c.id" :value="c.id">
+              {{ c.label }} ({{ c.code }})
+            </option>
+          </select>
+          <p class="text-xs text-neutral-500 mt-1">{{ t('project.default_revenue_category_hint') }}</p>
+        </div>
+
         <div>
           <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.note') }}</label>
           <textarea autocomplete="off" v-model="form.note" rows="2"
@@ -273,7 +378,7 @@ async function submit() {
       </div>
 
       <div class="px-5 py-3 border-t border-neutral-200 bg-neutral-50 flex justify-end gap-3 rounded-b-lg">
-        <button type="button" @click="embedded ? emit('cancel') : router.back()" class="px-4 h-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-white text-sm font-medium">{{ t('common.cancel') }}</button>
+        <button type="button" @click="embedded ? emit('cancel') : router.back()" class="px-4 h-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface text-sm font-medium">{{ t('common.cancel') }}</button>
         <button type="submit" :disabled="submitting"
           class="px-5 h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md">
           {{ submitting ? t('common.saving') : (isEdit ? t('common.save') : t('common.create')) }}

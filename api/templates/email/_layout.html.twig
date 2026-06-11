@@ -10,6 +10,10 @@
    s PDF i logem). Bez brandingu = default fialová MyInvoice. Tělové šablony používají
    {{ accent }} pro částky, tlačítka a odkazy — proto je viditelný i v jejich blocích. #}
 {% set accent = (branded and supplier.email_accent_color) ? supplier.email_accent_color : '#3B2D83' %}
+{# accent_soft = světlá varianta akcentu (mix s bílou, počítaná v PHP přes AccentColor).
+   Bez brandingu / s default barvou je null → fallback na fixní MyInvoice #F4F2FB.
+   Tělové šablony ji používají pro pozadí boxu s částkou (stejně jako {{ accent }}). #}
+{% set accent_soft = (branded and supplier.accent_soft) ? supplier.accent_soft : '#F4F2FB' %}
 {% set has_logo = (branded and supplier.logo_path) %}
 <body style="margin:0;padding:0;background:#F4F2F8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#15131D;">
 
@@ -20,7 +24,7 @@
       {# ─── HLAVIČKA ─── #}
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #E7E3EE;border-radius:12px;overflow:hidden;">
         <tr>
-          <td style="padding:24px 32px;background:linear-gradient(180deg,#F4F2FB 0%,#ffffff 100%);">
+          <td style="padding:24px 32px;background:linear-gradient(180deg,{{ accent_soft }} 0%,#ffffff 100%);">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               <tr>
                 <td style="vertical-align:middle;">

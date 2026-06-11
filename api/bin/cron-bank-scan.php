@@ -14,13 +14,9 @@ declare(strict_types=1);
 if (PHP_SAPI !== 'cli') exit("CLI only.\n");
 require __DIR__ . '/../vendor/autoload.php';
 
-use Monolog\Logger;
 use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
-use MyInvoice\Service\Bank\GpcParser;
-use MyInvoice\Service\Bank\StatementImporter;
-use MyInvoice\Service\Bank\StatementMatcher;
 use MyInvoice\Service\Bank\StatementScanner;
 use MyInvoice\Service\Cron\CronRun;
 
@@ -37,10 +33,11 @@ if ($scanRoot === '' || !is_dir($scanRoot)) {
     exit(0);
 }
 
-$parser   = new GpcParser();
-$matcher  = new StatementMatcher($conn);
-$importer = new StatementImporter($conn, $parser, $matcher);
-$scanner  = new StatementScanner($importer);
+// Přes DI container — StatementMatcher má injektovaný PaymentThanksMailer (#127),
+// takže auto-import GPC pošle děkovný e-mail za úhradu stejně jako ostatní cesty.
+// (Dřív se zde StatementMatcher konstruoval ručně a navíc bez FinalFromProformaCreator.)
+$container = Bootstrap::buildApp()->getContainer();
+$scanner   = $container->get(StatementScanner::class);
 
 $started = microtime(true);
 $summary = $scanner->scan($scanRoot);

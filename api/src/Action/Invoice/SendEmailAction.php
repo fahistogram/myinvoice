@@ -6,7 +6,6 @@ namespace MyInvoice\Action\Invoice;
 
 use MyInvoice\Http\Json;
 use MyInvoice\Http\SupplierGuard;
-use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceAttachmentRepository;
@@ -15,6 +14,7 @@ use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Mail\RecipientResolver;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Pdf\PdfArchiveService;
 use Psr\Http\Message\ResponseInterface as Response;
@@ -30,9 +30,9 @@ final class SendEmailAction
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
-        private readonly Config $config,
         private readonly PdfArchiveService $pdfArchive,
         private readonly InvoiceAttachmentRepository $attachments,
+        private readonly RecipientResolver $recipients,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -71,22 +71,24 @@ final class SendEmailAction
             }
         }
 
-        $to = $overrideTo ?? $this->resolveRecipients($invoice);
+        // Jednotný resolver (#86): kontakty klienta dle účelu `documents`,
+        // bez kontaktů legacy chování (main_email + e-maily zakázky), včetně
+        // kopie dodavateli (supplier.self_copy / cfg). Když UI pošle explicitní
+        // `to` (uživatel editoval v modalu), je autoritativní a nic z resolveru
+        // se nepřidává — modal mu předvyplnil i cc/bcc s kopií dodavateli,
+        // takže co poslal, je celý seznam, který viděl a schválil.
+        $resolvedRecipients = [];
+        if ($overrideTo !== null) {
+            $to = $overrideTo;
+        } else {
+            $r = $this->recipients->resolve(RecipientResolver::TYPE_DOCUMENTS, $invoice);
+            $to = $r['to'];
+            $cc = array_values(array_unique(array_merge($r['cc'], $cc)));
+            $bcc = array_values(array_unique(array_merge($r['bcc'], $bcc)));
+            $resolvedRecipients = $r['resolved'];
+        }
         if (empty($to)) {
             return Json::error($response, 'no_recipients', 'Žádný platný příjemce (chybí email klienta).', 400);
-        }
-
-        if ((bool) $this->config->get('smtp.cc_supplier_on_send', false)) {
-            $stmt = $this->db->pdo()->prepare('SELECT email FROM supplier WHERE id = ?');
-            $stmt->execute([(int) $invoice['supplier_id']]);
-            $supplierEmail = trim((string) $stmt->fetchColumn());
-            if ($supplierEmail !== ''
-                && filter_var($supplierEmail, FILTER_VALIDATE_EMAIL)
-                && !in_array($supplierEmail, $to, true)
-                && !in_array($supplierEmail, $cc, true)
-            ) {
-                $cc[] = $supplierEmail;
-            }
         }
 
         foreach ([...$to, ...$cc, ...$bcc] as $em) {
@@ -95,8 +97,11 @@ final class SendEmailAction
             }
         }
 
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
         try {
-            $pdfPath = $this->renderer->render($id);
+            $pdfPath = $this->renderer->render($id, false, $userId);
         } catch (\Throwable $e) {
             return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
         }
@@ -136,8 +141,15 @@ final class SendEmailAction
                 $cc,
                 $bcc,
                 $emailAttachments,
+                $userId,
             );
         } catch (\Throwable $e) {
+            $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+            $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+            $this->logger->log('invoice.send_failed', $user['id'] ?? null, 'invoice', $id, [
+                'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $request->getHeaderLine('User-Agent'));
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
         }
 
@@ -150,10 +162,10 @@ final class SendEmailAction
         $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
         $archiveId = $this->pdfArchive->archiveCopy($id, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('invoice.sent', $user['id'] ?? null, 'invoice', $id, [
             'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
+            'resolved_recipients' => $resolvedRecipients,
             'pdf_path' => basename($pdfPath),
             'pdf_archive_id' => $archiveId,
             'attachment_ids' => $sentAttachmentIds,
@@ -163,28 +175,8 @@ final class SendEmailAction
 
         return Json::ok($response, [
             'sent_to' => $to, 'cc' => $cc, 'bcc' => $bcc,
+            'resolved_recipients' => $resolvedRecipients,
             'sent_at' => date('Y-m-d H:i:s'), 'is_test' => false,
         ]);
-    }
-
-    private function resolveRecipients(array $invoice): array
-    {
-        $emails = [];
-        if (!empty($invoice['client_main_email'])) {
-            $emails[] = $invoice['client_main_email'];
-        }
-        if (!empty($invoice['project_id'])) {
-            $stmt = $this->db->pdo()->prepare(
-                'SELECT email FROM project_billing_emails WHERE project_id = ? ORDER BY position'
-            );
-            $stmt->execute([$invoice['project_id']]);
-            foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $em) {
-                $em = trim((string) $em);
-                if ($em !== '' && !in_array($em, $emails, true)) {
-                    $emails[] = $em;
-                }
-            }
-        }
-        return $emails;
     }
 }

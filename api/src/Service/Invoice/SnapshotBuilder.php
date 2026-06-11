@@ -50,6 +50,9 @@ final class SnapshotBuilder
             'last_name'    => $row['last_name'],
             'ic'           => $row['ic'],
             'dic'          => $row['dic'],
+            // Národní daňové číslo (#120): SK DIČ / DE Steuernummer / PL NIP / HU Adószám;
+            // u SK klienta `dic` nese IČ DPH (SK+číslo) a `tax_number` DIČ bez prefixu.
+            'tax_number'   => $row['tax_number'] ?? null,
             'street'       => $row['street'],
             'city'         => $row['city'],
             'zip'          => $row['zip'],
@@ -86,6 +89,9 @@ final class SnapshotBuilder
             'ic'           => $row['ic'],
             'dic'          => $row['dic'],
             'is_vat_payer' => (bool) $row['is_vat_payer'],
+            // Identifikovaná osoba (§ 6g–6l, issue #94) — PDF podle ní volí RC
+            // klauzuli a potlačí „Není plátce DPH" na zahraničním RC dokladu.
+            'is_identified' => (bool) ($row['is_identified'] ?? false),
             'email'        => $row['email'],
             'phone'        => $row['phone'],
             'web'          => $row['web'],

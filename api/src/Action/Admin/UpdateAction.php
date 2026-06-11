@@ -62,6 +62,17 @@ final class UpdateAction
         return Json::ok($response, $result);
     }
 
+    public function cancel(Request $request, Response $response): Response
+    {
+        if (!$this->isAdmin($request, $response, $err)) return $err;
+        $user = $request->getAttribute(AuthMiddleware::ATTR_USER);
+        $result = $this->version->cancelUpgrade();
+        $this->logger->log('system.upgrade.cancel', (int) ($user['id'] ?? 0), null, null, [
+            'cleared' => $result['cleared'] ?? false,
+        ]);
+        return Json::ok($response, $result);
+    }
+
     private function isAdmin(Request $request, Response $response, ?Response &$err): bool
     {
         $user = $request->getAttribute(AuthMiddleware::ATTR_USER);

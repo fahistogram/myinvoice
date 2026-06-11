@@ -12,6 +12,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\PurchaseInvoiceRepository;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\PurchaseInvoiceCalculator;
+use MyInvoice\Service\Invoice\SnapshotBuilder;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -48,6 +49,7 @@ final class IdokladImportService
         private readonly Config $config,
         private readonly LoggerInterface $logger,
         private readonly PurchaseInvoiceCnbApplier $cnbApplier,
+        private readonly SnapshotBuilder $snapshots,
     ) {}
 
     /**
@@ -190,9 +192,11 @@ final class IdokladImportService
      */
     private function createClientFromIdoklad(array $c, int $supplierId): int
     {
-        $countryIso2 = strtoupper((string) ($c['Country']['Code'] ?? 'CZ'));
+        $countryIso2 = $this->idokladCountryIso2($c, $supplierId);
+        // iDoklad JSON pole je `Firstname` (malé n), ne `FirstName`. Fallback na obojí.
+        $personName = trim((string) ($c['Firstname'] ?? $c['FirstName'] ?? '') . ' ' . (string) ($c['Surname'] ?? ''));
         $data = [
-            'company_name' => (string) ($c['CompanyName'] ?: ($c['FirstName'] . ' ' . $c['Surname'] ?: 'iDoklad import')),
+            'company_name' => (string) ($c['CompanyName'] ?? '') ?: ($personName ?: 'iDoklad import'),
             'ic'           => (string) ($c['IdentificationNumber'] ?? '') ?: null,
             'dic'          => (string) ($c['VatIdentificationNumber'] ?? '') ?: null,
             'street'       => (string) ($c['Street'] ?? '—'),
@@ -209,8 +213,10 @@ final class IdokladImportService
     }
 
     /**
-     * Import IssuedInvoices → invoices. MVP mapping: header + items, status='draft'.
-     * Dobropisy (IssuedInvoiceCorrections) jsou separátní endpoint a dělají se ve fázi 3.
+     * Import IssuedInvoices → invoices. Mapping: header + items; status='draft',
+     * ledaže iDoklad doklad eviduje jako zaplacený (PaymentStatus 1/3) → 'paid'
+     * s paid_at = DateOfPayment (#121, viz ImportedPaymentStateMapper).
+     * Dobropisy (CreditNotes) jsou separátní endpoint a dělají se ve fázi 3.
      *
      * Note: faktury z iDoklad nemají project_id (oni nemají koncept projektů jako my)
      * — project_id = NULL. Uživatel může později ručně přiřadit.
@@ -290,7 +296,7 @@ final class IdokladImportService
             'issue_date'       => (string) ($i['DateOfIssue'] ?? date('Y-m-d')),
             'tax_date'         => $invoiceType === 'proforma' ? null : (string) ($i['DateOfTaxing'] ?? $i['DateOfIssue'] ?? date('Y-m-d')),
             'due_date'         => (string) ($i['DateOfMaturity'] ?? $i['DateOfIssue'] ?? date('Y-m-d')),
-            'currency_id'      => $this->resolveCurrencyId((string) ($i['CurrencyCode'] ?? 'CZK'), $supplierId, isActive: true),
+            'currency_id'      => $this->resolveCurrencyId($this->idokladCurrencyCode($i, $supplierId), $supplierId, isActive: true),
             'reverse_charge'   => false,
             'language'         => 'cs',
             'varsymbol'        => $this->sanitizeVarsymbol((string) ($i['VariableSymbol'] ?? $i['DocumentNumber'] ?? '')),
@@ -306,18 +312,11 @@ final class IdokladImportService
         foreach (($i['Items'] ?? []) as $idx => $line) {
             $rate = (float) ($line['VatRate'] ?? 0);
             $vatRateId = $this->matchVatRateId($vatRates, $rate);
-            $unitPrice = (float) ($line['UnitPrice'] ?? 0);
-            // Položková sleva se uplatní jen mimo režim OnDocument (tam je sleva už
-            // na hlavičce → zabránit dvojímu odečtu).
-            $itemDiscount = (float) ($line['DiscountPercentage'] ?? 0);
-            if (!$docDiscountOnDocument && $itemDiscount > 0) {
-                $unitPrice = round($unitPrice * (1 - $itemDiscount / 100.0), 4);
-            }
             $items[] = [
                 'description'            => (string) ($line['Name'] ?? $line['Description'] ?? ''),
                 'quantity'               => (float) ($line['Amount'] ?? 1),
                 'unit'                   => (string) ($line['Unit'] ?? 'ks'),
-                'unit_price_without_vat' => $unitPrice,
+                'unit_price_without_vat' => self::idokladNetUnitPrice($line, $rate),
                 'vat_rate_id'            => $vatRateId,
                 'order_index'            => $idx,
             ];
@@ -325,7 +324,61 @@ final class IdokladImportService
         if (!empty($items)) {
             $this->invoices->replaceItems($invoiceId, $items);
         }
+
+        // #121: promítni platební stav z iDokladu (PaymentStatus 1=Paid / 3=Overpaid)
+        // — zaplacené historické doklady nesmí zůstat viset jako nezaplacené pohledávky.
+        $this->applyIssuedPaymentState(
+            $invoiceId,
+            $clientId,
+            (int) $payload['currency_id'],
+            $supplierId,
+            ImportedPaymentStateMapper::fromIdoklad($i),
+            (string) ($payload['tax_date'] ?? '') ?: (string) $payload['issue_date'],
+            (string) $payload['issue_date'],
+        );
         return $invoiceId;
+    }
+
+    /**
+     * Aplikuje namapovaný platební stav na čerstvě importovanou vydanou fakturu
+     * (issue #121). Jen pro doklady ve stavu 'draft' (guard v WHERE). Doklad opouští
+     * 'draft', proto dostává snapshoty (client/supplier/bank) stejně jako file import
+     * (InvoiceImportService) a IssueInvoiceAction; sent_at = issue_date 12:00 (stejná
+     * aproximace jako file import).
+     *
+     * @param ?array{status:string, paid_at:?string} $state  null = ponechat draft
+     */
+    private function applyIssuedPaymentState(int $invoiceId, int $clientId, int $currencyId, int $supplierId, ?array $state, string $fallbackPaidAt, string $issueDate): void
+    {
+        if ($state === null || $state['status'] !== 'paid') return;
+
+        $snapshots = $this->snapshots->build($clientId, $currencyId, $supplierId);
+        $this->db->pdo()->prepare(
+            "UPDATE invoices SET status = 'paid', paid_at = ?, sent_at = ?,
+                    client_snapshot = ?, supplier_snapshot = ?, bank_snapshot = ?
+              WHERE id = ? AND status = 'draft'"
+        )->execute([
+            $state['paid_at'] ?? $fallbackPaidAt,
+            $issueDate . ' 12:00:00',
+            json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
+            json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
+            $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
+            $invoiceId,
+        ]);
+    }
+
+    /**
+     * Aplikuje 'paid' na čerstvě importovanou přijatou fakturu (issue #121).
+     * Guard na status='draft' — createReceivedFromIdoklad může přes dedup guard
+     * vrátit existující (už zpracovaný) doklad, ten nepřepisujeme.
+     */
+    private function applyPurchasePaymentState(int $purchaseId, int $supplierId, ?array $state, string $fallbackPaidAt): void
+    {
+        if ($state === null || $state['status'] !== 'paid') return;
+        $this->db->pdo()->prepare(
+            "UPDATE purchase_invoices SET status = 'paid', paid_at = ?
+              WHERE id = ? AND supplier_id = ? AND status = 'draft'"
+        )->execute([$state['paid_at'] ?? $fallbackPaidAt, $purchaseId, $supplierId]);
     }
 
     /**
@@ -413,11 +466,7 @@ final class IdokladImportService
             $rate = (float) ($line['VatRate'] ?? 0);
             $vatRateId = $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId;
             $qty = (float) ($line['Amount'] ?? 1);
-            $unitPrice = (float) ($line['UnitPrice'] ?? 0);
-            $itemDiscount = (float) ($line['DiscountPercentage'] ?? 0);
-            if (!$docDiscountOnDocument && $itemDiscount > 0) {
-                $unitPrice = round($unitPrice * (1 - $itemDiscount / 100.0), 4);
-            }
+            $unitPrice = self::idokladNetUnitPrice($line, $rate);
             $items[] = [
                 'description'            => (string) ($line['Name'] ?? $line['Description'] ?? ''),
                 'quantity'               => $qty,
@@ -456,16 +505,20 @@ final class IdokladImportService
         // (typicky přijatá faktura z EU s reverse charge). Stejná heuristika jako AI extractor.
         $reverseCharge = $this->inferReverseChargeFromItems($vendorId, $items);
 
+        $currencyCode = $this->idokladCurrencyCode($i, $supplierId);
+
         $payload = [
             'vendor_id'             => $vendorId,
-            'vendor_invoice_number' => $this->sanitizeVendorNumber((string) ($i['DocumentNumber'] ?? '')),
+            // U přijatých je `DocumentNumber` interní číslo iDokladu; číslo dodavatele je
+            // `ReceivedDocumentNumber`. Preferuj to dodavatelovo (fallback na DocumentNumber).
+            'vendor_invoice_number' => $this->sanitizeVendorNumber((string) ($i['ReceivedDocumentNumber'] ?? $i['DocumentNumber'] ?? '')),
             'document_kind'         => 'invoice',
             'issue_date'            => $issueDate,
             'tax_date'              => $taxDate,
             'due_date'              => $dueDate,
             'received_at'           => date('Y-m-d'),
-            'currency_id'           => $this->resolveCurrencyId((string) ($i['CurrencyCode'] ?? 'CZK'), $supplierId, isActive: false),
-            'exchange_rate'         => isset($i['ExchangeRate']) ? (float) $i['ExchangeRate'] : null,
+            'currency_id'           => $this->resolveCurrencyId($currencyCode, $supplierId, isActive: false),
+            'exchange_rate'         => self::idokladExchangeRate($i),
             'exchange_rate_source'  => 'manual',
             'reverse_charge'        => $reverseCharge,
             'language'              => 'cs',
@@ -491,11 +544,77 @@ final class IdokladImportService
         $this->cnbApplier->applyIfMissing(
             $id,
             $supplierId,
-            (string) ($i['CurrencyCode'] ?? 'CZK'),
+            $currencyCode,
             (string) ($payload['tax_date'] ?? $payload['issue_date'] ?? ''),
             $payload['exchange_rate'] ?? null,
         );
+
+        // Seed override rekapitulace DPH dle dokladu (§ 73). iDoklad nevrací globální
+        // rekapitulaci, ale per-řádek autoritativní Prices (TotalWithoutVat/TotalVat),
+        // takže ji poskládáme agregací po sazbě. Dokladovou slevu (materializovanou
+        // jako záporné řádky) přeskakujeme — per-řádkové Prices ji nezahrnují, takže
+        // by recap neseděl na náš (po-slevový) dopočet.
+        if ($docDiscountPercent <= 0.0) {
+            $docByRate = self::idokladVatRecap($i['Items'] ?? []);
+            if ($docByRate !== []) {
+                $this->purCalc->recompute($id);
+                $warning = (new PurchaseVatRecapSeeder($this->purchaseRepo, $this->purCalc))->seed(
+                    $id,
+                    $supplierId,
+                    $docByRate,
+                    $currencyCode,
+                    false,
+                );
+                if ($warning !== null) {
+                    try {
+                        $this->purchaseRepo->appendExtractionWarning($id, $supplierId, $warning);
+                    } catch (\Throwable) {
+                        // Varování je „nice to have".
+                    }
+                }
+            }
+        }
+
+        // #121: iDoklad eviduje doklad jako zaplacený → promítni (jen na čerstvě
+        // vytvořený doklad; dedup-vrácený existující doklad výše se nemění).
+        $this->applyPurchasePaymentState(
+            $id,
+            $supplierId,
+            ImportedPaymentStateMapper::fromIdoklad($i),
+            $taxDate ?: $issueDate,
+        );
+
         return $id;
+    }
+
+    /**
+     * Poskládá rekapitulaci DPH po sazbách z iDoklad řádkových Prices (autoritativní
+     * hodnoty z iDokladu). Vrací rateKey => kladné `{base, vat}`. Když některý řádek
+     * Prices nemá, vrátí prázdné pole (neseedujeme z neúplných dat).
+     *
+     * @param array<int,array<string,mixed>> $lines
+     * @return array<string,array{base:float,vat:float}>
+     */
+    private static function idokladVatRecap(array $lines): array
+    {
+        $out = [];
+        foreach ($lines as $line) {
+            $rate = (float) ($line['VatRate'] ?? 0);
+            if ($rate <= 0.0) {
+                continue; // 0 % / osvobozeno → neseedujeme
+            }
+            $prices = $line['Prices'] ?? null;
+            if (!is_array($prices) || !isset($prices['TotalWithoutVat'], $prices['TotalVat'])) {
+                return []; // chybí autoritativní data → neseedovat
+            }
+            $key = number_format($rate, 2, '.', '');
+            if (!isset($out[$key])) {
+                $out[$key] = ['base' => 0.0, 'vat' => 0.0];
+            }
+            $out[$key]['base'] += abs((float) $prices['TotalWithoutVat']);
+            $out[$key]['vat']  += abs((float) $prices['TotalVat']);
+        }
+        return $out;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
@@ -534,6 +653,52 @@ final class IdokladImportService
     }
 
     /**
+     * ISO kód měny dokladu. iDoklad list endpointy vrací jen `CurrencyId` (int) — přeložíme
+     * přes /Currencies mapu. Fallback na legacy nested `Currency.Code` / `CurrencyCode`, pak CZK.
+     */
+    private function idokladCurrencyCode(array $doc, int $supplierId): string
+    {
+        $cid = (int) ($doc['CurrencyId'] ?? 0);
+        if ($cid > 0) {
+            $map = $this->idoklad->currencyCodeMap($supplierId);
+            if (isset($map[$cid])) return $map[$cid];
+        }
+        return (string) ($doc['Currency']['Code'] ?? $doc['CurrencyCode'] ?? 'CZK') ?: 'CZK';
+    }
+
+    /**
+     * Kurz dokladu přepočtený na „kolik CZK za 1 jednotku měny".
+     *
+     * iDoklad drží kurz jako `ExchangeRate` na `ExchangeRateAmount` jednotek (u měn jako
+     * HUF/JPY je Amount=100). Náš model očekává kurz na 1 jednotku → dělíme. Bez toho byl
+     * kurz u těchto měn 100× špatně (viz #80 audit).
+     */
+    public static function idokladExchangeRate(array $doc): ?float
+    {
+        if (!isset($doc['ExchangeRate'])) return null;
+        $rate = (float) $doc['ExchangeRate'];
+        $amount = (float) ($doc['ExchangeRateAmount'] ?? 1);
+        if ($amount > 0.0 && $amount !== 1.0) {
+            $rate /= $amount;
+        }
+        return $rate;
+    }
+
+    /**
+     * ISO2 země kontaktu. iDoklad list endpoint vrací jen `CountryId` (int) — přeložíme
+     * přes /Countries mapu. Fallback na legacy nested `Country.Code`, pak CZ.
+     */
+    private function idokladCountryIso2(array $contact, int $supplierId): string
+    {
+        $cid = (int) ($contact['CountryId'] ?? 0);
+        if ($cid > 0) {
+            $map = $this->idoklad->countryCodeMap($supplierId);
+            if (isset($map[$cid])) return $map[$cid];
+        }
+        return strtoupper((string) ($contact['Country']['Code'] ?? 'CZ')) ?: 'CZ';
+    }
+
+    /**
      * @return array<int, float>  id → rate_percent
      */
     private function loadVatRateMap(): array
@@ -557,6 +722,39 @@ final class IdokladImportService
             if (abs($r - $rate) < 0.01) return $id;
         }
         return null;
+    }
+
+    /**
+     * Netto jednotková cena (bez DPH, po případné položkové slevě) z iDoklad v3 položky.
+     *
+     * iDoklad v3 GET model NEMÁ top-level `UnitPrice` — zadaná cena je vnořená v
+     * `Prices.UnitPrice` a je v `PriceType` dokladu (WithVat=0 je DEFAULT!). Autoritativní
+     * netto je `Prices.TotalWithoutVat` (už po položkové slevě), takže ho vydělíme
+     * množstvím. Bez toho se `$line['UnitPrice']` vždy vyhodnotilo jako 0 → všechny
+     * importované faktury (vydané i přijaté) měly 0 Kč (viz #80).
+     *
+     * Fallback (kdyby `Prices` chyběl): `Prices.UnitPrice` / legacy top-level `UnitPrice`
+     * převedený dle PriceType na netto a po položkové slevě.
+     */
+    public static function idokladNetUnitPrice(array $line, float $vatRate): float
+    {
+        $prices = is_array($line['Prices'] ?? null) ? $line['Prices'] : [];
+        $qty = (float) ($line['Amount'] ?? 1);
+
+        if (isset($prices['TotalWithoutVat']) && $qty != 0.0) {
+            return round((float) $prices['TotalWithoutVat'] / $qty, 4);
+        }
+
+        $unitPrice = (float) ($prices['UnitPrice'] ?? $line['UnitPrice'] ?? 0);
+        // PriceType: 0 = WithVat (iDoklad default), 1 = WithoutVat, 2 = OnlyBase
+        if ((int) ($line['PriceType'] ?? 0) === 0 && $vatRate > 0.0) {
+            $unitPrice /= (1 + $vatRate / 100.0);
+        }
+        $itemDiscount = (float) ($line['DiscountPercentage'] ?? 0);
+        if ($itemDiscount > 0) {
+            $unitPrice *= (1 - $itemDiscount / 100.0);
+        }
+        return round($unitPrice, 4);
     }
 
     /**
@@ -624,8 +822,8 @@ final class IdokladImportService
     }
 
     /**
-     * Import IssuedInvoiceCorrections (dobropisy k vystaveným fakturám).
-     * Mají ParentDocumentId odkazující na původní fakturu (idoklad_id),
+     * Import CreditNotes (dobropisy k vystaveným fakturám).
+     * Mají CreditedInvoiceId odkazující na původní fakturu (idoklad_id),
      * což mapujeme na invoices.parent_invoice_id (po lookup do clients/invoices
      * podle naší db-side idoklad_id).
      */
@@ -637,7 +835,7 @@ final class IdokladImportService
         $query = $bookmarkSince !== null ? ['filter' => "DateLastChange>={$bookmarkSince}"] : [];
         $created = 0; $skipped = 0; $failed = 0;
 
-        foreach ($this->idoklad->getAll($supplierId, 'IssuedInvoiceCorrections', $query) as $i) {
+        foreach ($this->idoklad->getAll($supplierId, 'CreditNotes', $query) as $i) {
             $idokladId = (int) ($i['Id'] ?? 0);
             if ($idokladId === 0) continue;
 
@@ -651,8 +849,8 @@ final class IdokladImportService
             if ($dryRun) { $created++; continue; }
 
             try {
-                // Resolve parent invoice
-                $parentIdokladId = (int) ($i['ParentDocumentId'] ?? 0);
+                // Resolve parent invoice (iDoklad CreditNotes nese odkaz v CreditedInvoiceId)
+                $parentIdokladId = (int) ($i['CreditedInvoiceId'] ?? 0);
                 $parentInvoiceId = null;
                 if ($parentIdokladId > 0) {
                     $s = $this->db->pdo()->prepare(
@@ -680,7 +878,7 @@ final class IdokladImportService
                     'issue_date'        => (string) ($i['DateOfIssue'] ?? date('Y-m-d')),
                     'tax_date'          => (string) ($i['DateOfTaxing'] ?? $i['DateOfIssue'] ?? date('Y-m-d')),
                     'due_date'          => (string) ($i['DateOfMaturity'] ?? $i['DateOfIssue'] ?? date('Y-m-d')),
-                    'currency_id'       => $this->resolveCurrencyId((string) ($i['CurrencyCode'] ?? 'CZK'), $supplierId, isActive: true),
+                    'currency_id'       => $this->resolveCurrencyId($this->idokladCurrencyCode($i, $supplierId), $supplierId, isActive: true),
                     'reverse_charge'    => false,
                     'language'          => 'cs',
                     'varsymbol'         => $this->sanitizeVarsymbol((string) ($i['VariableSymbol'] ?? $i['DocumentNumber'] ?? '')),
@@ -697,16 +895,11 @@ final class IdokladImportService
                 $items = [];
                 foreach (($i['Items'] ?? []) as $idx => $line) {
                     $rate = (float) ($line['VatRate'] ?? 0);
-                    $unitPrice = (float) ($line['UnitPrice'] ?? 0);
-                    $itemDiscount = (float) ($line['DiscountPercentage'] ?? 0);
-                    if (!$docDiscountOnDocument && $itemDiscount > 0) {
-                        $unitPrice = round($unitPrice * (1 - $itemDiscount / 100.0), 4);
-                    }
                     $items[] = [
                         'description'            => (string) ($line['Name'] ?? $line['Description'] ?? ''),
                         'quantity'               => (float) ($line['Amount'] ?? 1),
                         'unit'                   => (string) ($line['Unit'] ?? 'ks'),
-                        'unit_price_without_vat' => $unitPrice,
+                        'unit_price_without_vat' => self::idokladNetUnitPrice($line, $rate),
                         'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate),
                         'order_index'            => $idx,
                     ];
@@ -714,6 +907,16 @@ final class IdokladImportService
                 if (!empty($items)) {
                     $this->invoices->replaceItems($invoiceId, $items);
                 }
+                // #121: vyrovnaný/uhrazený dobropis nesmí zůstat draft
+                $this->applyIssuedPaymentState(
+                    $invoiceId,
+                    $clientId,
+                    (int) $payload['currency_id'],
+                    $supplierId,
+                    ImportedPaymentStateMapper::fromIdoklad($i),
+                    (string) ($payload['tax_date'] ?? '') ?: (string) $payload['issue_date'],
+                    (string) $payload['issue_date'],
+                );
                 $this->invCalc->recompute($invoiceId);
                 if ($downloadAttachments) {
                     $this->archiveIssuedPdf($supplierId, $invoiceId, $idokladId, $i);
@@ -743,7 +946,7 @@ final class IdokladImportService
         if ($archiveRoot === '') {
             $uploads = (string) $this->config->get('storage.uploads_dir', '');
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/invoices-imported'
-                : __DIR__ . '/../../../../storage/invoices-imported';
+                : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices-imported');
         }
         $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
         if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
@@ -770,26 +973,29 @@ final class IdokladImportService
     private function archiveReceivedPdf(int $supplierId, int $purchaseInvoiceId, int $idokladInvoiceId): void
     {
         $attachments = $this->idoklad->listReceivedAttachments($supplierId, $idokladInvoiceId);
-        // Filter PDFs only (iDoklad může mít víc příloh — obrázky, atd.)
-        $pdfAttachments = array_filter(
-            $attachments,
-            fn ($a) => str_contains(strtolower((string) ($a['ContentType'] ?? '')), 'pdf')
-                || str_ends_with(strtolower((string) ($a['FileName'] ?? '')), '.pdf'),
-        );
-        if (empty($pdfAttachments)) return;
-
-        $first = reset($pdfAttachments);
-        $attachmentId = (int) ($first['Id'] ?? 0);
-        if ($attachmentId === 0) return;
-
-        $pdf = $this->idoklad->downloadReceivedAttachment($supplierId, $attachmentId);
+        // iDoklad v3 vrací bajty přílohy inline v `FileBytes` (base64) — žádný extra download
+        // request. Vyber první PDF (může být víc příloh: obrázky atd.).
+        $pdf = null;
+        $name = 'invoice.pdf';
+        foreach ($attachments as $a) {
+            $bytes = $a['FileBytes'] ?? null;
+            if ($bytes === null || $bytes === '') continue;
+            $raw = base64_decode((string) $bytes, true);
+            if ($raw === false || $raw === '') continue;
+            $fileName = (string) ($a['FileName'] ?? '');
+            if (str_ends_with(strtolower($fileName), '.pdf') || str_starts_with($raw, '%PDF')) {
+                $pdf = $raw;
+                $name = $fileName !== '' ? $fileName : 'invoice.pdf';
+                break;
+            }
+        }
         if ($pdf === null) return;
 
         $archiveRoot = (string) $this->config->get('purchase_invoice.archive_storage', '');
         if ($archiveRoot === '') {
             $uploads = (string) $this->config->get('storage.uploads_dir', '');
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/purchase-invoices'
-                : __DIR__ . '/../../../../storage/purchase-invoices';
+                : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
         }
         $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
         if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
@@ -802,7 +1008,6 @@ final class IdokladImportService
             @file_put_contents($diskPath, $pdf);
         }
         $relPath = 'supplier-' . $supplierId . '/' . $disk;
-        $name = (string) ($first['FileName'] ?? 'invoice.pdf');
         $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, $size, $name);
     }
 

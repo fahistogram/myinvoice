@@ -20,7 +20,9 @@ declare(strict_types=1);
  * jako příloha jen PDF výkazu (samostatný WorkReportPdfRenderer). Recipients = stejní
  * jako u původní žádosti (project_billing_emails fallback client_main_email).
  *
- * Volitelné BCC dodavateli (cfg.approval.cc_supplier_on_approval_reminder=true) pro audit.
+ * Volitelná kopie dodavateli pro audit — supplier.self_copy['approvals'],
+ * fallback cfg.approval.cc_supplier_on_approval_reminder=true → BCC
+ * (řeší RecipientResolver, isApprovalReminder: true).
  *
  * Audit log: invoice.approval_reminder_sent
  */
@@ -72,12 +74,13 @@ $varsBuilder = $container->get(ApprovalEmailVarsBuilder::class);
 $logger = $container->get(ActivityLogger::class);
 /** @var PdfArchiveService $pdfArchive */
 $pdfArchive = $container->get(PdfArchiveService::class);
+/** @var \MyInvoice\Service\Mail\RecipientResolver $recipientResolver */
+$recipientResolver = $container->get(\MyInvoice\Service\Mail\RecipientResolver::class);
 
 $run = CronRun::start($conn->pdo(), 'cron-send-approval-reminders');
 
 $days = $daysOverride ?? (int) $config->get('approval.reminder_after_days', 5);
 $maxReminders = (int) $config->get('approval.max_reminders', 3);
-$ccSupplier = (bool) $config->get('approval.cc_supplier_on_approval_reminder', true);
 $days = max(1, $days);
 
 $startedAt = microtime(true);
@@ -126,35 +129,23 @@ foreach ($candidates as $inv) {
         continue;
     }
 
-    // Recipients: stejná logika jako RequestApprovalAction — project_billing_emails fallback main_email
-    $to = [];
-    if (!empty($inv['project_id'])) {
-        $st = $pdo->prepare('SELECT email FROM project_billing_emails WHERE project_id = ? ORDER BY position');
-        $st->execute([$inv['project_id']]);
-        foreach ($st->fetchAll(\PDO::FETCH_COLUMN) as $em) {
-            $em = trim((string) $em);
-            if ($em !== '' && filter_var($em, FILTER_VALIDATE_EMAIL)) $to[] = $em;
-        }
-    }
-    if (empty($to) && !empty($inv['client_main_email'])) {
-        $main = trim((string) $inv['client_main_email']);
-        if (filter_var($main, FILTER_VALIDATE_EMAIL)) $to[] = $main;
-    }
+    // Recipients: jednotný resolver (#86) — účel `approvals`, stejná logika
+    // jako RequestApprovalAction (kontakty klienta; legacy fallback
+    // project_billing_emails NEBO main_email). Kopie dodavateli pro audit
+    // (supplier.self_copy / cfg approval.cc_supplier_on_approval_reminder)
+    // jde přes isApprovalReminder: true.
+    $r = $recipientResolver->resolve(
+        \MyInvoice\Service\Mail\RecipientResolver::TYPE_APPROVALS,
+        $inv,
+        isApprovalReminder: true,
+    );
+    $to = $r['to'];
+    $cc = $r['cc'];
+    $bcc = $r['bcc'];
     if (empty($to)) {
         $report['errors']++;
         fprintf(STDERR, "  ✗ #%d %s — no recipients\n", $invId, $vs);
         continue;
-    }
-
-    // BCC dodavateli pro audit
-    $bcc = [];
-    if ($ccSupplier) {
-        $st = $pdo->prepare('SELECT email FROM supplier WHERE id = ?');
-        $st->execute([(int) $inv['supplier_id']]);
-        $supEmail = trim((string) $st->fetchColumn());
-        if ($supEmail !== '' && filter_var($supEmail, FILTER_VALIDATE_EMAIL) && !in_array($supEmail, $to, true)) {
-            $bcc[] = $supEmail;
-        }
     }
 
     try {
@@ -168,18 +159,18 @@ foreach ($candidates as $inv) {
             $to,
             $vars,
             null,
-            [],
+            $cc,
             $bcc,
             [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
         );
 
         // Archivuj odeslaný výkaz — viz RequestApprovalAction.
-        $sentToAll = array_values(array_unique(array_merge($to, $bcc)));
+        $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
         $archiveId = $pdfArchive->archiveCopy($invId, $pdfPath, 'approval_reminder', wasSent: true, sentTo: $sentToAll);
 
         $repo->markApprovalReminderSent($invId);
         $logger->log('invoice.approval_reminder_sent', null, 'invoice', $invId, [
-            'to' => $to, 'bcc' => $bcc,
+            'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
             'reminder_n' => ((int) $inv['approval_reminder_count']) + 1,
             'pdf_archive_id' => $archiveId,
         ]);
@@ -189,6 +180,11 @@ foreach ($candidates as $inv) {
             $invId, $vs, implode(', ', $to), ((int) $inv['approval_reminder_count']) + 1);
     } catch (\Throwable $e) {
         $report['errors']++;
+        $logger->log('invoice.approval_reminder_failed', null, 'invoice', $invId, [
+            'to' => $to, 'bcc' => $bcc,
+            'reminder_n' => ((int) $inv['approval_reminder_count']) + 1,
+            'error' => mb_substr($e->getMessage(), 0, 500),
+        ]);
         fprintf(STDERR, "  ✗ #%d %s — %s\n", $invId, $vs, $e->getMessage());
     }
 }

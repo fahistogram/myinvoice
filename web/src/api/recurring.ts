@@ -42,7 +42,13 @@ export interface RecurringTemplate {
   language: 'cs' | 'en'
   payment_method: PaymentMethod
   reverse_charge: boolean
+  /** Ceny položek zadané včetně DPH (brutto) — propíše se do generovaných faktur. */
+  prices_include_vat: boolean
   discount_percent: number
+  /** Pevná kategorie tržby (#119) — přebíjí fallback zakázka → zákazník; null = fallback. */
+  revenue_category_id: number | null
+  revenue_category_label?: string | null
+  revenue_category_code?: string | null
   payment_due_days: number
   tax_date_mode: TaxDateMode
   draft_open_mode: DraftOpenMode
@@ -81,7 +87,9 @@ export interface RecurringTemplatePayload {
   language?: 'cs' | 'en'
   payment_method?: PaymentMethod
   reverse_charge?: boolean
+  prices_include_vat?: boolean
   discount_percent?: number
+  revenue_category_id?: number | null
   payment_due_days?: number
   tax_date_mode?: TaxDateMode
   draft_open_mode?: DraftOpenMode

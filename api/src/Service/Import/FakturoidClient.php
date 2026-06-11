@@ -36,6 +36,8 @@ final class FakturoidClient
     private const USER_AGENT = 'MyInvoice.cz Import (https://github.com/radekhulan/myinvoice; radek@hulan.cz)';
     private const TIMEOUT = 30;
     private const RATE_LIMIT_THRESHOLD = 180; // req/min
+    /** Fixní velikost stránky Fakturoid API v3 (invoices/expenses/subjects). */
+    private const PAGE_SIZE = 40;
 
     private Client $http;
     /** @var array<int, list<int>>  supplier_id → list timestamps (rolling 60s) */
@@ -260,7 +262,10 @@ final class FakturoidClient
             foreach ($res['items'] as $item) {
                 yield $item;
             }
-            $hasMore = $res['next_page'] !== null && !empty($res['items']);
+            // Fakturoid API v3 neposílá RFC 5988 Link header (oproti komentáři u parseNextPage)
+            // — `next_page` je vždy null, takže původní podmínka ukončila smyčku po první stránce.
+            // Pokračujeme tedy dokud dostáváme plnou stránku (Fakturoid používá per_page=40).
+            $hasMore = count($res['items']) >= self::PAGE_SIZE;
             $page++;
         } while ($hasMore);
     }

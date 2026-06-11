@@ -11,6 +11,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Mail\PaymentThanksMailer;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Stats\StatsRecomputer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
@@ -26,6 +27,7 @@ final class MarkPaidAction
         private readonly IpMatcher $ipMatcher,
         private readonly StatsRecomputer $stats,
         private readonly InvoicePdfRenderer $pdf,
+        private readonly PaymentThanksMailer $paymentThanks,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -65,6 +67,23 @@ final class MarkPaidAction
 
         $this->stats->recomputeForInvoiceId($id);
 
-        return Json::ok($response, $this->repo->find($id));
+        // Volitelný děkovný e-mail za úhradu (issue #57) — jen pokud uživatel zaškrtl.
+        // Selhání odeslání nesmí shodit označení jako zaplacené; service vrací výsledek.
+        $thanks = null;
+        if (!empty($body['send_payment_thanks'])) {
+            $trigger = ($body['thanks_trigger'] ?? '') === 'bulk' ? 'bulk' : 'manual';
+            $thanks = $this->paymentThanks->sendForInvoice(
+                $id,
+                $trigger,
+                $user['id'] ?? null,
+                $ip,
+                $request->getHeaderLine('User-Agent'),
+                requireUnsent: false,
+            );
+        }
+
+        $result = $this->repo->find($id);
+        $result['payment_thanks'] = $thanks; // null = neodesíláno
+        return Json::ok($response, $result);
     }
 }

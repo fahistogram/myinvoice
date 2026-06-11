@@ -26,6 +26,8 @@ export interface DphPriznaniPreview {
 export interface DphSettings {
   vat_period: 'monthly' | 'quarterly' | null
   is_vat_payer: boolean
+  /** Identifikovaná osoba (§ 6g–6l, issue #94) — přiznání typu I, vždy měsíčně. */
+  is_identified?: boolean
   taxpayer_type: 'fo' | 'po' | null
   has_financial_office: boolean
 }
@@ -89,6 +91,8 @@ export interface DphBookPreview {
   period: {
     year: number
     month: number
+    period_type: 'monthly' | 'quarterly'
+    quarter: number | null
     start: string
     end: string
     label: string
@@ -100,6 +104,46 @@ export interface DphBookPreview {
     received: { base: number; vat: number; total: number }
     vat_balance: number
   }
+}
+
+export type MonthlyExportPart =
+  | 'sales_pdf' | 'sales_isdoc' | 'purchase_pdf' | 'purchase_isdoc'
+  | 'bank_pdf' | 'bank_gpc' | 'dph_book'
+
+/** Období hromadného exportu — měsíc nebo celé čtvrtletí. */
+export type ExportPeriodArg =
+  | { type: 'monthly'; year: number; month: number }
+  | { type: 'quarterly'; year: number; quarter: number }
+
+export interface MonthlyExportPreview {
+  period: string
+  period_type: 'monthly' | 'quarterly'
+  counts: Record<MonthlyExportPart, number>
+}
+
+export interface MonthlyExportJob {
+  id: number
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  total_items: number | null
+  processed: number
+  created_count: number
+  failed_count: number
+  current_step: string | null
+  log_text?: string | null
+  last_error: string | null
+  cancel_requested: boolean
+  result_name: string | null
+  result_size: number | null
+  params: Record<string, unknown> | null
+  created_at: string
+  finished_at: string | null
+}
+
+/** Query/body parametry období pro hromadný export (period + year + month|quarter). */
+function monthlyExportPeriodParams(period: ExportPeriodArg): Record<string, string | number> {
+  return period.type === 'quarterly'
+    ? { period: 'quarterly', year: period.year, quarter: period.quarter }
+    : { period: 'monthly', year: period.year, month: period.month }
 }
 
 export const reportsApi = {
@@ -167,6 +211,7 @@ export const reportsApi = {
         year: number
         taxpayer_type: 'fo' | 'po'
         revenue_orientacni: number
+        exempt_revenue_orientacni?: number
         costs_orientacni: number
         profit_orientacni: number
         submission_deadline: string
@@ -191,14 +236,51 @@ export const reportsApi = {
   },
 
   // Kniha DPH (interní VAT žurnál — NE EPO podání)
-  dphBookPreview: (year: number, month: number) =>
-    api.get<DphBookPreview>('/reports/dph-book/preview', { params: { year, month } }).then(r => r.data),
+  dphBookPreview: (year: number, month: number, period?: 'monthly' | 'quarterly') =>
+    api.get<DphBookPreview>('/reports/dph-book/preview', {
+      params: period ? { year, month, period } : { year, month },
+    }).then(r => r.data),
 
-  dphBookPdfUrl: (year: number, month: number) => {
+  dphBookPdfUrl: (year: number, month: number, period?: 'monthly' | 'quarterly') => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
     const params = new URLSearchParams({ year: String(year), month: String(month) })
+    if (period) params.set('period', period)
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
     return `/api/reports/dph-book?${params.toString()}`
+  },
+
+  // Hromadný export — background job (počty per část pro UI checkboxy)
+  monthlyExportPreview: (period: ExportPeriodArg) =>
+    api.get<MonthlyExportPreview>('/reports/monthly-export/preview', { params: monthlyExportPeriodParams(period) })
+      .then(r => r.data),
+
+  /** Spustí export job na pozadí → vrátí job_id. */
+  monthlyExportStart: (period: ExportPeriodArg, parts: string[]) =>
+    api.post<{ job_id: number; status: string; params: Record<string, unknown> }>(
+      '/reports/monthly-export/start', { ...monthlyExportPeriodParams(period), parts },
+    ).then(r => r.data),
+
+  /** Stav jobu (polling). */
+  monthlyExportJob: (id: number) =>
+    api.get<MonthlyExportJob>(`/reports/monthly-export/jobs/${id}`).then(r => r.data),
+
+  /** Poslední exporty (historie — zůstávají ke stažení dokud nejsou smazané / uklizené). */
+  monthlyExportJobs: () =>
+    api.get<MonthlyExportJob[]>('/reports/monthly-export/jobs').then(r => r.data),
+
+  monthlyExportCancel: (id: number) =>
+    api.post<{ ok: boolean; cancel_requested: boolean }>(`/reports/monthly-export/jobs/${id}/cancel`).then(r => r.data),
+
+  monthlyExportDeleteJob: (id: number) =>
+    api.delete<{ ok: boolean; deleted: boolean }>(`/reports/monthly-export/jobs/${id}`).then(r => r.data),
+
+  /** URL ke stažení hotového ZIPu — otevírá se přímou navigací (cookie auth + supplier_id query). */
+  monthlyExportDownloadUrl: (id: number) => {
+    const sid = localStorage.getItem('myinvoice.current_supplier_id')
+    const params = new URLSearchParams()
+    if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
+    const qs = params.toString()
+    return `/api/reports/monthly-export/jobs/${id}/download${qs ? `?${qs}` : ''}`
   },
 
   /** URL na download endpoint — frontend ho otevírá v novém okně */

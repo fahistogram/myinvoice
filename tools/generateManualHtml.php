@@ -91,14 +91,35 @@ function mdToHtml(string $md, array &$tocOut, string $imgUrlBase): string {
             $listItems = [];
         }
     };
-    $flushBlockquote = function () use (&$inBlockquote, &$blockquoteLines, &$html) {
-        if ($inBlockquote) {
-            $html .= "<blockquote>\n";
-            $html .= '<p>' . mdInline(implode(' ', $blockquoteLines)) . "</p>\n";
-            $html .= "</blockquote>\n";
-            $inBlockquote = false;
-            $blockquoteLines = [];
+    // GitHub-style callouts (> [!TIP] …) → ikona + barevný box. Ostatní blockquoty beze změny.
+    $CALLOUTS = [
+        'TIP'       => ['tip',       'Tip',        'M9 18h6m-5 3h4M12 3a6 6 0 0 0-3.6 10.8c.6.45.94 1.17 1 1.95V16h5.2v-.25c.06-.78.4-1.5 1-1.95A6 6 0 0 0 12 3z'],
+        'NOTE'      => ['note',      'Poznámka',   'M12 8h.01M11 12h1v4h1M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z'],
+        'IMPORTANT' => ['important', 'Důležité',   'M11 5.88V19.24a1.76 1.76 0 0 1-3.42.59l-2.14-6.15M18 13a3 3 0 1 0 0-6M5.44 13.68A4 4 0 0 1 7 6h1.83c4.1 0 7.62-1.23 9.17-3v14c-1.55-1.77-5.07-3-9.17-3H7a4 4 0 0 1-1.56-.32z'],
+        'WARNING'   => ['warning',   'Upozornění', 'M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z'],
+        'CAUTION'   => ['caution',   'Pozor',      'M12 8v4m0 4h.01M4.93 4.93l14.14 14.14M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z'],
+    ];
+    $flushBlockquote = function () use (&$inBlockquote, &$blockquoteLines, &$html, $CALLOUTS) {
+        if (!$inBlockquote) return;
+        $lines = $blockquoteLines;
+        $type  = null;
+        if (isset($lines[0]) && preg_match('/^\s*\[!(TIP|NOTE|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i', $lines[0], $cm)) {
+            $type = strtoupper($cm[1]);
+            $lines[0] = $cm[2];
+            if ($lines[0] === '') array_shift($lines);
         }
+        $body = mdInline(implode(' ', $lines));
+        if ($type !== null && isset($CALLOUTS[$type])) {
+            [$cls, $label, $svg] = $CALLOUTS[$type];
+            $icon = '<svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' . $svg . '"/></svg>';
+            $html .= '<div class="callout callout-' . $cls . '">';
+            $html .= '<div class="callout-title">' . $icon . $label . '</div>';
+            $html .= '<div class="callout-body"><p>' . $body . "</p></div></div>\n";
+        } else {
+            $html .= "<blockquote>\n<p>" . $body . "</p>\n</blockquote>\n";
+        }
+        $inBlockquote = false;
+        $blockquoteLines = [];
     };
     $flushTable = function () use (&$inTable, &$tableRows, &$tableAligns, &$html) {
         if (!$inTable || count($tableRows) < 2) {

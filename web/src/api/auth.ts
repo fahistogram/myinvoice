@@ -15,6 +15,20 @@ export interface SupplierBrief {
   company_name: string
   ic: string | null
   is_vat_payer: boolean
+  /** Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku
+   *  s přeshraničními povinnostmi (RC faktury do EU, SHV, samovyměření). */
+  is_identified: boolean
+  /** 'fo' = OSVČ (fyzická osoba), 'po' = s.r.o. (právnická osoba), null = nenastaveno. */
+  taxpayer_type: 'fo' | 'po' | null
+  default_payment_due_days: number
+  default_payment_due_unit: 'days' | 'month'
+  /** Výchozí režim cen u nových faktur (false = bez DPH, true = ceny s DPH). */
+  default_prices_include_vat: boolean
+  /** Posílá dodavatel automatické upomínky? Když ne, per-faktura přepínač se v editoru skryje. */
+  auto_send_reminders: boolean
+  /** Děkovný e-mail za úhradu (issue #57) — řídí checkbox v mark-paid modalu. */
+  payment_thanks_enabled: boolean
+  payment_thanks_default_checked: boolean
 }
 
 export interface SetupStatus {
@@ -61,6 +75,8 @@ export interface SetupPayload {
     email: string
     phone?: string
     web?: string
+    commercial_register?: string
+    taxpayer_type?: 'fo' | 'po'
     default_currency?: string
     default_payment_due_days?: number
     default_hourly_rate?: number
@@ -91,6 +107,10 @@ export const authApi = {
   /** ARES lookup pro setup wizard (funguje jen když ještě nemáme admin usera). */
   setupAresLookup: (ic: string) =>
     api.post<import('./clients').AresLookupResult>('/auth/setup-ares-lookup', { ic }).then((r) => r.data),
+
+  /** Účty z registru plátců DPH (CRPDPH) pro setup wizard (jen dokud nemáme admin usera). */
+  setupCrpdphLookup: (dic: string) =>
+    api.post<import('./clients').BankLookupResult>('/auth/setup-crpdph-lookup', { dic }).then((r) => r.data),
 
   /** Sample data generator po setup wizardu (jen pokud DB nemá data). */
   setupSample: () =>

@@ -391,6 +391,21 @@ final class RecurringTemplateAction
                 $err['discount_percent'][] = 'Sleva musí být mezi 0 a 100 %';
             }
         }
+        // Pevná kategorie tržby (#119) — IDOR guard: musí existovat a patřit dodavateli
+        // šablony. Archivovanou nezakazujeme (edit dřív uložené šablony musí projít).
+        if (!empty($data['revenue_category_id'])) {
+            if (!is_numeric($data['revenue_category_id'])) {
+                $err['revenue_category_id'][] = 'Neplatná kategorie tržby';
+            } else {
+                $stmt = $this->db->pdo()->prepare(
+                    'SELECT COUNT(*) FROM revenue_categories WHERE id = ? AND supplier_id = ?'
+                );
+                $stmt->execute([(int) $data['revenue_category_id'], (int) $data['supplier_id']]);
+                if ((int) $stmt->fetchColumn() === 0) {
+                    $err['revenue_category_id'][] = 'Neplatná kategorie tržby';
+                }
+            }
+        }
         // U non-bank-transfer ztrácí auto_send_email smysl (klient nemá co platit) — povolíme,
         // ale ne reminder; reminder cron už non-bank přeskakuje.
 

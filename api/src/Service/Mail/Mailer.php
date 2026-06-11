@@ -8,7 +8,10 @@ use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\EmailTemplateRepository;
+use MyInvoice\Service\Branding\AccentColor;
+use MyInvoice\Service\Signing\Email\EmailSigningService;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\Mailer as SymfonyMailer;
 use Symfony\Component\Mailer\Transport;
 use Symfony\Component\Mime\Address;
@@ -39,6 +42,7 @@ final class Mailer
         private readonly LoggerInterface $logger,
         private readonly Connection $db,
         private readonly EmailTemplateRepository $templates,
+        private readonly ?EmailSigningService $emailSigning = null,
     ) {}
 
     /**
@@ -47,6 +51,7 @@ final class Mailer
      * @param string[]      $cc
      * @param string[]      $bcc
      * @param array<int,array{path:string,name:string,contentType:string}> $attachments
+     * @param ?int          $userId Přihlášený uživatel pro výběr user podpisového profilu.
      * @return string Krátký SMTP server response z poslední odpovědi (např.
      *               „250 2.0.0 Ok: queued as ABCDEF"). Plný transcript jde
      *               do log/myinvoice-*.log na úrovni info.
@@ -60,6 +65,7 @@ final class Mailer
         array $cc = [],
         array $bcc = [],
         array $attachments = [],
+        ?int $userId = null,
     ): string {
         $twig = $this->twig();
 
@@ -94,7 +100,8 @@ final class Mailer
         if ($dbTpl !== null) {
             // DB šablona je editovatelná adminem — sandboxujeme proti SSTI
             $sandbox = $this->sandboxedTwig();
-            $vars['subject'] = $subjectOverride ?? $dbTpl['subject'];
+            $subjectTemplate = $subjectOverride ?? $dbTpl['subject'];
+            $vars['subject'] = $sandbox->createTemplate($subjectTemplate)->render($vars);
             $html = $sandbox->createTemplate($dbTpl['body_html'])->render($vars);
             $text = $sandbox->createTemplate($dbTpl['body_text'])->render($vars);
         } else {
@@ -170,6 +177,21 @@ final class Mailer
             $email->attachFromPath($att['path'], $att['name'], $att['contentType']);
         }
 
+        // POZOR (Bcc + DKIM/S/MIME): obálku (MAIL FROM + RCPT TO) musíme zachytit
+        // z PŮVODNÍHO $email TEĎ, dokud má ještě Bcc hlavičku. Symfony `DkimSigner`
+        // i finální send totiž obálku jinak odvozují z `getPreparedHeaders()`, které
+        // Bcc záměrně odstraňují (RFC — Bcc nesmí být ve viditelných hlavičkách).
+        // Bez explicitní obálky se Bcc příjemci tiše ztratí z RCPT TO (potvrzeno
+        // logem hMailServeru: BCC self-kopie nikdy nedorazila). `Envelope::create`
+        // čte To+Cc+Bcc z `getHeaders()` — sender+recipients snapshotneme eagerně do
+        // konkrétní obálky, protože podpis níže $email nahradí novou instancí.
+        $snapshot = Envelope::create($email);
+        $envelope = new Envelope($snapshot->getSender(), $snapshot->getRecipients());
+
+        if ($this->emailSigning !== null) {
+            $email = $this->emailSigning->signIfEnabled($email, $code, $supplier, $userId);
+        }
+
         // DKIM signer
         if ($this->config->get('smtp.dkim.enabled', false)) {
             $keyPath = (string) $this->config->get('smtp.dkim.private_key_path', '');
@@ -190,7 +212,7 @@ final class Mailer
         // POZOR: high-level `Symfony\Component\Mailer\Mailer::send()` vrací void
         // (od 5.x). Pro získání SentMessage s debug transcriptem musíme volat
         // transport->send() napřímo. Stejný transport instance jako $this->mailer().
-        $sent = $this->transport()->send($email);
+        $sent = $this->transport()->send($email, $envelope);
         $debug = $sent !== null ? $sent->getDebug() : '';
         $smtpResponse = $this->extractLastServerResponse($debug);
 
@@ -422,6 +444,10 @@ final class Mailer
             if ($row !== false) {
                 $row['email_branding_enabled'] = (bool) ($row['email_branding_enabled'] ?? false);
                 $row['email_accent_color']     = (string) ($row['email_accent_color'] ?: '#3B2D83');
+                $row['accent_soft']            = AccentColor::emailBackground(
+                    (bool) $row['email_branding_enabled'],
+                    $row['email_accent_color'],
+                );
             }
             $this->supplierFooter = $row !== false ? $row : [];
             return $this->supplierFooter ?: null;
@@ -490,6 +516,7 @@ final class Mailer
                 'password_reset'    => 'Obnova hesla — MyInvoice.cz',
                 'login_otp'         => 'Ověřovací kód pro přihlášení — MyInvoice.cz',
                 'invoice_send'      => 'Faktura — MyInvoice.cz',
+                'invoice_payment_thanks' => 'Poděkování za úhradu — MyInvoice.cz',
                 'invoice_reminder'  => 'Upomínka — MyInvoice.cz',
                 'proforma_reminder' => 'Připomínka zálohy — MyInvoice.cz',
                 'recurring_draft_reminder' => 'Koncept pravidelné faktury se brzy vystaví — MyInvoice.cz',
@@ -498,6 +525,7 @@ final class Mailer
                 'password_reset'    => 'Password reset — MyInvoice.cz',
                 'login_otp'         => 'Sign-in verification code — MyInvoice.cz',
                 'invoice_send'      => 'Invoice — MyInvoice.cz',
+                'invoice_payment_thanks' => 'Thank you for your payment — MyInvoice.cz',
                 'invoice_reminder'  => 'Reminder — MyInvoice.cz',
                 'proforma_reminder' => 'Advance payment reminder — MyInvoice.cz',
                 'recurring_draft_reminder' => 'Recurring invoice draft will be issued soon — MyInvoice.cz',

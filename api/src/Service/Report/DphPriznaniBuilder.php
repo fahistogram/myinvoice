@@ -39,8 +39,18 @@ final class DphPriznaniBuilder
         if (!in_array($period, ['monthly', 'quarterly'], true)) {
             $period = 'monthly';
         }
+        // Identifikovaná osoba (§ 6g–6l ZDPH, issue #94): přiznání typu 'I' —
+        // vyplňuje JEN samovyměření z přeshraničních přijatých plnění (ř. 3-6
+        // pořízení zboží / služby z EU, ř. 12-13 služby ze 3. zemí), vždy měsíčně,
+        // a jen za měsíce, kdy povinnost vznikla. BEZ nároku na odpočet (žádná
+        // Veta4 vč. zrcadlového ř. 43), bez tuzemských výstupů (ř. 1/2) i oddílu C
+        // (ř. 20-26 — služby do EU vykazuje jen v souhrnném hlášení).
+        $isIdentified = !$supplier['is_vat_payer'] && !empty($supplier['is_identified']);
+
         $warnings = [];
-        if (!$supplier['is_vat_payer']) {
+        if ($isIdentified) {
+            $warnings[] = 'Přiznání identifikované osoby (typ I): jen samovyměření z přeshraničních plnění, bez nároku na odpočet. Podává se pouze za měsíce, kdy povinnost vznikla (do 25. dne následujícího měsíce).';
+        } elseif (!$supplier['is_vat_payer']) {
             $warnings[] = 'Tenant není evidovaný jako plátce DPH — výkaz nemusí být relevantní.';
         }
         if (empty($supplier['financial_office_code'])) {
@@ -53,7 +63,17 @@ final class DphPriznaniBuilder
             $warnings[] = 'Chybí DIČ tenanta.';
         }
 
+        if ($isIdentified && $period !== 'monthly') {
+            // IO má zdaňovací období VŽDY kalendářní měsíc (§ 99 se na ni nevztahuje,
+            // povinnost vzniká per měsíc dle § 101 odst. 5).
+            $period = 'monthly';
+            $warnings[] = 'Identifikovaná osoba podává vždy za kalendářní měsíc — kvartální volba ignorována.';
+        }
+
         $lines = $this->mapper->aggregateForDphPriznani($supplierId, $year, $month, $period);
+        if ($isIdentified) {
+            $lines = $this->filterLinesForIdentified($lines, $warnings);
+        }
         $quarter = $period === 'quarterly' ? (int) ceil($month / 3) : null;
 
         $dom = new \DOMDocument('1.0', 'UTF-8');
@@ -83,7 +103,8 @@ final class DphPriznaniBuilder
         }
         $vetaD->setAttribute('dapdph_forma', 'B'); // B = řádné (default), O/D/E = opravné/dodatečné
         $vetaD->setAttribute('dokument', 'DP3');   // identifikace typu výkazu
-        $vetaD->setAttribute('typ_platce', 'P');   // P = plátce DPH (default; I = identifikovaná, S = skupina, N = neplátce)
+        // P = plátce DPH (default), I = identifikovaná osoba (S = skupina, N = neplátce)
+        $vetaD->setAttribute('typ_platce', $isIdentified ? 'I' : 'P');
         // CZ-NACE klasifikace (hlavní ekonomická činnost, 6-digit) — vyplňuje se
         // z `supplier.cz_nace_code`. Hodnotu očekávanou EPO ověřuje uživatel
         // proti číselníku https://mojedane.gov.cz/pmd/dokumentace/ciselniky/ukazka/okec.
@@ -153,6 +174,11 @@ final class DphPriznaniBuilder
             '24' => ['veta' => 2, 'base' => 'pln_zaslani', 'vat' => null],
             '25' => ['veta' => 2, 'base' => 'pln_rez_pren','vat' => null],
             '26' => ['veta' => 2, 'base' => 'pln_ost',     'vat' => null],
+            // Veta3 (oddíl C — doplňující údaje; jen základ, bez daně):
+            //   ř.30 pořízení zboží prostřední osobou · ř.31 dodání zboží prostřední osobou
+            //   (třístranný obchod § 17). Hodnota z ř.31 jde do souhrnného hlášení s kódem 2.
+            '30' => ['veta' => 3, 'base' => 'tri_pozb',   'vat' => null],
+            '31' => ['veta' => 3, 'base' => 'tri_dozb',   'vat' => null],
             // Veta4 (odpočet)
             '40' => ['veta' => 4, 'base' => 'pln23',      'vat' => 'odp_tuz23_nar'],
             '41' => ['veta' => 4, 'base' => 'pln5',       'vat' => 'odp_tuz5_nar'],
@@ -165,6 +191,7 @@ final class DphPriznaniBuilder
         $totalDanOdpocitatelne = 0.0;
         $veta1Attrs = [];
         $veta2Attrs = [];
+        $veta3Attrs = [];
         $veta4Attrs = [];
 
         foreach ($lines as $lineNum => $data) {
@@ -178,12 +205,16 @@ final class DphPriznaniBuilder
                 }
                 unset($target);
             }
+            // Rekapitulaci sčítáme ze zaokrouhlených řádků (na celé Kč, jak se vykazují),
+            // aby ř.62/63 přesně seděly se součtem vystavených řádků — EPO jinak hlásí
+            // nekonzistenci mezi detailem a rekapitulací.
+            $lineVat = round($data['vat']);
             if ($this->isOutputLine($lineKey)) {
-                $totalDanZdanitelne += $data['vat'];
+                $totalDanZdanitelne += $lineVat;
             } elseif ((int) $lineKey !== 47) {
                 // ř.47 je doplňující údaj k ř.40-45, jeho daň se NEzapočítává
                 // (jinak by se daň majetku duplikovala s odpočtem z ř.40).
-                $totalDanOdpocitatelne += $data['vat'];
+                $totalDanOdpocitatelne += $lineVat;
             }
         }
         if (!empty($veta1Attrs)) {
@@ -191,11 +222,17 @@ final class DphPriznaniBuilder
             foreach ($veta1Attrs as $k => $v) $veta1->setAttribute($k, $v);
             $dphdp3->appendChild($veta1);
         }
-        // Veta2 — oddíl C (ř.20-26). XSD vyžaduje pořadí Veta1 → Veta2 → … → Veta4.
+        // Veta2 — oddíl B (ř.20-26). XSD vyžaduje pořadí Veta1 → Veta2 → Veta3 → Veta4.
         if (!empty($veta2Attrs)) {
             $veta2 = $dom->createElement('Veta2');
             foreach ($veta2Attrs as $k => $v) $veta2->setAttribute($k, $v);
             $dphdp3->appendChild($veta2);
+        }
+        // Veta3 — oddíl C, doplňující údaje (ř.30/31 třístranný obchod prostřední osobou).
+        if (!empty($veta3Attrs)) {
+            $veta3 = $dom->createElement('Veta3');
+            foreach ($veta3Attrs as $k => $v) $veta3->setAttribute($k, $v);
+            $dphdp3->appendChild($veta3);
         }
         if (!empty($veta4Attrs)) {
             $veta4 = $dom->createElement('Veta4');
@@ -203,12 +240,27 @@ final class DphPriznaniBuilder
             $dphdp3->appendChild($veta4);
         }
 
+        $vlastniDan = $totalDanZdanitelne - $totalDanOdpocitatelne;
+
+        // ── Veta6: rekapitulace (XSD pořadí Veta4 → Veta6 → VetaR) ───────
+        // ř.62 dan_zocelk = daň na výstupu celkem, ř.63 odp_zocelk = odpočet celkem,
+        // ř.64 dano_da = vlastní daň (jen když výstup > odpočet),
+        // ř.66 dano_no = nadměrný odpočet (kladné číslo, jen když odpočet > výstup).
+        // EPO si rekapitulaci po importu sice dopočítá, ale úplný soubor je správnější.
+        $veta6 = $dom->createElement('Veta6');
+        $veta6->setAttribute('dan_zocelk', $this->formatAmount($totalDanZdanitelne));
+        $veta6->setAttribute('odp_zocelk', $this->formatAmount($totalDanOdpocitatelne));
+        if ($vlastniDan > 0) {
+            $veta6->setAttribute('dano_da', $this->formatAmount($vlastniDan));
+        } elseif ($vlastniDan < 0) {
+            $veta6->setAttribute('dano_no', $this->formatAmount(-$vlastniDan));
+        }
+        $dphdp3->appendChild($veta6);
+
         // ── VetaR: poradi (wrapper element, summary attrs jdou jinam) ────
         $vetaR = $dom->createElement('VetaR');
         $vetaR->setAttribute('poradi', '1');
         $dphdp3->appendChild($vetaR);
-
-        $vlastniDan = $totalDanZdanitelne - $totalDanOdpocitatelne;
 
         // trans: A = vznikla daňová povinnost (kladná vlastní daň), N = nevznikla
         // (nadměrný odpočet / nulový rozdíl). Setneme až teď, kdy máme spočítáno.
@@ -226,6 +278,7 @@ final class DphPriznaniBuilder
         $summary = [
             'period'                  => sprintf('%04d-%02d', $year, $month),
             'period_type'             => $period,
+            'typ_platce'              => $isIdentified ? 'I' : 'P',
             'quarter'                 => $quarter,
             'lines'                   => $lines,
             'total_vat_output'        => round($totalDanZdanitelne, 2),
@@ -244,6 +297,47 @@ final class DphPriznaniBuilder
     }
 
     /**
+     * Řádky povolené identifikované osobě (§ 6g–6l, issue #94): jen samovyměření
+     * z přeshraničních přijatých plnění. Cokoli jiného (tuzemské výstupy ř. 1/2,
+     * oddíl C ř. 20-31, odpočty ř. 40+ vč. zrcadlového ř. 43 z RC mirroru) IO
+     * nevyplňuje — vyhazujeme s warningem, ať uživatel ví, co a proč vypadlo.
+     *
+     * Vyloučené řádky se vznikem povinnosti, které IO věcně nemá:
+     *   ř. 7/8 (dovoz zboží — DPH u neplátce vybírá celní úřad),
+     *   ř. 10/11 (tuzemský RC § 92a — jen mezi plátci).
+     *
+     * @param array<string, array{base:float, vat:float, count:int, label:string}> $lines
+     * @param list<string> $warnings by-ref
+     * @return array<string, array{base:float, vat:float, count:int, label:string}>
+     */
+    private function filterLinesForIdentified(array $lines, array &$warnings): array
+    {
+        $allowed = ['3', '4', '5', '6', '12', '13'];
+        // Zrcadlový odpočet ř. 43 (dphdp3_line_secondary klasifikací 23/24/25)
+        // a navázaný doplňující ř. 47 vznikají u IO automaticky z klasifikace —
+        // jejich vyřazení JE pointa režimu (IO nemá nárok na odpočet), žádný warning.
+        $silentDrop = ['43', '47'];
+        $kept = [];
+        foreach ($lines as $line => $data) {
+            $key = (string) $line;
+            if (in_array($key, $allowed, true)) {
+                $kept[$line] = $data;
+                continue;
+            }
+            if (in_array($key, $silentDrop, true)) {
+                continue;
+            }
+            $warnings[] = sprintf(
+                'Řádek %s (%s, základ %s Kč) identifikovaná osoba nevyplňuje — vynechán. Zkontroluj klasifikaci dokladů.',
+                $key,
+                $data['label'],
+                number_format($data['base'], 0, ',', ' '),
+            );
+        }
+        return $kept;
+    }
+
+    /**
      * Načti tax-relevantní info o tenantovi.
      * @return array<string,mixed>
      */
@@ -252,7 +346,7 @@ final class DphPriznaniBuilder
         $stmt = $this->db->pdo()->prepare(
             "SELECT s.id, s.company_name, s.street, s.city, s.zip,
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
-                    s.ic, s.dic, s.is_vat_payer,
+                    s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.vat_period, s.financial_office_code,
                     s.workplace_code, s.cz_nace_code, s.data_box_type, s.data_box_id,
                     s.email, s.phone,

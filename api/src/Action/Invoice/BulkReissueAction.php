@@ -103,16 +103,37 @@ final class BulkReissueAction
 
         $type = $source['invoice_type'] === 'proforma' ? 'proforma' : 'invoice';
 
-        // Default due_date podle project nebo +14
-        $dueDate = $issueDate;
+        // Splatnost: stejná priorita jako u nové faktury (InvoiceDefaults::apply) —
+        // zakázka → klient → dodavatel → 7. Bez tohoto fallbacku dostal klon faktury
+        // bez zakázky splatnost = datum vystavení (0 dní). NULL přeskakujeme (jako ??),
+        // explicitní 0 ctíme — stejně jako u nové faktury.
+        $days = null;
         if (!empty($source['project_id'])) {
             $stmt = $this->db->pdo()->prepare('SELECT payment_due_days FROM projects WHERE id = ?');
-            $stmt->execute([$source['project_id']]);
-            $days = (int) $stmt->fetchColumn();
-            if ($days > 0) {
-                $dueDate = date('Y-m-d', strtotime($issueDate . " +{$days} days"));
+            $stmt->execute([(int) $source['project_id']]);
+            $val = $stmt->fetchColumn();
+            if ($val !== false) {
+                $days = (int) $val;
             }
         }
+        if ($days === null && !empty($source['client_id'])) {
+            $stmt = $this->db->pdo()->prepare('SELECT payment_due_default FROM clients WHERE id = ?');
+            $stmt->execute([(int) $source['client_id']]);
+            $val = $stmt->fetchColumn();
+            if ($val !== false && $val !== null) {
+                $days = (int) $val;
+            }
+        }
+        if ($days === null) {
+            $stmt = $this->db->pdo()->prepare('SELECT default_payment_due_days FROM supplier WHERE id = ?');
+            $stmt->execute([(int) $source['supplier_id']]);
+            $val = $stmt->fetchColumn();
+            if ($val !== false && $val !== null) {
+                $days = (int) $val;
+            }
+        }
+        $days ??= 7;
+        $dueDate = date('Y-m-d', strtotime($issueDate . " +{$days} days"));
 
         $taxDate = $type === 'proforma' ? null : $issueDate;
 
@@ -126,16 +147,26 @@ final class BulkReissueAction
             $taxDate ?? $issueDate,
         );
 
+        // Per-faktura přepínač upomínek (migrace 0088) musí klon zdědit — jinak by se
+        // vědomě opt-outovaná faktura po klonu tiše vrátila na DB default 1 (upomínky
+        // zapnuté). Guard na existenci sloupce kvůli instalacím pozadu s migrací.
+        $hasReminders = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'auto_send_reminders'")->fetch() !== false;
+
         $pdo->beginTransaction();
         try {
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, client_id, project_id, supplier_id,
-                    issue_date, tax_date, due_date, currency_id, reverse_charge, language,
-                    note_above_items, note_below_items, discount_percent, payment_method, status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                    issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
+                    note_above_items, note_below_items, discount_percent, payment_method,
+                    revenue_category_id,'
+                . ($hasReminders ? ' auto_send_reminders,' : '')
+                . ' status, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
+                . ($hasReminders ? ' ?,' : '')
+                . ' "draft", ?)'
             );
-            $stmt->execute([
+            $params = [
                 $type,
                 $source['client_id'],
                 $source['project_id'],
@@ -145,13 +176,22 @@ final class BulkReissueAction
                 $dueDate,
                 (int) $source['currency_id'],
                 $source['reverse_charge'] ? 1 : 0,
+                // Reissue (kopie/dobropis) musí dědit režim „ceny s DPH" — jinak by se
+                // zkopírované brutto jednotkové ceny přepočítaly jako netto (nafouknuté totály).
+                !empty($source['prices_include_vat']) ? 1 : 0,
                 $source['language'],
                 $source['note_above_items'],
                 $source['note_below_items'],
                 (float) ($source['discount_percent'] ?? 0),
                 (string) ($source['payment_method'] ?? 'bank_transfer'),
-                $userId,
-            ]);
+                // Reissue zachová kategorii tržby zdrojové faktury.
+                $source['revenue_category_id'] ?? null,
+            ];
+            if ($hasReminders) {
+                $params[] = !empty($source['auto_send_reminders']) ? 1 : 0;
+            }
+            $params[] = $userId;
+            $stmt->execute($params);
             $newId = (int) $pdo->lastInsertId();
 
             // Zkopíruj položky s případným inkrementem měsíce

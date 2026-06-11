@@ -4,9 +4,11 @@ import { useRouter, useRoute, RouterLink } from 'vue-router'
 import { invoicesApi, type MonthGroup, type InvoiceListItem } from '@/api/invoices'
 import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
+import { useRowLink } from '@/composables/useRowLink'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useSupplierStore } from '@/stores/supplier'
 import { clientsApi, type Client } from '@/api/clients'
 import { codebooksApi, type Currency } from '@/api/codebooks'
 import { useYearOptions } from '@/composables/useYearOptions'
@@ -18,6 +20,8 @@ import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 const { t, tm, rt } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
+const supplierStore = useSupplierStore()
+const thanksEnabled = computed(() => supplierStore.currentSupplier?.payment_thanks_enabled ?? false)
 
 useHotkey('ctrl+n', (e) => { e.preventDefault(); router.push('/invoices/new') })
 
@@ -165,24 +169,37 @@ async function bulkMarkPaid() {
     return
   }
   if (!confirm(t('invoice.bulk_mark_paid_confirm', { n: list.length }))) return
+  // Volitelně i poděkování za úhradu (issue #57) — jen pokud má dodavatel funkci zapnutou.
+  const sendThanks = thanksEnabled.value && confirm(t('invoice.bulk_send_thanks_confirm', { n: list.length }))
   const today = new Date().toISOString().slice(0, 10)
   bulkBusy.value = true
   let okCount = 0
+  let thanksSent = 0
+  let thanksFailed = 0
   const errors: string[] = []
   try {
     for (const inv of list) {
       try {
-        await invoicesApi.markPaid(inv.id, today)
+        const updated = await invoicesApi.markPaid(inv.id, today, sendThanks ? { sendThanks: true, thanksTrigger: 'bulk' } : undefined)
         okCount++
+        const pt = updated.payment_thanks
+        if (pt?.status === 'sent') thanksSent++
+        else if (pt?.status === 'failed') thanksFailed++
       } catch (e: any) {
         errors.push(`${inv.varsymbol || `#${inv.id}`}: ${e?.response?.data?.error?.message || 'chyba'}`)
       }
     }
     selectedIds.value = []
+    let msg = errors.length
+      ? t('invoice.bulk_mark_paid_partial', { ok: okCount, err: errors.length })
+      : t('invoice.bulk_mark_paid_success', { n: okCount })
+    if (sendThanks) {
+      msg += '\n' + t('invoice.bulk_thanks_summary', { sent: thanksSent, failed: thanksFailed })
+    }
     if (errors.length) {
-      toast.warning(t('invoice.bulk_mark_paid_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
+      toast.warning(msg + '\n' + errors.join('\n'))
     } else {
-      toast.success(t('invoice.bulk_mark_paid_success', { n: okCount }))
+      toast.success(msg)
     }
     await load()
   } finally {
@@ -293,6 +310,9 @@ function mergeGroups(existing: MonthGroup[], incoming: MonthGroup[]): MonthGroup
         found.without_vat = Math.round((found.without_vat + t.without_vat) * 100) / 100
         found.vat         = Math.round((found.vat         + t.vat)         * 100) / 100
         found.with_vat    = Math.round((found.with_vat    + t.with_vat)    * 100) / 100
+        found.draft_without_vat = Math.round((found.draft_without_vat + t.draft_without_vat) * 100) / 100
+        found.draft_vat         = Math.round((found.draft_vat         + t.draft_vat)         * 100) / 100
+        found.draft_with_vat    = Math.round((found.draft_with_vat    + t.draft_with_vat)    * 100) / 100
       } else {
         cur.totals_per_currency.push({ ...t })
       }
@@ -344,7 +364,7 @@ const DEFAULT_YEAR = new Date().getFullYear()
 onMounted(async () => {
   loadFiltersFromQuery(route.query)
   // Načti seznam klientů + měn pro select (paralelně s prvním load)
-  clientsApi.list({ archived: false, per_page: 200 }).then(r => { clients.value = r.data }).catch(() => {})
+  clientsApi.list({ archived: false, per_page: 200, role: 'customers' }).then(r => { clients.value = r.data }).catch(() => {})
   codebooksApi.currencies().then(r => {
     const seen = new Set<string>()
     currencies.value = r.filter(c => c.is_active && !seen.has(c.code) && seen.add(c.code))
@@ -421,8 +441,9 @@ watch(() => route.query, (newQ) => {
 
 const loadedCount = computed(() => groups.value.reduce((s, g) => s + g.count, 0))
 
-function openInvoice(inv: InvoiceListItem) {
-  router.push(`/invoices/${inv.id}`)
+const navigateRow = useRowLink()
+function openInvoice(inv: InvoiceListItem, e?: MouseEvent) {
+  navigateRow(`/invoices/${inv.id}`, e)
 }
 
 // Work Report modal: otevíráno z buttonu "Výkaz" v sloupci Stav.
@@ -496,7 +517,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
     </div>
 
     <!-- Filtry -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
       <div class="flex flex-wrap items-center gap-2">
         <input
           v-model="search"
@@ -504,7 +525,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           :placeholder="t('invoice.search_placeholder')"
           class="flex-1 min-w-48 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
         />
-        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('invoice.all_statuses') }}</option>
           <option value="draft">{{ t('status.draft') }}</option>
           <option value="issued">{{ t('status.issued') }}</option>
@@ -513,7 +534,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           <option value="paid">{{ t('status.paid') }}</option>
           <option value="cancelled">{{ t('status.cancelled') }}</option>
         </select>
-        <select v-model="typeFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="typeFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('invoice.all_types') }}</option>
           <option value="invoice">{{ t('type.invoice') }}</option>
           <option value="proforma">{{ t('type.proforma') }}</option>
@@ -527,17 +548,17 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
             :placeholder="t('project.all_clients')"
           />
         </div>
-        <select v-model="currencyFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-model="currencyFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('invoice.all_currencies') }}</option>
           <option v-for="c in currencies" :key="c.id" :value="c.code">{{ c.code }}</option>
         </select>
         <select v-model="yearFilter" :disabled="!!dateFrom || !!dateTo"
-          class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm disabled:opacity-50">
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm disabled:opacity-50">
           <option value="">{{ t('invoice.all_years') }}</option>
           <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
         </select>
         <select v-model="monthFilter" :disabled="!!dateFrom || !!dateTo || yearFilter === ''"
-          class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm disabled:opacity-50"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm disabled:opacity-50"
           :title="t('invoice.month_filter')">
           <option :value="''">{{ t('invoice.all_months') }}</option>
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
@@ -564,11 +585,11 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
       </div>
     </div>
 
-    <div v-if="loading" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <TableSkeleton :rows="8" :cols="7" />
     </div>
 
-    <div v-else-if="!groups.length" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div v-else-if="!groups.length" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <EmptyState :title="t('invoice.no_data')" :cta="t('invoice.issue_first')" to="/invoices/new" />
     </div>
 
@@ -586,15 +607,20 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
             <span class="text-xs text-neutral-500">{{ g.count }} {{ g.count === 1 ? t('invoice.doc_1') : (g.count < 5 ? t('invoice.doc_2_4') : t('invoice.doc_5plus')) }}</span>
           </div>
           <div class="flex items-center gap-3 text-xs">
-            <span v-for="t in g.totals_per_currency" :key="t.currency" class="font-mono">
-              <span class="text-neutral-500">{{ t.currency }}:</span>
-              <span class="font-semibold text-neutral-900 ml-1">{{ formatMoney(t.with_vat, t.currency) }}</span>
+            <span v-for="tot in g.totals_per_currency" :key="tot.currency" class="font-mono">
+              <span class="text-neutral-500">{{ tot.currency }}:</span>
+              <span class="font-semibold text-neutral-900 ml-1">{{ formatMoney(tot.with_vat, tot.currency) }}</span>
+              <span v-if="tot.draft_with_vat !== 0" class="ml-1 text-primary-600"
+                :title="t('invoice.prediction_hint', { amount: formatMoney(tot.draft_with_vat, tot.currency) })">
+                → {{ formatMoney(tot.with_vat + tot.draft_with_vat, tot.currency) }}
+                <span class="text-[10px] uppercase tracking-wide text-primary-500">{{ t('invoice.prediction') }}</span>
+              </span>
             </span>
           </div>
         </header>
 
         <!-- Desktop: tabulka -->
-        <div class="hidden md:block bg-white border border-t-0 border-neutral-200 rounded-b-lg overflow-hidden">
+        <div class="hidden md:block bg-surface border border-t-0 border-neutral-200 rounded-b-lg overflow-hidden">
           <div class="overflow-x-auto">
           <table class="w-full text-sm table-sticky-first">
             <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
@@ -613,7 +639,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
               <tr
                 v-for="inv in g.invoices"
                 :key="inv.id"
-                @click="openInvoice(inv)"
+                @click="openInvoice(inv, $event)"
+                @auxclick.prevent="openInvoice(inv, $event)"
                 class="cursor-pointer hover:bg-neutral-50 transition"
                 :class="invoiceRowClass(inv.due_date, inv.status)"
               >
@@ -646,9 +673,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
                 </td>
                 <td class="px-4 py-2.5 text-center" @click.stop>
-                  <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                       zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
-                  <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
+                  <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
+                  <button v-if="inv.status === 'draft' && auth.canWrite"
                     @click="openWorkReport(inv.id)"
                     class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                     :title="t('invoice.wr_btn')">
@@ -670,11 +696,12 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
         </div>
 
         <!-- Mobile: karty -->
-        <div class="md:hidden bg-white border border-t-0 border-neutral-200 rounded-b-lg divide-y divide-neutral-100 overflow-hidden">
+        <div class="md:hidden bg-surface border border-t-0 border-neutral-200 rounded-b-lg divide-y divide-neutral-100 overflow-hidden">
           <div
             v-for="inv in g.invoices"
             :key="`m-${inv.id}`"
-            @click="openInvoice(inv)"
+            @click="openInvoice(inv, $event)"
+            @auxclick.prevent="openInvoice(inv, $event)"
             class="cursor-pointer hover:bg-neutral-50 transition px-3 py-3"
             :class="invoiceRowClass(inv.due_date, inv.status)"
           >
@@ -718,9 +745,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                       :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
-                    <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                         zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
-                    <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
+                    <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
+                    <button v-if="inv.status === 'draft' && auth.canWrite"
                       @click="openWorkReport(inv.id)"
                       class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                       :title="t('invoice.wr_btn')">

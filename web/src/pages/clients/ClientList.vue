@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { clientsApi, type Client } from '@/api/clients'
+import { expenseCategoriesApi, type ExpenseCategory } from '@/api/expenseCategories'
 import { formatMoney, formatDate } from '@/composables/useFormat'
+import { useRowLink } from '@/composables/useRowLink'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 
@@ -13,7 +15,6 @@ type RoleFilter = 'all' | 'customers' | 'vendors'
 const { t } = useI18n()
 const auth = useAuthStore()
 
-const router = useRouter()
 const items = ref<Client[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -23,6 +24,9 @@ const loadingMore = ref(false)
 const search = ref('')
 const showArchived = ref(false)
 const sort = ref<'name' | 'revenue' | 'last_activity'>('name')
+// Filtr na výchozí kategorii nákladu dodavatele — jen ve vendor view.
+const expenseCategories = ref<ExpenseCategory[]>([])
+const categoryFilter = ref<number | null>(null)
 const route = useRoute()
 // Filter from ?role=vendors|all|customers (default customers).
 // Watch query.role pro proklik mezi sidebar položkami Klienti ↔ Dodavatelé
@@ -59,6 +63,8 @@ async function load(reset = true) {
       archived: showArchived.value,
       sort: sort.value,
       role: roleFilter.value,
+      // Kategorie filtruje jen u dodavatelů (jinde nemá smysl).
+      expense_category_id: roleFilter.value === 'vendors' ? categoryFilter.value : null,
       page: page.value,
     })
     if (reset) {
@@ -77,17 +83,22 @@ async function load(reset = true) {
   }
 }
 
-onMounted(() => load(true))
+onMounted(async () => {
+  load(true)
+  expenseCategories.value = await expenseCategoriesApi.list(false).catch(() => [])
+})
 watch(showArchived, () => load(true))
 watch(sort, () => load(true))
 watch(roleFilter, () => load(true))
+watch(categoryFilter, () => load(true))
 watch(search, () => {
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = setTimeout(() => load(true), 300)
 })
 
-function openClient(c: Client) {
-  router.push(`/clients/${c.id}`)
+const navigateRow = useRowLink()
+function openClient(c: Client, e?: MouseEvent) {
+  navigateRow(`/clients/${c.id}`, e)
 }
 </script>
 
@@ -104,7 +115,7 @@ function openClient(c: Client) {
       </RouterLink>
     </div>
 
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <!-- Tabs: Klienti / Dodavatelé / Vše -->
       <div class="px-4 pt-2 border-b border-neutral-100 flex items-center gap-1">
         <button
@@ -137,7 +148,13 @@ function openClient(c: Client) {
           <input v-model="showArchived" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
           {{ t('client.show_archived') }}
         </label>
-        <select v-model="sort" class="h-9 px-3 border border-neutral-300 rounded-md text-sm bg-white"
+        <select v-if="roleFilter === 'vendors'" v-model.number="categoryFilter"
+          class="h-9 px-3 border border-neutral-300 rounded-md text-sm bg-surface"
+          :title="t('client.default_expense_category')">
+          <option :value="null">{{ t('client.filter_category_all') }}</option>
+          <option v-for="c in expenseCategories" :key="c.id" :value="c.id">{{ c.label }} ({{ c.code }})</option>
+        </select>
+        <select v-model="sort" class="h-9 px-3 border border-neutral-300 rounded-md text-sm bg-surface"
           :title="t('common.sort_by')">
           <option value="name">{{ t('common.sort_name') }}</option>
           <option value="revenue">{{ t('common.sort_revenue') }}</option>
@@ -162,6 +179,7 @@ function openClient(c: Client) {
             <th class="text-center px-4 py-2.5 font-medium">{{ roleFilter === 'vendors' ? t('client.invoice_count_label') : t('nav.projects') }}</th>
             <th class="text-right px-4 py-2.5 font-medium">{{ roleFilter === 'vendors' ? t('common.costs') : t('common.revenue') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('common.last_activity') }}</th>
+            <th v-if="roleFilter === 'vendors'" class="text-center px-4 py-2.5 font-medium">{{ t('client.vat_payer_label') }}</th>
             <th class="text-center px-4 py-2.5 font-medium">{{ t('common.currency') }}</th>
           </tr>
         </thead>
@@ -169,17 +187,18 @@ function openClient(c: Client) {
           <tr
             v-for="c in filteredItems"
             :key="c.id"
-            @click="openClient(c)"
+            @click="openClient(c, $event)"
+            @auxclick.prevent="openClient(c, $event)"
             class="cursor-pointer hover:bg-neutral-50"
           >
             <td class="px-4 py-3">
               <div class="flex items-center gap-2">
                 <div class="font-medium text-neutral-900">{{ c.company_name }}</div>
                 <span v-if="c.is_customer !== false && c.is_vendor === true"
-                      class="inline-block px-1.5 py-0 text-[10px] bg-purple-100 text-purple-700 rounded font-medium uppercase tracking-wide"
+                      class="inline-block px-1.5 py-0 text-[10px] bg-primary-100 text-primary-700 rounded font-medium uppercase tracking-wide"
                       :title="t('client.dual_role_tooltip')">K+D</span>
                 <span v-else-if="c.is_vendor === true"
-                      class="inline-block px-1.5 py-0 text-[10px] bg-amber-100 text-amber-700 rounded font-medium uppercase tracking-wide">{{ t('client.vendor_badge') }}</span>
+                      class="inline-block px-1.5 py-0 text-[10px] bg-warning-50 text-warning-600 rounded font-medium uppercase tracking-wide">{{ t('client.vendor_badge') }}</span>
               </div>
               <div v-if="c.archived_at" class="text-xs text-neutral-400 mt-0.5">{{ t('common.archived') }}</div>
             </td>
@@ -219,6 +238,10 @@ function openClient(c: Client) {
                 <span v-else class="text-neutral-300">—</span>
               </template>
             </td>
+            <td v-if="roleFilter === 'vendors'" class="px-4 py-3 text-center">
+              <span v-if="c.is_vat_payer === false" class="inline-block px-2 py-0.5 text-xs bg-warning-50 text-warning-700 rounded">{{ t('common.no') }}</span>
+              <span v-else class="inline-block px-2 py-0.5 text-xs bg-success-50 text-success-700 rounded">{{ t('common.yes') }}</span>
+            </td>
             <td class="px-4 py-3 text-center text-neutral-600 font-mono text-xs">{{ c.currency_default }}</td>
           </tr>
         </tbody>
@@ -229,7 +252,8 @@ function openClient(c: Client) {
         <div
           v-for="c in filteredItems"
           :key="`m-${c.id}`"
-          @click="openClient(c)"
+          @click="openClient(c, $event)"
+          @auxclick.prevent="openClient(c, $event)"
           class="cursor-pointer hover:bg-neutral-50 transition px-4 py-3"
         >
           <div class="flex items-baseline justify-between gap-2">

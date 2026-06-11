@@ -1,5 +1,6 @@
 .vscode/
 .claude/
+CLAUDE.md
 aspnet_client/
 log/
 cfg.php
@@ -37,3 +38,8 @@ desktop.ini
 # Legacy: storage/xsd/ se už nepoužívá — zde držíme jen mpdf-temp/ exempci.
 storage/mpdf-temp/*
 !storage/mpdf-temp/.gitkeep
+
+# docasne soubory commit/issue zprav (Claude workflow)
+COMMIT_MSG.tmp
+ISSUE_COMMENT.tmp
+RELEASE_NOTES.tmp

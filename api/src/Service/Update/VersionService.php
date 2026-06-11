@@ -227,9 +227,71 @@ final class VersionService
         return is_array($decoded) ? $decoded : null;
     }
 
+    /** Po kolika sekundách považujeme nezpracovaný upgrade flag za prošlý (watcher neběží/spadl). */
+    private const UPGRADE_FLAG_TTL = 900; // 15 min
+
+    /**
+     * Probíhá upgrade? Self-healing: samotná existence flag souboru nestačí —
+     * flag se zruší (a vrátí false), pokud:
+     *   a) je cílová verze už nasazená (current >= target) — upgrade proběhl mimo
+     *      aplikaci, typicky ručně přes terminál, takže flag nikdo nezpracoval, nebo
+     *   b) flag je starší než TTL — host-side watcher zřejmě neběží/spadl.
+     * Tím se UI nezasekne na „Upgrade probíhá…" donekonečna.
+     */
     public function isUpgradeInProgress(): bool
     {
-        return is_file($this->upgradeFlagPath());
+        $flag = $this->upgradeFlagPath();
+        if (!is_file($flag)) {
+            return false;
+        }
+
+        $payload = json_decode((string) @file_get_contents($flag), true);
+        $payload = is_array($payload) ? $payload : [];
+        $target  = isset($payload['target_version']) ? (string) $payload['target_version'] : null;
+        $current = $this->getCurrentVersion();
+
+        // a) cílová verze už nasazená → upgrade hotový (mimo watcher). Flag tiše zruš.
+        if ($target !== null && $current !== 'unknown' && version_compare($current, $target, '>=')) {
+            @unlink($flag);
+            return false;
+        }
+
+        // b) prošlý flag (requested_at nebo mtime starší než TTL) → watcher to nezpracoval.
+        $requestedTs = isset($payload['requested_at']) ? strtotime((string) $payload['requested_at']) : false;
+        if ($requestedTs === false) {
+            $requestedTs = @filemtime($flag) ?: time();
+        }
+        if (time() - $requestedTs > self::UPGRADE_FLAG_TTL) {
+            @unlink($flag);
+            // Informativní result, ať uživatel ví, proč to skončilo (a že watcher možná neběží).
+            if (!is_file($this->upgradeResultPath())) {
+                @file_put_contents($this->upgradeResultPath(), json_encode([
+                    'status'         => 'unknown',
+                    'target_version' => $target,
+                    'applied_at'     => date(\DateTimeInterface::ATOM),
+                    'message'        => 'Požadavek na upgrade vypršel — dokončení se nepodařilo potvrdit. '
+                        . 'Pokud aktualizuješ ručně přes terminál, je to v pořádku; jinak zkontroluj, '
+                        . 'že na hostu běží watcher (cmd/docker-update-watcher.{sh,ps1}).',
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Ruční zrušení zaseknutého upgrade flagu (UI tlačítko). Použije se, když
+     * upgrade proběhl mimo aplikaci nebo watcher neběží a uživatel nechce čekat na TTL.
+     *
+     * @return array{status:string, cleared:bool}
+     */
+    public function cancelUpgrade(): array
+    {
+        $flag = $this->upgradeFlagPath();
+        $existed = is_file($flag);
+        @unlink($flag);
+        return ['status' => 'ok', 'cleared' => $existed];
     }
 
     public function upgradeFlagPath(): string

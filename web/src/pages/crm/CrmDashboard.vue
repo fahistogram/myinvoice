@@ -4,13 +4,16 @@ import { useI18n } from 'vue-i18n'
 import { RouterLink } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
-import { crmApi, type CrmOverview, type CrmMonthlyRow, type TopClient, type TopVendor,
+import { crmApi, type CrmKpi, type CrmOverview, type CrmMonthlyRow, type TopClient, type TopVendor,
   type AgingBucket, type DsoResult, type PunctualityResult, type ConcentrationResult,
-  type ExpenseCategoryRow, type ChurnRiskClient,
-  type ActionItemsResult, type CashFlowResult, type LateRiskClient,
+  type VendorConcentrationResult,
+  type ExpenseCategoryRow, type RevenueCategoryRow, type ChurnRiskClient,
+  type CashFlowResult, type LateRiskClient,
   type ReminderEffectiveness, type PaymentTimeHistogram, type CrmYearlyRow } from '@/api/crm'
 import { formatMoney } from '@/composables/useFormat'
 import { apiErrorMessage } from '@/api/errors'
+import RevenueChart from '@/components/charts/RevenueChart.vue'
+import CumulativeYtdChart from '@/components/charts/CumulativeYtdChart.vue'
 
 const { t } = useI18n()
 const auth = useAuthStore()
@@ -18,6 +21,8 @@ const toast = useToast()
 
 const overview = ref<CrmOverview | null>(null)
 const monthly = ref<CrmMonthlyRow[]>([])
+// Stabilní 24měsíční řada pro grafy zisku (12 m + loňské okno) — nezávislá na přepínači období.
+const monthly24 = ref<CrmMonthlyRow[]>([])
 const yearly = ref<CrmYearlyRow[]>([])
 const topClients = ref<TopClient[]>([])
 const topVendors = ref<TopVendor[]>([])
@@ -26,60 +31,43 @@ const agingPay  = ref<AgingBucket[]>([])
 const dso = ref<DsoResult | null>(null)
 const punctuality = ref<PunctualityResult | null>(null)
 const concentration = ref<ConcentrationResult | null>(null)
+const vendorConcentration = ref<VendorConcentrationResult | null>(null)
+const dpo = ref<DsoResult | null>(null)
 const expenses = ref<ExpenseCategoryRow[]>([])
+const revenues = ref<RevenueCategoryRow[]>([])
 const churn = ref<ChurnRiskClient[]>([])
-const actionItems = ref<ActionItemsResult | null>(null)
 const cashFlow = ref<CashFlowResult | null>(null)
 const lateRisk = ref<LateRiskClient[]>([])
 const reminderEff = ref<ReminderEffectiveness | null>(null)
 const paymentHist = ref<PaymentTimeHistogram | null>(null)
 const loading = ref(true)
 const recomputing = ref(false)
-const openMenuIdx = ref<number | null>(null)
-
-function toggleMenu(idx: number) {
-  openMenuIdx.value = openMenuIdx.value === idx ? null : idx
-}
-
-async function dismissItem(itemType: string, mode: 'day' | 'week' | 'forever' | 'historical') {
-  try {
-    await crmApi.dismissActionItem(itemType, mode)
-    openMenuIdx.value = null
-    actionItems.value = await crmApi.actionItems()
-    toast.success(t('crm.action_items.dismissed'))
-  } catch (e) {
-    toast.error(apiErrorMessage(e))
-  }
-}
-
-async function restoreAllDismissed() {
-  try {
-    const r = await crmApi.restoreAllActionItems()
-    actionItems.value = await crmApi.actionItems()
-    toast.success(t('crm.action_items.restored_n', { n: r.restored }))
-  } catch (e) {
-    toast.error(apiErrorMessage(e))
-  }
-}
 
 // Filters
 const periodMonths = ref(12)
 const currencyFilter = ref<string>('')
 
+// Sentinel pro volbu „Vše" — agreguje všechny měny přepočtené na CZK (*_czk pole).
+const ALL_CURRENCIES = '__ALL__'
+// Měna pro formátování částek: u „Vše" zobrazujeme v CZK (přepočet), jinak nativní.
+const displayCurrency = computed(() => currencyFilter.value === ALL_CURRENCIES ? 'CZK' : currencyFilter.value)
+
 const availableCurrencies = computed(() => overview.value?.currencies || [])
 
-// Auto-select default currency = first one (typicky CZK)
+// Default: u více měn „Vše" (CZK agregát), u jediné měny ta jedna (přepínač se skrývá).
 watch(availableCurrencies, (curs) => {
   if (curs.length > 0 && !currencyFilter.value) {
-    currencyFilter.value = curs[0]
+    currencyFilter.value = curs.length > 1 ? ALL_CURRENCIES : curs[0]
   }
 })
 
 async function loadAll() {
   loading.value = true
   try {
-    const cur = currencyFilter.value || undefined
-    const [ov, mo, yr, tc, tv, ar, ap, d, p, conc, exp, ch, ai, cf, lr, re, ph] = await Promise.all([
+    // U „Vše" neposíláme měnu (cur=undefined) → endpointy vrátí všechny měny a
+    // agregaci do CZK uděláme klientsky přes *_czk pole.
+    const cur = (currencyFilter.value && currencyFilter.value !== ALL_CURRENCIES) ? currencyFilter.value : undefined
+    const [ov, mo, yr, tc, tv, ar, ap, d, p, conc, vc, dp, exp, rev, ch, cf, lr, re, ph, m24] = await Promise.all([
       crmApi.overview(),
       crmApi.monthly(periodMonths.value, cur),
       crmApi.yearly(cur),
@@ -90,13 +78,16 @@ async function loadAll() {
       crmApi.dso(periodMonths.value),
       crmApi.punctuality(periodMonths.value),
       crmApi.concentration(periodMonths.value, cur),
+      crmApi.vendorConcentration(periodMonths.value, cur),
+      crmApi.dpo(periodMonths.value),
       crmApi.expenseBreakdown(periodMonths.value, cur),
+      crmApi.revenueBreakdown(periodMonths.value, cur),
       crmApi.churnRisk(60, 10),
-      crmApi.actionItems(),
       crmApi.cashFlowForecast(4, cur || 'CZK'),
       crmApi.lateRisk(10),
       crmApi.reminderEffectiveness(periodMonths.value),
       crmApi.paymentTimeHistogram(periodMonths.value),
+      crmApi.monthly(24, cur),
     ])
     overview.value = ov
     monthly.value = mo
@@ -108,13 +99,16 @@ async function loadAll() {
     dso.value = d
     punctuality.value = p
     concentration.value = conc
+    vendorConcentration.value = vc
+    dpo.value = dp
     expenses.value = exp
+    revenues.value = rev
     churn.value = ch
-    actionItems.value = ai
     cashFlow.value = cf
     lateRisk.value = lr
     reminderEff.value = re
     paymentHist.value = ph
+    monthly24.value = m24
   } catch (e) {
     toast.error(apiErrorMessage(e))
   } finally {
@@ -136,19 +130,50 @@ async function recompute() {
   }
 }
 
-// Derived: filter overview na vybranou měnu
-const currentMonthKpi = computed(() => {
-  if (!overview.value) return null
-  return overview.value.current_month.find(k => k.currency === currencyFilter.value) || overview.value.current_month[0] || null
-})
-const lastMonthKpi = computed(() => {
-  if (!overview.value) return null
-  return overview.value.last_month.find(k => k.currency === currencyFilter.value) || overview.value.last_month[0] || null
-})
-const ytdKpi = computed(() => {
-  if (!overview.value) return null
-  return overview.value.ytd.find(k => k.currency === currencyFilter.value) || overview.value.ytd[0] || null
-})
+// Agregace per-currency KPI řádků do jednoho CZK řádku (volba „Vše"). Sčítá *_czk
+// pole (revenue_czk/costs_czk…), takže míchání měn dává smysl (vše přepočteno na CZK).
+function aggregateCzk(rows: CrmKpi[]): CrmKpi {
+  const a = rows.reduce((acc, r) => {
+    acc.revenue     += r.revenue_czk
+    acc.revenue_net += r.revenue_net_czk
+    acc.costs       += r.costs_czk
+    acc.costs_net   += r.costs_net_czk
+    acc.invoice_count  += r.invoice_count
+    acc.purchase_count += r.purchase_count
+    return acc
+  }, { revenue: 0, revenue_net: 0, costs: 0, costs_net: 0, invoice_count: 0, purchase_count: 0 })
+  return {
+    currency: 'CZK',
+    revenue: a.revenue, revenue_net: a.revenue_net, costs: a.costs, costs_net: a.costs_net,
+    profit: a.revenue - a.costs,
+    revenue_czk: a.revenue, revenue_net_czk: a.revenue_net, costs_czk: a.costs, costs_net_czk: a.costs_net,
+    profit_czk: a.revenue - a.costs,
+    invoice_count: a.invoice_count, purchase_count: a.purchase_count,
+    vat_output: 0, vat_input: 0,
+  }
+}
+
+// Derived: KPI řádek pro vybranou měnu (nebo CZK-agregát u „Vše").
+// NEPADÁME na [0] fallback — když zvolená měna nemá za dané období data, vrať null
+// (KPI dlaždice ukáže 0 ve zvolené měně). Dřív fallback na current_month[0] zobrazil
+// částku JINÉ měny (typicky CZK, řazeno currency ASC) pod labelem zvolené měny —
+// "579 481,93 USD" místo 0 USD, když USD nemá v aktuálním měsíci žádnou fakturu.
+// Vybere KPI řádek pro zvolenou měnu (nebo CZK-agregát u „Vše").
+// NEPADÁME na [0] fallback — když zvolená měna nemá za období data, vrať null
+// (KPI dlaždice ukáže 0 ve zvolené měně). Dřív fallback na [0] zobrazil částku JINÉ
+// měny (řazeno currency ASC) pod labelem zvolené měny.
+function pickKpi(rows: CrmKpi[] | undefined | null): CrmKpi | null {
+  if (!rows) return null
+  if (currencyFilter.value === ALL_CURRENCIES) return aggregateCzk(rows)
+  return rows.find(k => k.currency === currencyFilter.value) || null
+}
+const currentMonthKpi = computed(() => pickKpi(overview.value?.current_month))
+const lastMonthKpi    = computed(() => pickKpi(overview.value?.last_month))
+const ytdKpi          = computed(() => pickKpi(overview.value?.ytd))
+const last12mKpi      = computed(() => pickKpi(overview.value?.last_12m))
+const prev12mKpi      = computed(() => pickKpi(overview.value?.prev_12m))
+const prevYearFullKpi = computed(() => pickKpi(overview.value?.prev_year_full))
+const prevYearYtdKpi  = computed(() => pickKpi(overview.value?.prev_year_ytd))
 
 // Trend % vs last month
 function trendPct(current: number, last: number): number {
@@ -156,10 +181,143 @@ function trendPct(current: number, last: number): number {
   return Math.round(((current - last) / Math.abs(last)) * 100)
 }
 
+// Meziroční/období delta v %. null když není s čím srovnávat (base i current 0).
+function deltaPct(current?: number, base?: number): number | null {
+  const c = current ?? 0, b = base ?? 0
+  if (b === 0 && c === 0) return null
+  return trendPct(c, b)
+}
+
+// Marže v % (zisk / tržby). null když nulové tržby.
+function marginPct(profit?: number, revenue?: number): number | null {
+  if (!revenue || revenue === 0) return null
+  return ((profit ?? 0) / revenue) * 100
+}
+
+// YoY badge: směr + barva (upGood=true → růst zelený; u nákladů false → růst červený).
+function yoy(current?: number, base?: number, upGood = true) {
+  const pct = deltaPct(current, base)
+  if (pct === null) return { show: false, cls: '', arrow: '', abs: 0 }
+  const positive = pct >= 0
+  const good = upGood ? positive : !positive
+  return {
+    show: true,
+    cls: good ? 'text-success-600' : 'text-danger-500',
+    arrow: positive ? '▲' : '▼',
+    abs: Math.abs(pct),
+  }
+}
+
+// Předpočítané YoY odznaky pro karty (YTD vs stejné okno loni, 12m vs předch. 12m).
+const rev12Yoy     = computed(() => yoy(last12mKpi.value?.revenue, prev12mKpi.value?.revenue, true))
+const revYtdYoy    = computed(() => yoy(ytdKpi.value?.revenue, prevYearYtdKpi.value?.revenue, true))
+const cost12Yoy    = computed(() => yoy(last12mKpi.value?.costs, prev12mKpi.value?.costs, false))
+const costYtdYoy   = computed(() => yoy(ytdKpi.value?.costs, prevYearYtdKpi.value?.costs, false))
+const profit12Yoy  = computed(() => yoy(last12mKpi.value?.profit, prev12mKpi.value?.profit, true))
+const profitYtdYoy = computed(() => yoy(ytdKpi.value?.profit, prevYearYtdKpi.value?.profit, true))
+
+// Srovnávací tabulka období (tržby/náklady/zisk/marže) — nezávislá na přepínači období.
+const comparisonRows = computed(() => {
+  const mk = (key: string, label: string, k: CrmKpi | null) => ({
+    key,
+    label,
+    revenue: k?.revenue ?? 0,
+    costs: k?.costs ?? 0,
+    profit: k?.profit ?? 0,
+    margin: marginPct(k?.profit, k?.revenue),
+  })
+  return [
+    mk('this_month', t('crm.compare.this_month'), currentMonthKpi.value),
+    mk('last_month', t('crm.compare.last_month'), lastMonthKpi.value),
+    mk('last_12m',   t('crm.compare.last_12m'),   last12mKpi.value),
+    mk('ytd',        t('crm.compare.ytd'),        ytdKpi.value),
+    mk('prev_year',  t('crm.compare.prev_year'),  prevYearFullKpi.value),
+  ]
+})
+
+// ─── Proklik z tabulek do seznamů faktur (URL filtrační parametry year/month/from/to) ───
+// Seznamy /invoices i /purchase-invoices čtou stejné query klíče (viz loadFiltersFromQuery).
+function pad2(n: number): string { return String(n).padStart(2, '0') }
+function ymd(d: Date): string { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` }
+
+/** "2026-05" → { year:'2026', month:'5' } */
+function monthQuery(period: string): Record<string, string> {
+  const [y, m] = period.split('-')
+  return { year: y, month: String(Number(m)) }
+}
+
+/** Query pro řádek srovnávací tabulky (období → year/month nebo from/to). */
+function comparePeriodQuery(key: string): Record<string, string> {
+  const now = new Date()
+  const y = now.getFullYear()
+  switch (key) {
+    case 'this_month': return { year: String(y), month: String(now.getMonth() + 1) }
+    case 'last_month': {
+      const d = new Date(y, now.getMonth() - 1, 1)
+      return { year: String(d.getFullYear()), month: String(d.getMonth() + 1) }
+    }
+    case 'last_12m': {
+      const from = new Date(y, now.getMonth() - 11, 1)
+      const to = new Date(y, now.getMonth() + 1, 0) // poslední den aktuálního měsíce
+      return { from: ymd(from), to: ymd(to) }
+    }
+    case 'ytd': return { from: `${y}-01-01`, to: ymd(now) }
+    case 'prev_year': return { year: String(y - 1) }
+    default: return {}
+  }
+}
+
+// Data pro grafy zisku: 12 měsíců končících aktuálním + odpovídající okno o rok dříve.
+// Stabilní (z 24měsíční řady monthly24), nezávislé na přepínači období. Záporný zisk povolen.
+// U „Vše" agregujeme přes profit_czk (CZK), jinak nativní profit zvolené měny.
+const profitChartData = computed(() => {
+  const map = new Map<string, number>()
+  for (const m of monthly24.value) {
+    const val = currencyFilter.value === ALL_CURRENCIES ? m.profit_czk : m.profit
+    map.set(m.period, (map.get(m.period) || 0) + val)
+  }
+  const now = new Date()
+  const months: { ym: string; total: number }[] = []
+  const prevYear: { ym: string; total: number }[] = []
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+    months.push({ ym, total: map.get(ym) || 0 })
+    const dp = new Date(d.getFullYear() - 1, d.getMonth(), 1)
+    const ymp = `${dp.getFullYear()}-${String(dp.getMonth() + 1).padStart(2, '0')}`
+    prevYear.push({ ym: ymp, total: map.get(ymp) || 0 })
+  }
+  return { months, prevYear }
+})
+
+// Měsíční řádky k zobrazení: u „Vše" agregujeme všechny měny per období do CZK
+// (přes *_czk pole), jinak vracíme server-filtrované řádky vybrané měny.
+const monthlyDisplay = computed<CrmMonthlyRow[]>(() => {
+  if (currencyFilter.value !== ALL_CURRENCIES) return monthly.value
+  const byPeriod = new Map<string, CrmMonthlyRow>()
+  for (const m of monthly.value) {
+    let e = byPeriod.get(m.period)
+    if (!e) {
+      e = { period: m.period, currency: 'CZK', revenue: 0, revenue_net: 0, costs: 0, costs_net: 0, profit: 0,
+            revenue_czk: 0, revenue_net_czk: 0, costs_czk: 0, costs_net_czk: 0, profit_czk: 0,
+            invoice_count: 0, purchase_count: 0, vat_output: 0, vat_input: 0 }
+      byPeriod.set(m.period, e)
+    }
+    e.revenue     += m.revenue_czk
+    e.revenue_net += m.revenue_net_czk
+    e.costs       += m.costs_czk
+    e.costs_net   += m.costs_net_czk
+    e.invoice_count  += m.invoice_count
+    e.purchase_count += m.purchase_count
+    e.profit = e.revenue - e.costs
+  }
+  return Array.from(byPeriod.values()).sort((a, b) => a.period.localeCompare(b.period))
+})
+
 // Chart max — pro proportional bar widths
 const chartMaxValue = computed(() => {
   let max = 0
-  for (const m of monthly.value) {
+  for (const m of monthlyDisplay.value) {
     if (m.revenue > max) max = m.revenue
     if (m.costs > max) max = m.costs
   }
@@ -171,12 +329,13 @@ function barWidthPct(value: number): number {
   return Math.round((value / chartMaxValue.value) * 100)
 }
 
-// Aging buckets pro vybranou měnu
+// Aging buckets pro vybranou měnu. Aging nemá CZK přepočet (nativní částky per měna),
+// takže u „Vše" zobrazíme CZK bázi (displayCurrency='CZK') — nikdy nepřeznačíme měnu.
 const agingForCurrency = computed(() =>
-  agingRecv.value.filter(b => b.currency === currencyFilter.value)
+  agingRecv.value.filter(b => b.currency === displayCurrency.value)
 )
 const agingPayForCurrency = computed(() =>
-  agingPay.value.filter(b => b.currency === currencyFilter.value)
+  agingPay.value.filter(b => b.currency === displayCurrency.value)
 )
 const agingTotal = computed(() => agingForCurrency.value.reduce((s, b) => s + b.total, 0))
 const agingPayTotal = computed(() => agingPayForCurrency.value.reduce((s, b) => s + b.total, 0))
@@ -209,6 +368,17 @@ function formatMonthLabel(period: string): string {
   return date.toLocaleDateString('cs-CZ', { month: 'short', year: '2-digit' })
 }
 
+// Pracovní kapitálový cyklus = DSO − DPO. Kladné = financuješ provoz (inkasuješ pomaleji než platíš),
+// záporné = dodavatelé tě financují (platíš později, než ti platí klienti).
+const wcCycle = computed<number | null>(() => {
+  if (!dso.value || !dpo.value) return null
+  if (dso.value.sample_size === 0 && dpo.value.sample_size === 0) return null
+  return Math.round((dso.value.avg_days - dpo.value.avg_days) * 10) / 10
+})
+
+/** Krátký štítek zvoleného analytického období pro hlavičky sekcí (např. "12 m"). */
+const periodChip = computed(() => t('crm.period_chip', { n: periodMonths.value }))
+
 watch([periodMonths, currencyFilter], () => {
   if (currencyFilter.value) loadAll()
 })
@@ -225,14 +395,9 @@ onMounted(loadAll)
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('crm.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2 flex-wrap">
-        <select v-model.number="periodMonths" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
-          <option :value="3">{{ t('crm.last_n_months', { n: 3 }) }}</option>
-          <option :value="6">{{ t('crm.last_n_months', { n: 6 }) }}</option>
-          <option :value="12">{{ t('crm.last_n_months', { n: 12 }) }}</option>
-          <option :value="24">{{ t('crm.last_n_months', { n: 24 }) }}</option>
-        </select>
-        <select v-if="availableCurrencies.length > 1" v-model="currencyFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+        <select v-if="availableCurrencies.length > 1" v-model="currencyFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="c in availableCurrencies" :key="c" :value="c">{{ c }}</option>
+          <option :value="ALL_CURRENCIES">{{ t('crm.all_currencies') }}</option>
         </select>
         <button
           v-if="auth.user?.role === 'admin'"
@@ -247,11 +412,11 @@ onMounted(loadAll)
       </div>
     </div>
 
-    <div v-if="loading" class="bg-white border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">
+    <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">
       {{ t('common.loading') }}…
     </div>
 
-    <div v-else-if="!overview || overview.currencies.length === 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm p-8 text-center">
+    <div v-else-if="!overview || overview.currencies.length === 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center">
       <p class="text-neutral-600 mb-2">{{ t('crm.no_data') }}</p>
       <p class="text-sm text-neutral-500 mb-4">{{ t('crm.no_data_hint') }}</p>
       <button v-if="auth.user?.role === 'admin'" type="button" @click="recompute" :disabled="recomputing"
@@ -261,87 +426,15 @@ onMounted(loadAll)
     </div>
 
     <div v-else class="space-y-4">
-      <!-- ═══ Action items widget (daily TODO) ═══ -->
-      <div v-if="actionItems && actionItems.total > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
-        <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between bg-gradient-to-r from-primary-50 to-white rounded-t-lg">
-          <h3 class="text-sm font-semibold uppercase tracking-wide text-primary-700">
-            ⚡ {{ t('crm.action_items.title') }}
-            <span class="ml-2 px-1.5 py-0.5 bg-primary-600 text-white rounded text-xs">{{ actionItems.total }}</span>
-          </h3>
-          <button v-if="actionItems.dismissed_count > 0 && auth.canWrite" type="button" @click="restoreAllDismissed"
-            class="text-xs text-neutral-500 hover:text-primary-600 underline decoration-dotted">
-            {{ t('crm.action_items.restore_n', { n: actionItems.dismissed_count }) }}
-          </button>
-        </header>
-        <div class="divide-y divide-neutral-100">
-          <div v-for="(item, idx) in actionItems.items" :key="idx"
-            class="relative flex items-center justify-between px-5 py-3 hover:bg-neutral-50">
-            <RouterLink :to="item.link" class="flex items-center gap-3 flex-1 min-w-0">
-              <span :class="['inline-block w-2.5 h-2.5 rounded-full shrink-0',
-                item.severity === 'high' ? 'bg-danger-500' :
-                item.severity === 'medium' ? 'bg-warning-500' : 'bg-neutral-400']"></span>
-              <div class="min-w-0">
-                <div class="text-sm font-medium text-neutral-700">{{ item.title }}</div>
-                <div class="text-xs text-neutral-500 mt-0.5">{{ item.hint }}</div>
-              </div>
-            </RouterLink>
-            <div class="flex items-center gap-1 ml-3 shrink-0">
-              <RouterLink :to="item.link" class="text-neutral-400 hover:text-neutral-600 p-1" :title="t('crm.action_items.go_to')">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
-              </RouterLink>
-              <button v-if="auth.canWrite" type="button" @click.stop="toggleMenu(idx)"
-                class="text-neutral-400 hover:text-neutral-700 p-1 rounded hover:bg-neutral-100"
-                :title="t('crm.action_items.dismiss')">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm0 7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm0 7a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>
-              </button>
-              <div v-if="(openMenuIdx === idx) && auth.canWrite"
-                class="absolute right-3 top-12 z-20 bg-white border border-neutral-200 rounded-md shadow-lg py-1 w-[280px]"
-                @click.stop>
-                <div class="px-3 py-1.5 text-xs uppercase tracking-wide text-neutral-500 font-semibold border-b border-neutral-100">
-                  {{ t('crm.action_items.dismiss_title') }}
-                </div>
-                <button type="button" @click="dismissItem(item.type, 'day')"
-                  class="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
-                  {{ t('crm.action_items.dismiss_day') }}
-                  <div class="text-xs text-neutral-400">{{ t('crm.action_items.dismiss_day_hint') }}</div>
-                </button>
-                <button type="button" @click="dismissItem(item.type, 'week')"
-                  class="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
-                  {{ t('crm.action_items.dismiss_week') }}
-                  <div class="text-xs text-neutral-400">{{ t('crm.action_items.dismiss_week_hint') }}</div>
-                </button>
-                <button type="button" @click="dismissItem(item.type, 'historical')"
-                  class="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
-                  {{ t('crm.action_items.dismiss_historical') }}
-                  <div class="text-xs text-neutral-400">{{ t('crm.action_items.dismiss_historical_hint') }}</div>
-                </button>
-                <button type="button" @click="dismissItem(item.type, 'forever')"
-                  class="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 text-danger-600 border-t border-neutral-100">
-                  {{ t('crm.action_items.dismiss_forever') }}
-                  <div class="text-xs text-neutral-400">{{ t('crm.action_items.dismiss_forever_hint') }}</div>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- Akce pro tebe se přesunuly na Přehled (Dashboard) — viz ActionItemsWidget. -->
 
-      <!-- ═══ Standalone restore hint — pro případ že total=0 ale jsou skryté ═══ -->
-      <div v-else-if="actionItems && actionItems.dismissed_count > 0"
-        class="bg-neutral-50 border border-neutral-200 rounded-lg px-4 py-2 flex items-center justify-between text-sm">
-        <span class="text-neutral-500">
-          {{ t('crm.action_items.all_clear_n_hidden', { n: actionItems.dismissed_count }) }}
-        </span>
-        <button v-if="auth.canWrite" type="button" @click="restoreAllDismissed"
-          class="text-xs text-primary-600 hover:text-primary-700 underline decoration-dotted">
-          {{ t('crm.action_items.restore_n', { n: actionItems.dismissed_count }) }}
-        </button>
-      </div>
-
-      <!-- ═══ KPI cards ═══ -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <!-- ═══ Headline KPI — aktuální měsíc + YTD (nezávislé na zvoleném období) ═══ -->
+      <div>
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-600 mb-2">{{ t('crm.kpi_section') }}</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- Revenue -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div @click="$router.push('/stats')"
+          class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5 cursor-pointer hover:border-primary-300 transition">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs uppercase tracking-wide text-neutral-500 font-medium">{{ t('crm.kpi.revenue') }}</span>
             <svg class="w-5 h-5 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -349,7 +442,7 @@ onMounted(loadAll)
             </svg>
           </div>
           <div class="text-2xl font-bold text-neutral-900 font-mono">
-            {{ formatMoney(currentMonthKpi?.revenue || 0, currencyFilter) }}
+            {{ formatMoney(currentMonthKpi?.revenue || 0, displayCurrency) }}
           </div>
           <div class="text-xs text-neutral-500 mt-1">
             {{ t('crm.kpi.this_month') }}
@@ -359,14 +452,28 @@ onMounted(loadAll)
               {{ Math.abs(trendPct(currentMonthKpi?.revenue || 0, lastMonthKpi.revenue)) }}%
             </span>
           </div>
-          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
-            <div>YTD: <span class="font-mono">{{ formatMoney(ytdKpi?.revenue || 0, currencyFilter) }}</span></div>
-            <div class="mt-0.5">{{ currentMonthKpi?.invoice_count || 0 }} {{ t('crm.kpi.invoices') }}</div>
+          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100 space-y-0.5">
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_12m_hint')">
+              <span>{{ t('crm.kpi.last_12m') }}</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(last12mKpi?.revenue || 0, displayCurrency) }}
+                <span v-if="rev12Yoy.show" class="ml-1" :class="rev12Yoy.cls">{{ rev12Yoy.arrow }}{{ rev12Yoy.abs }}%</span>
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_ytd_hint')">
+              <span>YTD</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(ytdKpi?.revenue || 0, displayCurrency) }}
+                <span v-if="revYtdYoy.show" class="ml-1" :class="revYtdYoy.cls">{{ revYtdYoy.arrow }}{{ revYtdYoy.abs }}%</span>
+              </span>
+            </div>
+            <div>{{ currentMonthKpi?.invoice_count || 0 }} {{ t('crm.kpi.invoices') }}</div>
           </div>
         </div>
 
         <!-- Costs -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div @click="$router.push('/purchase-stats')"
+          class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5 cursor-pointer hover:border-primary-300 transition">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs uppercase tracking-wide text-neutral-500 font-medium">{{ t('crm.kpi.costs') }}</span>
             <svg class="w-5 h-5 text-danger-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -374,7 +481,7 @@ onMounted(loadAll)
             </svg>
           </div>
           <div class="text-2xl font-bold text-neutral-900 font-mono">
-            {{ formatMoney(currentMonthKpi?.costs || 0, currencyFilter) }}
+            {{ formatMoney(currentMonthKpi?.costs || 0, displayCurrency) }}
           </div>
           <div class="text-xs text-neutral-500 mt-1">
             {{ t('crm.kpi.this_month') }}
@@ -384,14 +491,27 @@ onMounted(loadAll)
               {{ Math.abs(trendPct(currentMonthKpi?.costs || 0, lastMonthKpi.costs)) }}%
             </span>
           </div>
-          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
-            <div>YTD: <span class="font-mono">{{ formatMoney(ytdKpi?.costs || 0, currencyFilter) }}</span></div>
-            <div class="mt-0.5">{{ currentMonthKpi?.purchase_count || 0 }} {{ t('crm.kpi.purchases') }}</div>
+          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100 space-y-0.5">
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_12m_hint')">
+              <span>{{ t('crm.kpi.last_12m') }}</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(last12mKpi?.costs || 0, displayCurrency) }}
+                <span v-if="cost12Yoy.show" class="ml-1" :class="cost12Yoy.cls">{{ cost12Yoy.arrow }}{{ cost12Yoy.abs }}%</span>
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_ytd_hint')">
+              <span>YTD</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(ytdKpi?.costs || 0, displayCurrency) }}
+                <span v-if="costYtdYoy.show" class="ml-1" :class="costYtdYoy.cls">{{ costYtdYoy.arrow }}{{ costYtdYoy.abs }}%</span>
+              </span>
+            </div>
+            <div>{{ currentMonthKpi?.purchase_count || 0 }} {{ t('crm.kpi.purchases') }}</div>
           </div>
         </div>
 
         <!-- Profit -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs uppercase tracking-wide text-neutral-500 font-medium">{{ t('crm.kpi.profit') }}</span>
             <svg class="w-5 h-5 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -400,7 +520,7 @@ onMounted(loadAll)
           </div>
           <div class="text-2xl font-bold font-mono"
             :class="(currentMonthKpi?.profit || 0) >= 0 ? 'text-success-600' : 'text-danger-500'">
-            {{ formatMoney(currentMonthKpi?.profit || 0, currencyFilter) }}
+            {{ formatMoney(currentMonthKpi?.profit || 0, displayCurrency) }}
           </div>
           <div class="text-xs text-neutral-500 mt-1">
             {{ t('crm.kpi.this_month') }}
@@ -408,17 +528,113 @@ onMounted(loadAll)
               · {{ Math.round((currentMonthKpi.profit / currentMonthKpi.revenue) * 100) }}% {{ t('crm.kpi.margin') }}
             </span>
           </div>
-          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100">
-            <div>YTD: <span class="font-mono">{{ formatMoney(ytdKpi?.profit || 0, currencyFilter) }}</span></div>
+          <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100 space-y-0.5">
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_12m_hint')">
+              <span>{{ t('crm.kpi.last_12m') }}</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(last12mKpi?.profit || 0, displayCurrency) }}
+                <span v-if="profit12Yoy.show" class="ml-1" :class="profit12Yoy.cls">{{ profit12Yoy.arrow }}{{ profit12Yoy.abs }}%</span>
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_ytd_hint')">
+              <span>YTD</span>
+              <span class="font-mono text-neutral-600">
+                {{ formatMoney(ytdKpi?.profit || 0, displayCurrency) }}
+                <span v-if="profitYtdYoy.show" class="ml-1" :class="profitYtdYoy.cls">{{ profitYtdYoy.arrow }}{{ profitYtdYoy.abs }}%</span>
+              </span>
+            </div>
+            <div v-if="marginPct(ytdKpi?.profit, ytdKpi?.revenue) !== null">
+              {{ t('crm.kpi.ytd_margin', { pct: Math.round(marginPct(ytdKpi?.profit, ytdKpi?.revenue)!) }) }}
+            </div>
           </div>
+        </div>
         </div>
       </div>
 
+      <!-- ═══ Srovnání období (tržby / náklady / zisk / marže) — nezávislé na přepínači níže ═══ -->
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <header class="px-5 py-3 border-b border-neutral-200">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('crm.compare.title') }}</h3>
+        </header>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm min-w-[560px]">
+            <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+              <tr>
+                <th class="text-left px-5 py-2 font-medium">{{ t('crm.compare.period') }}</th>
+                <th class="text-right px-3 py-2 font-medium">{{ t('crm.kpi.revenue') }}</th>
+                <th class="text-right px-3 py-2 font-medium">{{ t('crm.kpi.costs') }}</th>
+                <th class="text-right px-3 py-2 font-medium">{{ t('crm.kpi.profit') }}</th>
+                <th class="text-right px-5 py-2 font-medium">{{ t('crm.kpi.margin') }}</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-neutral-100">
+              <tr v-for="(row, i) in comparisonRows" :key="i" class="hover:bg-neutral-50">
+                <td class="px-5 py-2 font-medium text-neutral-700">{{ row.label }}</td>
+                <td class="px-3 py-2 text-right">
+                  <RouterLink :to="{ path: '/invoices', query: comparePeriodQuery(row.key) }"
+                    class="font-mono text-neutral-900 hover:text-primary-700 hover:underline">
+                    {{ formatMoney(row.revenue, displayCurrency) }}
+                  </RouterLink>
+                </td>
+                <td class="px-3 py-2 text-right">
+                  <RouterLink :to="{ path: '/purchase-invoices', query: comparePeriodQuery(row.key) }"
+                    class="font-mono text-danger-500 hover:text-danger-600 hover:underline">
+                    {{ formatMoney(row.costs, displayCurrency) }}
+                  </RouterLink>
+                </td>
+                <td class="px-3 py-2 text-right font-mono" :class="row.profit >= 0 ? 'text-success-600' : 'text-danger-500'">
+                  {{ row.profit >= 0 ? '+' : '' }}{{ formatMoney(row.profit, displayCurrency) }}
+                </td>
+                <td class="px-5 py-2 text-right font-mono text-neutral-600">
+                  {{ row.margin === null ? '—' : row.margin.toFixed(1) + '%' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ═══ Grafy zisku: posledních 12 měsíců + kumulativní YTD vs loni (stabilní, 12 m) ═══ -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">
+            {{ t('crm.profit_last_12_months', { currency: displayCurrency }) }}
+          </h3>
+          <RevenueChart :months="profitChartData.months" :prev-year="profitChartData.prevYear" :currency="displayCurrency" />
+        </div>
+        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+          <div class="flex items-baseline justify-between mb-3">
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
+              {{ t('crm.cumulative_profit', { currency: displayCurrency }) }}
+            </h3>
+            <span class="text-xs text-neutral-400">{{ t('crm.cumulative_profit_hint') }}</span>
+          </div>
+          <CumulativeYtdChart :months="profitChartData.months" :prev-year="profitChartData.prevYear" :currency="displayCurrency" :allow-negative="true" />
+        </div>
+      </div>
+
+      <!-- ═══ Analytické období — řídí žebříčky, grafy a metriky NÍŽE ═══ -->
+      <div class="flex items-center justify-between gap-3 flex-wrap border-t border-neutral-200 pt-4">
+        <div>
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-600">{{ t('crm.analytics_section') }}</h2>
+          <p class="text-xs text-neutral-400 mt-0.5">{{ t('crm.analytics_section_hint') }}</p>
+        </div>
+        <label class="flex items-center gap-2 text-sm shrink-0">
+          <span class="text-neutral-500">{{ t('crm.period_label') }}</span>
+          <select v-model.number="periodMonths" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+            <option :value="3">{{ t('crm.last_n_months', { n: 3 }) }}</option>
+            <option :value="6">{{ t('crm.last_n_months', { n: 6 }) }}</option>
+            <option :value="12">{{ t('crm.last_n_months', { n: 12 }) }}</option>
+            <option :value="24">{{ t('crm.last_n_months', { n: 24 }) }}</option>
+          </select>
+        </label>
+      </div>
+
       <!-- ═══ Monthly trend chart (HTML/CSS bars — no chart.js dependency) ═══ -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
         <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-            {{ t('crm.monthly_trend') }} ({{ t('crm.last_n_months', { n: periodMonths }) }})
+            {{ t('crm.monthly_trend') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
           </h3>
           <div class="flex items-center gap-3 text-xs">
             <span class="flex items-center gap-1">
@@ -431,11 +647,11 @@ onMounted(loadAll)
             </span>
           </div>
         </header>
-        <div v-if="monthly.length === 0" class="p-8 text-center text-neutral-500 text-sm">
+        <div v-if="monthlyDisplay.length === 0" class="p-8 text-center text-neutral-500 text-sm">
           {{ t('crm.no_chart_data') }}
         </div>
         <div v-else class="p-4 space-y-2">
-          <div v-for="m in monthly" :key="m.period + m.currency" class="grid grid-cols-[60px_1fr_120px] gap-2 items-center text-xs">
+          <div v-for="m in monthlyDisplay" :key="m.period + m.currency" class="grid grid-cols-[60px_1fr_120px] gap-2 items-center text-xs">
             <div class="text-neutral-600 font-medium">{{ formatMonthLabel(m.period) }}</div>
             <div class="space-y-1">
               <div class="flex items-center gap-2">
@@ -458,10 +674,10 @@ onMounted(loadAll)
       <!-- ═══ Top klienti + Top vendoři side by side ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <!-- Top clients -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              {{ t('crm.top_clients') }}
+              {{ t('crm.top_clients') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
             </h3>
           </header>
           <div v-if="topClients.length === 0" class="p-8 text-center text-neutral-500 text-sm">
@@ -489,10 +705,10 @@ onMounted(loadAll)
         </div>
 
         <!-- Top vendors -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              {{ t('crm.top_vendors') }}
+              {{ t('crm.top_vendors') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
             </h3>
           </header>
           <div v-if="topVendors.length === 0" class="p-8 text-center text-neutral-500 text-sm">
@@ -523,14 +739,20 @@ onMounted(loadAll)
       <!-- ═══ Aging buckets (pohledávky + závazky) ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <!-- Receivables -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              {{ t('crm.aging.receivables_title') }}
+              {{ t('crm.aging.receivables_title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ t('crm.snapshot_now') }})</span>
             </h3>
-            <span class="text-sm font-mono text-neutral-700">
-              {{ formatMoney(agingTotal, currencyFilter) }}
-            </span>
+            <div class="flex items-center gap-3">
+              <span class="text-sm font-mono text-neutral-700">
+                {{ formatMoney(agingTotal, displayCurrency) }}
+              </span>
+              <RouterLink :to="{ path: '/invoices', query: { year: 'all', overdue: '1' } }"
+                class="text-xs text-primary-600 hover:text-primary-700 hover:underline whitespace-nowrap">
+                {{ t('common.view_all') }}
+              </RouterLink>
+            </div>
           </header>
           <div v-if="agingForCurrency.length === 0" class="p-6 text-center text-neutral-500 text-sm">
             {{ t('crm.aging.no_open') }}
@@ -551,14 +773,20 @@ onMounted(loadAll)
         </div>
 
         <!-- Payables -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              {{ t('crm.aging.payables_title') }}
+              {{ t('crm.aging.payables_title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ t('crm.snapshot_now') }})</span>
             </h3>
-            <span class="text-sm font-mono text-neutral-700">
-              {{ formatMoney(agingPayTotal, currencyFilter) }}
-            </span>
+            <div class="flex items-center gap-3">
+              <span class="text-sm font-mono text-neutral-700">
+                {{ formatMoney(agingPayTotal, displayCurrency) }}
+              </span>
+              <RouterLink :to="{ path: '/purchase-invoices', query: { overdue: '1' } }"
+                class="text-xs text-primary-600 hover:text-primary-700 hover:underline whitespace-nowrap">
+                {{ t('common.view_all') }}
+              </RouterLink>
+            </div>
           </header>
           <div v-if="agingPayForCurrency.length === 0" class="p-6 text-center text-neutral-500 text-sm">
             {{ t('crm.aging.no_pay') }}
@@ -582,9 +810,9 @@ onMounted(loadAll)
       <!-- ═══ Health metrics row: DSO + Punctuality + Concentration ═══ -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <!-- DSO -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
-            {{ t('crm.dso.title') }}
+            {{ t('crm.dso.title') }} <span class="normal-case font-normal text-neutral-400">· {{ periodChip }}</span>
           </div>
           <div class="text-2xl font-bold font-mono text-neutral-900">
             {{ dso?.avg_days ?? '—' }}<span class="text-base text-neutral-500 ml-1">{{ t('crm.dso.days') }}</span>
@@ -593,9 +821,9 @@ onMounted(loadAll)
         </div>
 
         <!-- Punctuality -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
-            {{ t('crm.punctuality.title') }}
+            {{ t('crm.punctuality.title') }} <span class="normal-case font-normal text-neutral-400">· {{ periodChip }}</span>
           </div>
           <div class="text-2xl font-bold font-mono"
             :class="(punctuality?.on_time_pct ?? 0) >= 80 ? 'text-success-600' : (punctuality?.on_time_pct ?? 0) >= 50 ? 'text-warning-600' : 'text-danger-500'">
@@ -607,9 +835,9 @@ onMounted(loadAll)
         </div>
 
         <!-- Concentration risk -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
           <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
-            {{ t('crm.concentration.title') }}
+            {{ t('crm.concentration.title') }} <span class="normal-case font-normal text-neutral-400">· {{ periodChip }}</span>
           </div>
           <div class="text-2xl font-bold font-mono" :class="riskColor(concentration?.risk_level || 'low')">
             {{ concentration?.top1_share ?? 0 }}%
@@ -624,13 +852,94 @@ onMounted(loadAll)
         </div>
       </div>
 
+      <!-- ═══ Health metrics row 2: DPO + Vendor concentration + Working capital cycle ═══ -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- DPO -->
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
+          <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
+            {{ t('crm.dpo.title') }} <span class="normal-case font-normal text-neutral-400">· {{ periodChip }}</span>
+          </div>
+          <div class="text-2xl font-bold font-mono text-neutral-900">
+            {{ dpo?.avg_days ?? '—' }}<span class="text-base text-neutral-500 ml-1">{{ t('crm.dso.days') }}</span>
+          </div>
+          <div class="text-xs text-neutral-500 mt-1">{{ t('crm.dpo.hint', { n: dpo?.sample_size || 0 }) }}</div>
+        </div>
+
+        <!-- Vendor concentration risk -->
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
+          <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
+            {{ t('crm.vendor_concentration.title') }} <span class="normal-case font-normal text-neutral-400">· {{ periodChip }}</span>
+          </div>
+          <div class="text-2xl font-bold font-mono" :class="riskColor(vendorConcentration?.risk_level || 'low')">
+            {{ vendorConcentration?.top1_share ?? 0 }}%
+          </div>
+          <div class="text-xs text-neutral-500 mt-1">
+            {{ t('crm.vendor_concentration.top1', { pct: vendorConcentration?.top1_share ?? 0 }) }}
+            <span class="ml-2">· {{ t('crm.vendor_concentration.pareto', { n: vendorConcentration?.pareto_80_count ?? 0 }) }}</span>
+          </div>
+          <div class="text-xs mt-2 pt-2 border-t border-neutral-100" :class="riskColor(vendorConcentration?.risk_level || 'low')">
+            {{ t('crm.vendor_concentration.risk_' + (vendorConcentration?.risk_level || 'low')) }}
+          </div>
+        </div>
+
+        <!-- Working capital cycle (DSO − DPO) -->
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
+          <div class="text-xs uppercase tracking-wide text-neutral-500 font-medium mb-1">
+            {{ t('crm.wc_cycle.title') }}
+          </div>
+          <div class="text-2xl font-bold font-mono"
+            :class="wcCycle === null ? 'text-neutral-400' : wcCycle > 0 ? 'text-warning-600' : 'text-success-600'">
+            <template v-if="wcCycle !== null">{{ wcCycle > 0 ? '+' : '' }}{{ wcCycle }}<span class="text-base text-neutral-500 ml-1">{{ t('crm.dso.days') }}</span></template>
+            <template v-else>—</template>
+          </div>
+          <div class="text-xs text-neutral-500 mt-1">{{ t('crm.wc_cycle.formula') }}</div>
+          <div v-if="wcCycle !== null" class="text-xs mt-2 pt-2 border-t border-neutral-100"
+            :class="wcCycle > 0 ? 'text-warning-600' : 'text-success-600'">
+            {{ wcCycle > 0 ? t('crm.wc_cycle.positive') : t('crm.wc_cycle.negative') }}
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ Revenue breakdown (rozpad tržeb po kategoriích, vždy CZK) ═══ -->
+      <div v-if="revenues.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <header class="px-5 py-3 border-b border-neutral-200">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
+            {{ t('crm.revenue_breakdown.title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
+          </h3>
+        </header>
+        <table class="w-full text-sm">
+          <tbody class="divide-y divide-neutral-100">
+            <tr v-for="r in revenues" :key="(r.category_id ?? 0) + '-' + (r.code ?? '')" class="hover:bg-neutral-50">
+              <td class="px-5 py-2">
+                <div class="font-medium text-neutral-900">
+                  {{ r.label || t('crm.revenue_breakdown.uncategorized') }}
+                </div>
+                <div class="text-xs text-neutral-500">{{ r.count }} {{ t('crm.kpi.invoices') }}</div>
+              </td>
+              <td class="px-3 py-2">
+                <div class="w-full h-2 bg-neutral-100 rounded">
+                  <div class="h-full bg-success-500 rounded" :style="{ width: r.percent + '%' }"></div>
+                </div>
+              </td>
+              <!-- revenue breakdown je VŽDY CZK-normalizovaný (server přepočítá ×exchange_rate) → label CZK -->
+              <td class="px-3 py-2 text-right font-mono text-neutral-900">{{ formatMoney(r.total, 'CZK') }}</td>
+              <td class="px-5 py-2 text-right text-xs text-neutral-500 font-mono w-12">{{ r.percent.toFixed(1) }}%</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="revenues.length > 0 && revenues[0].category_id === null"
+          class="px-5 py-2 text-xs text-warning-600 bg-warning-50 border-t border-warning-500/40">
+          💡 {{ t('crm.revenue_breakdown.uncategorized_hint') }}
+        </div>
+      </div>
+
       <!-- ═══ Expense breakdown + Churn risk side-by-side ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <!-- Expense breakdown -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              {{ t('crm.expense_breakdown.title') }}
+              {{ t('crm.expense_breakdown.title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
             </h3>
           </header>
           <div v-if="expenses.length === 0" class="p-6 text-center text-neutral-500 text-sm">
@@ -650,7 +959,8 @@ onMounted(loadAll)
                     <div class="h-full bg-warning-500 rounded" :style="{ width: e.percent + '%' }"></div>
                   </div>
                 </td>
-                <td class="px-3 py-2 text-right font-mono text-neutral-900">{{ formatMoney(e.total, currencyFilter) }}</td>
+                <!-- expense breakdown je VŽDY CZK-normalizovaný (server přepočítá ×exchange_rate) → label CZK -->
+                <td class="px-3 py-2 text-right font-mono text-neutral-900">{{ formatMoney(e.total, 'CZK') }}</td>
                 <td class="px-5 py-2 text-right text-xs text-neutral-500 font-mono w-12">{{ e.percent.toFixed(1) }}%</td>
               </tr>
             </tbody>
@@ -662,7 +972,7 @@ onMounted(loadAll)
         </div>
 
         <!-- Churn risk -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div id="churn-risk" class="scroll-mt-20 bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
               {{ t('crm.churn.title') }}
@@ -698,7 +1008,7 @@ onMounted(loadAll)
       <!-- ═══ Náklady po rocích + Náklady po měsících (obdoba Stats) ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <!-- Náklady po rocích -->
-        <div v-if="yearly.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div v-if="yearly.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
               📅 {{ t('crm.costs_by_year_table') }}
@@ -714,7 +1024,9 @@ onMounted(loadAll)
                 </tr>
               </thead>
               <tbody class="divide-y divide-neutral-100">
-                <tr v-for="r in yearly.filter(y => y.costs > 0 || y.purchase_count > 0)" :key="`cy-${r.year}-${r.currency}`">
+                <tr v-for="r in yearly.filter(y => y.costs > 0 || y.purchase_count > 0)" :key="`cy-${r.year}-${r.currency}`"
+                  class="cursor-pointer hover:bg-neutral-50" :title="t('crm.go_to_purchases')"
+                  @click="$router.push({ path: '/purchase-invoices', query: { year: String(r.year) } })">
                   <td class="px-4 py-2 font-medium">{{ r.year }}</td>
                   <td class="px-4 py-2 text-right font-mono text-danger-500">{{ formatMoney(r.costs, r.currency) }}</td>
                   <td class="px-4 py-2 text-right text-xs text-neutral-500">{{ r.purchase_count }}</td>
@@ -725,10 +1037,10 @@ onMounted(loadAll)
         </div>
 
         <!-- Náklady po měsících (posledních N podle periodMonths) -->
-        <div v-if="monthly.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div v-if="monthlyDisplay.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              📊 {{ t('crm.costs_by_month_table') }}
+              📊 {{ t('crm.costs_by_month_table') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
             </h3>
           </header>
           <div class="overflow-x-auto">
@@ -741,7 +1053,9 @@ onMounted(loadAll)
                 </tr>
               </thead>
               <tbody class="divide-y divide-neutral-100">
-                <tr v-for="row in [...monthly].filter(m => m.costs > 0 || m.purchase_count > 0).reverse()" :key="`cm-${row.period}-${row.currency}`">
+                <tr v-for="row in [...monthlyDisplay].filter(m => m.costs > 0 || m.purchase_count > 0).reverse()" :key="`cm-${row.period}-${row.currency}`"
+                  class="cursor-pointer hover:bg-neutral-50" :title="t('crm.go_to_purchases')"
+                  @click="$router.push({ path: '/purchase-invoices', query: monthQuery(row.period) })">
                   <td class="px-4 py-2 font-mono text-neutral-700">{{ row.period }}</td>
                   <td class="px-4 py-2 text-right font-mono text-danger-500">{{ formatMoney(row.costs, row.currency) }}</td>
                   <td class="px-4 py-2 text-right text-xs text-neutral-500">{{ row.purchase_count }}</td>
@@ -752,8 +1066,87 @@ onMounted(loadAll)
         </div>
       </div>
 
+      <!-- ═══ Zisk po rocích + Zisk po měsících (výsledovka tržby/zisk/marže) ═══ -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Zisk po rocích -->
+        <div v-if="yearly.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+          <header class="px-5 py-3 border-b border-neutral-200">
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
+              📅 {{ t('crm.profit_by_year_table') }}
+            </h3>
+          </header>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">{{ t('common.year') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.revenue') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.profit') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.margin') }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-neutral-100">
+                <tr v-for="r in yearly.filter(y => y.revenue > 0 || y.costs > 0)" :key="`py-${r.year}-${r.currency}`" class="hover:bg-neutral-50">
+                  <td class="px-4 py-2 font-medium">{{ r.year }}</td>
+                  <td class="px-4 py-2 text-right">
+                    <RouterLink :to="{ path: '/invoices', query: { year: String(r.year) } }"
+                      class="font-mono text-neutral-700 hover:text-primary-700 hover:underline" :title="t('crm.go_to_invoices')">
+                      {{ formatMoney(r.revenue, r.currency) }}
+                    </RouterLink>
+                  </td>
+                  <td class="px-4 py-2 text-right font-mono" :class="r.profit >= 0 ? 'text-success-600' : 'text-danger-500'">
+                    {{ r.profit >= 0 ? '+' : '' }}{{ formatMoney(r.profit, r.currency) }}
+                  </td>
+                  <td class="px-4 py-2 text-right font-mono text-xs text-neutral-500">
+                    {{ marginPct(r.profit, r.revenue) === null ? '—' : marginPct(r.profit, r.revenue)!.toFixed(1) + '%' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Zisk po měsících (posledních N podle periodMonths) -->
+        <div v-if="monthlyDisplay.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+          <header class="px-5 py-3 border-b border-neutral-200">
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
+              📊 {{ t('crm.profit_by_month_table') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
+            </h3>
+          </header>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+                <tr>
+                  <th class="text-left px-4 py-2 font-medium">{{ t('common.month') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.revenue') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.profit') }}</th>
+                  <th class="text-right px-4 py-2 font-medium">{{ t('crm.kpi.margin') }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-neutral-100">
+                <tr v-for="row in [...monthlyDisplay].filter(m => m.revenue > 0 || m.costs > 0).reverse()" :key="`pm-${row.period}-${row.currency}`" class="hover:bg-neutral-50">
+                  <td class="px-4 py-2 font-mono text-neutral-700">{{ row.period }}</td>
+                  <td class="px-4 py-2 text-right">
+                    <RouterLink :to="{ path: '/invoices', query: monthQuery(row.period) }"
+                      class="font-mono text-neutral-700 hover:text-primary-700 hover:underline" :title="t('crm.go_to_invoices')">
+                      {{ formatMoney(row.revenue, row.currency) }}
+                    </RouterLink>
+                  </td>
+                  <td class="px-4 py-2 text-right font-mono" :class="row.profit >= 0 ? 'text-success-600' : 'text-danger-500'">
+                    {{ row.profit >= 0 ? '+' : '' }}{{ formatMoney(row.profit, row.currency) }}
+                  </td>
+                  <td class="px-4 py-2 text-right font-mono text-xs text-neutral-500">
+                    {{ marginPct(row.profit, row.revenue) === null ? '—' : marginPct(row.profit, row.revenue)!.toFixed(1) + '%' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- ═══ Cash flow forecast (4 týdny) ═══ -->
-      <div v-if="cashFlow && cashFlow.weeks.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-if="cashFlow && cashFlow.weeks.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
             💰 {{ t('crm.cash_flow.title') }} ({{ cashFlow.currency }})
@@ -804,7 +1197,7 @@ onMounted(loadAll)
       <!-- ═══ Late payment risk + Payment time histogram side-by-side ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <!-- Late risk -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
               ⚠️ {{ t('crm.late_risk.title') }}
@@ -845,10 +1238,10 @@ onMounted(loadAll)
         </div>
 
         <!-- Payment time histogram -->
-        <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
           <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
             <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-              ⏱️ {{ t('crm.payment_time.title') }}
+              ⏱️ {{ t('crm.payment_time.title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
             </h3>
             <div v-if="paymentHist && paymentHist.median_days !== null" class="text-xs text-neutral-500">
               {{ t('crm.payment_time.median') }}: <span class="font-mono font-medium">{{ paymentHist.median_days }} {{ t('crm.payment_time.days') }}</span>
@@ -877,10 +1270,10 @@ onMounted(loadAll)
       </div>
 
       <!-- ═══ Reminder effectiveness funnel ═══ -->
-      <div v-if="reminderEff && reminderEff.total_paid > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-if="reminderEff && reminderEff.total_paid > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
-            📧 {{ t('crm.reminder.title') }}
+            📧 {{ t('crm.reminder.title') }} <span class="normal-case font-normal text-[10px] text-neutral-400">({{ periodChip }})</span>
           </h3>
         </header>
         <div class="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-center">

@@ -29,11 +29,13 @@ final class RecurringTemplateRepository
                     c.main_email AS client_main_email,
                     c.language AS client_language,
                     p.name AS project_name,
-                    cur.code AS currency, cur.symbol AS currency_symbol
+                    cur.code AS currency, cur.symbol AS currency_symbol,
+                    rc.label AS revenue_category_label, rc.code AS revenue_category_code
                FROM recurring_invoice_templates t
                JOIN clients c ON c.id = t.client_id
           LEFT JOIN projects p ON p.id = t.project_id
                JOIN currencies cur ON cur.id = t.currency_id
+          LEFT JOIN revenue_categories rc ON rc.id = t.revenue_category_id
               WHERE t.id = ?'
         );
         $stmt->execute([$id]);
@@ -126,7 +128,7 @@ final class RecurringTemplateRepository
                        t.frequency, t.day_of_month, t.end_of_month,
                        t.anchor_date, t.end_date, t.next_run_date, t.last_run_date,
                        t.invoice_type, t.currency_id, t.language, t.payment_method,
-                       t.reverse_charge, t.discount_percent,
+                       t.reverse_charge, t.discount_percent, t.revenue_category_id,
                        t.payment_due_days, t.draft_open_mode, t.reminder_days_before,
                        t.auto_issue, t.auto_send_email, t.status,
                        t.last_run_date, t.last_error, t.last_error_at,
@@ -247,13 +249,18 @@ final class RecurringTemplateRepository
     }
 
     /**
-     * SQL výraz: součet faktury šablony `t` (base + DPH, per-line rounding,
-     * respektuje t.reverse_charge). Použit v list() pro per-řádek i agregaci.
+     * SQL výraz: součet faktury šablony `t` (celkem s DPH, per-line rounding,
+     * respektuje t.reverse_charge i t.prices_include_vat). Použit v list() pro
+     * per-řádek i agregaci.
+     *
+     * Režim „ceny s DPH" (t.prices_include_vat=1): unit_price_without_vat nese BRUTTO,
+     * takže řádkový součet s DPH = round(qty*unit_price,2) a NEpřičítáme DPH navrch
+     * (ta je už uvnitř). Jinak (zdola) přičteme DPH z báze (mimo reverse charge).
      */
     private const TEMPLATE_TOTAL_SQL =
         "((SELECT COALESCE(SUM(
                     ROUND(ri.quantity * ri.unit_price_without_vat, 2)
-                  + CASE WHEN t.reverse_charge = 1 THEN 0
+                  + CASE WHEN t.prices_include_vat = 1 OR t.reverse_charge = 1 THEN 0
                          ELSE ROUND(ROUND(ri.quantity * ri.unit_price_without_vat, 2) * vr.rate_percent / 100, 2) END
                  ), 0)
             FROM recurring_invoice_template_items ri
@@ -364,11 +371,12 @@ final class RecurringTemplateRepository
         $sql = 'INSERT INTO recurring_invoice_templates
             (supplier_id, client_id, project_id, name,
              frequency, day_of_month, end_of_month, anchor_date, end_date, next_run_date,
-             invoice_type, currency_id, language, payment_method, reverse_charge, discount_percent,
+             invoice_type, currency_id, language, payment_method, reverse_charge, prices_include_vat, discount_percent,
+             revenue_category_id,
              payment_due_days, tax_date_mode, draft_open_mode, reminder_days_before,
              note_above_items, note_below_items,
              increment_month_in_descriptions, auto_issue, auto_send_email, status, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -387,7 +395,9 @@ final class RecurringTemplateRepository
             (string) ($data['language'] ?? 'cs'),
             (string) ($data['payment_method'] ?? 'bank_transfer'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
+            !empty($data['revenue_category_id']) ? (int) $data['revenue_category_id'] : null,
             (int) ($data['payment_due_days'] ?? 14),
             self::normalizeTaxDateMode($data['tax_date_mode'] ?? null),
             self::normalizeDraftOpenMode($data['draft_open_mode'] ?? null),
@@ -437,7 +447,8 @@ final class RecurringTemplateRepository
                 anchor_date = ?, end_date = ?,
                 next_run_date = ?,
                 invoice_type = ?, currency_id = ?, language = ?, payment_method = ?,
-                reverse_charge = ?, discount_percent = ?, payment_due_days = ?, tax_date_mode = ?,
+                reverse_charge = ?, prices_include_vat = ?, discount_percent = ?, revenue_category_id = ?,
+                payment_due_days = ?, tax_date_mode = ?,
                 draft_open_mode = ?, reminder_days_before = ?,
                 note_above_items = ?, note_below_items = ?,
                 increment_month_in_descriptions = ?, auto_issue = ?, auto_send_email = ?
@@ -457,7 +468,9 @@ final class RecurringTemplateRepository
             (string) ($data['language'] ?? 'cs'),
             (string) ($data['payment_method'] ?? 'bank_transfer'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
+            !empty($data['revenue_category_id']) ? (int) $data['revenue_category_id'] : null,
             (int) ($data['payment_due_days'] ?? 14),
             self::normalizeTaxDateMode($data['tax_date_mode'] ?? null),
             self::normalizeDraftOpenMode($data['draft_open_mode'] ?? null),
@@ -577,10 +590,13 @@ final class RecurringTemplateRepository
         $row['client_id']      = (int) $row['client_id'];
         $row['project_id']     = $row['project_id'] !== null ? (int) $row['project_id'] : null;
         $row['currency_id']    = (int) $row['currency_id'];
+        if (array_key_exists('revenue_category_id', $row)) {
+            $row['revenue_category_id'] = $row['revenue_category_id'] !== null ? (int) $row['revenue_category_id'] : null;
+        }
         if (array_key_exists('day_of_month', $row)) {
             $row['day_of_month'] = $row['day_of_month'] !== null ? (int) $row['day_of_month'] : null;
         }
-        foreach (['end_of_month', 'reverse_charge', 'increment_month_in_descriptions', 'auto_issue', 'auto_send_email'] as $f) {
+        foreach (['end_of_month', 'reverse_charge', 'prices_include_vat', 'increment_month_in_descriptions', 'auto_issue', 'auto_send_email'] as $f) {
             if (array_key_exists($f, $row)) $row[$f] = (bool) $row[$f];
         }
         if (array_key_exists('payment_due_days', $row)) {

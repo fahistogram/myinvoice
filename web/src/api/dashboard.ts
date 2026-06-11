@@ -129,11 +129,17 @@ export interface AgingReportRow {
 export interface RevenueForecast {
   currency: string
   ytd: number
-  prev_year_ytd: number
   prev_year_remainder: number
-  growth_ratio: number
-  forecast: number
   prev_year_full: number
+  /** Krátkodobý růst: rolling 12m / předchozích 12m (faktor, 1.2 = +20 %) */
+  growth_short: number
+  /** Dlouhodobý trend: CAGR z posledních let (faktor) */
+  growth_trend: number
+  /** Medián tří projekcí (run-rate / krátkodobý růst / trend) */
+  forecast: number
+  /** Spodní a horní hranice projekcí — rozpětí nejistoty */
+  forecast_low: number
+  forecast_high: number
 }
 
 export interface Revenue30d {
@@ -147,14 +153,40 @@ export interface InvoiceSizeHistogram {
   total: number
 }
 
+/** Rozpad tržeb po kategoriích za 12 měsíců (CZK-normalizováno) — pro koláč na Stats. */
+export interface RevenueCategoryBreakdownItem {
+  category_id: number | null
+  code: string | null
+  label: string | null
+  total: number
+  count: number
+  percent: number
+}
+
+export interface DraftInvoiceItem {
+  id: number
+  varsymbol: string | null
+  invoice_type: string
+  client_id: number
+  client_company_name: string
+  project_id: number | null
+  project_name: string | null
+  currency: string
+  issue_date: string
+  total_with_vat: number
+}
+
 export interface DashboardSummary {
   kpi: DashboardKpi
   overdue: DashboardInvoiceItem[]
   unpaid_upcoming: DashboardInvoiceItem[]
+  draft_invoices: DraftInvoiceItem[]
   top_clients_ytd: TopClient[]
   top_clients_prev_year: TopClient[]
   top_clients_12m: TopClient[]
   revenue_by_month: RevenueByMonth[]
+  revenue_breakdown_12m: RevenueCategoryBreakdownItem[]
+  purchase_costs_by_month: Array<{ ym: string; total: number }>
   revenue_by_year: RevenueByYear[]
   rolling_12m: Rolling12mRevenue[]
   cashflow_ytd: CashflowByCurrency[]
@@ -169,6 +201,15 @@ export interface DashboardSummary {
   active_recurring_count: number
   active_clients_count: number
   pending_approvals?: { requested: number; overdue: number }
+  flat_tax_threshold?: {
+    applicable: boolean
+    band: 'band1' | 'band2' | 'band3' | null
+    current_czk: number
+    limit_czk: number | null
+    percent: number | null
+    status: 'ok' | 'notice' | 'warning' | 'danger' | null
+    year: number
+  }
   today: string
   year: number
   prev_year: number

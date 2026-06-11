@@ -55,6 +55,7 @@ final class BankStatementAction
         private readonly FinalFromProformaCreator $finalCreator,
         private readonly \MyInvoice\Repository\PurchaseInvoiceRepository $purchaseRepo,
         private readonly \MyInvoice\Service\Invoice\PurchaseInvoiceCalculator $purCalc,
+        private readonly \MyInvoice\Service\Mail\PaymentThanksMailer $paymentThanks,
     ) {}
 
     public function scan(Request $request, Response $response): Response
@@ -165,6 +166,22 @@ final class BankStatementAction
         // GPC zero-paduje účet (`0000001000000005`), currencies bez padding (`1000000005`) — porovnáváme
         // normalizované hodnoty (REGEXP_REPLACE non-digits + TRIM leading zeros).
         $sid = SupplierGuard::currentId($request);
+        $limit = 50;
+        $page = max(1, (int) ($request->getQueryParams()['page'] ?? 1));
+        $offset = ($page - 1) * $limit; // int (page castnuto) → bezpečně inline do LIMIT/OFFSET
+
+        // Společný scope filtr (account_number/bank_code z currencies dodavatele).
+        $scopeSql = "EXISTS (
+                  SELECT 1 FROM currencies cur
+                   WHERE cur.supplier_id = ?
+                     AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
+                       = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
+                     AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
+              )";
+        $countStmt = $this->db->pdo()->prepare("SELECT COUNT(*) FROM bank_statements bs WHERE $scopeSql");
+        $countStmt->execute([$sid]);
+        $total = (int) $countStmt->fetchColumn();
+
         // account_label: vlastní pojmenování účtu z currencies.label (např. "CZK — Fio Bank")
         // přes scalar subselect (LIMIT 1 — sup. může mít jen 1 záznam per account_number+bank_code).
         $stmt = $this->db->pdo()->prepare(
@@ -187,7 +204,7 @@ final class BankStatementAction
                      AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
               )
               ORDER BY bs.statement_date DESC, bs.id DESC
-              LIMIT 200"
+              LIMIT $limit OFFSET $offset"
         );
         $stmt->execute([$sid, $sid]);
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
@@ -200,7 +217,7 @@ final class BankStatementAction
             $r['has_file'] = (bool) $r['has_file'];
             $r['has_pdf'] = (bool) $r['has_pdf'];
         }
-        return Json::ok($response, $rows);
+        return Json::ok($response, ['items' => $rows, 'total' => $total, 'page' => $page, 'limit' => $limit]);
     }
 
     /**
@@ -420,7 +437,8 @@ final class BankStatementAction
         // Číslo účtu na začátek názvu, pokud tam ještě není — ať se stažené PDF
         // z různých účtů nepletou (např. „2026-02.pdf" → „1000000005-2026-02.pdf").
         // „Už obsahuje" testujeme i podle čistých číslic (formát s lomítkem/pomlčkou).
-        $account = trim((string) ($row['account_number'] ?? ''));
+        // Trim vedoucí nuly (zero-padded účet „000123-456" → „123-456").
+        $account = ltrim(trim((string) ($row['account_number'] ?? '')), '0');
         if ($account !== '') {
             $acctDigits = preg_replace('/\D/', '', $account) ?? '';
             $nameDigits = preg_replace('/\D/', '', $fileName) ?? '';
@@ -933,10 +951,12 @@ final class BankStatementAction
 
             // Pokud faktura ještě není paid/cancelled, označ ji jako paid s datem z výpisu
             $finalDraftId = null;
+            $markedPaid = false;
             if (in_array($invoice['status'], ['issued', 'sent', 'reminded'], true)) {
                 $pdo->prepare(
                     "UPDATE invoices SET status = 'paid', paid_at = ? WHERE id = ?"
                 )->execute([$postedAt, $invoiceId]);
+                $markedPaid = true;
 
                 // Zaplacená proforma → vytvoř DRAFT finální faktury (daňový doklad k záloze)
                 if (($invoice['invoice_type'] ?? '') === 'proforma') {
@@ -974,9 +994,27 @@ final class BankStatementAction
                 'trigger'          => 'bank_match_manual',
             ], $ip, $request->getHeaderLine('User-Agent'));
         }
+        // Děkovný e-mail za úhradu (issue #57) — jen při autom. označení po párování
+        // a jen pokud má dodavatel zapnuté auto-odesílání. Mimo transakci, best-effort
+        // (service chyby odchytí — selhání e-mailu nesmí rozbít spárování).
+        $thanks = null;
+        if ($markedPaid) {
+            $thanks = $this->paymentThanks->sendForInvoice(
+                $invoiceId,
+                'bank_match',
+                $userId ?: null,
+                $ip,
+                $request->getHeaderLine('User-Agent'),
+                requireUnsent: true,
+            );
+        }
+
         $result = ['matched' => true, 'paid_at' => $postedAt];
         if ($finalDraftId !== null) {
             $result['final_draft_id'] = $finalDraftId;
+        }
+        if ($thanks !== null && ($thanks['status'] ?? '') === 'sent') {
+            $result['payment_thanks_sent'] = true;
         }
         return Json::ok($response, $result);
     }

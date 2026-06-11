@@ -83,6 +83,19 @@ PHP);
         self::assertSame(3307, $cfg->get('db.port'));
     }
 
+    public function testEmptyEnvDoesNotOverrideConfig(): void
+    {
+        // Docker Compose dosadí u `KEY: ${VAR}` prázdný řetězec, když VAR
+        // v .env chybí. Takový prázdný override nesmí přebít hodnotu z cfg.php.
+        $this->setEnv('MYSQL_HOST', '');
+        $this->setEnv('MYSQL_PORT', '');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertSame('127.0.0.1', $cfg->get('db.host'));
+        self::assertSame(3306, $cfg->get('db.port'));
+    }
+
     private function setEnv(string $name, string $value): void
     {
         if (!array_key_exists($name, $this->envBackup)) {

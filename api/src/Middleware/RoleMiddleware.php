@@ -38,6 +38,7 @@ final class RoleMiddleware implements MiddlewareInterface
         '/api/auth/setup-status',
         '/api/auth/setup',
         '/api/auth/setup-ares-lookup',
+        '/api/auth/setup-crpdph-lookup',
         '/api/auth/setup-sample',
         '/api/auth/login',
         '/api/auth/logout',
@@ -66,8 +67,14 @@ final class RoleMiddleware implements MiddlewareInterface
         '* #^/api/work-reports(/|$)#',
         '* #^/api/bank-statements(/|$)#',
         '* #^/api/bank-transactions(/|$)#',
+        // Dokumenty — účetní smí zakládat/upravovat/mazat (do koše) + spravovat složky
+        '* #^/api/documents(/|$)#',
+        '* #^/api/document-folders(/|$)#',
         // Codebooks read-only přes API (admin endpointy mají zvláštní cestu /api/admin/codebooks)
         'GET #^/api/codebooks(/|$)#',
+        // Vlastní podpisové profily účetních; Action vrstva hlídá feature flag i owner_user_id.
+        '* #^/api/settings/signing/profiles(/|$)#',
+        '* #^/api/settings/pdf-signing/user-defaults(/|$)#',
         // ZIP export může i účetní (read of mass PDF)
         'GET #^/api/admin/invoices-zip$#',
     ];
@@ -78,6 +85,14 @@ final class RoleMiddleware implements MiddlewareInterface
      */
     private const READONLY_RULES = [
         'GET *', // všechny GETy: čtení dat je dovolené
+        // Měsíční export = čtení (sbalí existující doklady do ZIP), jen kvůli
+        // délce renderování běží jako background job — start/cancel/smazání jobu
+        // jsou operační stav exportu, ne mutace business dat. Bez těchto pravidel
+        // by POST/DELETE spadly do admin-only fallbacku, přestože MonthlyExportAction
+        // má vlastní guard admin/accountant/readonly („export = čtení").
+        'POST #^/api/reports/monthly-export/start$#',
+        'POST #^/api/reports/monthly-export/jobs/[0-9]+/cancel$#',
+        'DELETE #^/api/reports/monthly-export/jobs/[0-9]+$#',
     ];
 
     public function __construct(

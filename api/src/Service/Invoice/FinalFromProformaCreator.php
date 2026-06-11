@@ -85,9 +85,10 @@ final class FinalFromProformaCreator
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
-                    issue_date, tax_date, due_date, currency_id, reverse_charge, language,
-                    note_above_items, advance_paid_amount, discount_percent, payment_method, status, created_by)
-                 VALUES ("invoice", ?, ?, ?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                    issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
+                    note_above_items, note_below_items, advance_paid_amount, discount_percent, payment_method,
+                    revenue_category_id, status, created_by)
+                 VALUES ("invoice", ?, ?, ?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
             );
             $stmt->execute([
                 $proformaId,
@@ -98,11 +99,19 @@ final class FinalFromProformaCreator
                 $dueDate,
                 (int) $proforma['currency_id'],
                 $proforma['reverse_charge'] ? 1 : 0,
+                // Režim „ceny s DPH" musí dědit z proformy — jinak by se zkopírované brutto
+                // jednotkové ceny přepočítaly jako netto a daňový doklad by měl nafouknuté totály.
+                !empty($proforma['prices_include_vat']) ? 1 : 0,
                 $proforma['language'],
                 $noteAbove,
+                // Poznámku „pod položkami" zdědíme z proformy (text nad položkami nahrazuje
+                // marker daňového dokladu, ale spodní poznámka uživatele se má zachovat).
+                $proforma['note_below_items'] ?? null,
                 $advance,
                 (float) ($proforma['discount_percent'] ?? 0),
                 (string) ($proforma['payment_method'] ?? 'bank_transfer'),
+                // Kategorii tržby zdědíme z proformy (daňový doklad patří do stejné kategorie).
+                $proforma['revenue_category_id'] ?? null,
                 $userId ?: null,
             ]);
             $finalId = (int) $pdo->lastInsertId();

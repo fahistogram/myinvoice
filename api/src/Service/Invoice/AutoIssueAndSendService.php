@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Invoice;
 
-use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Mail\RecipientResolver;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Pdf\PdfArchiveService;
 use MyInvoice\Service\Stats\StatsRecomputer;
@@ -39,8 +39,8 @@ final class AutoIssueAndSendService
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
         private readonly StatsRecomputer $stats,
-        private readonly Config $config,
         private readonly PdfArchiveService $pdfArchive,
+        private readonly RecipientResolver $recipients,
     ) {}
 
     /**
@@ -89,22 +89,14 @@ final class AutoIssueAndSendService
         }
 
         // 2. PDF
-        $pdfPath = $this->renderer->render($invoiceId);
+        $pdfPath = $this->renderer->render($invoiceId, false, $userId);
 
-        // 3. Příjemci (stejná logika jako SendEmailAction)
-        $to = $this->resolveRecipients($invoice);
-        $cc = [];
-        if ((bool) $this->config->get('smtp.cc_supplier_on_send', false)) {
-            $stmt = $this->db->pdo()->prepare('SELECT email FROM supplier WHERE id = ?');
-            $stmt->execute([(int) $invoice['supplier_id']]);
-            $supplierEmail = trim((string) $stmt->fetchColumn());
-            if ($supplierEmail !== ''
-                && filter_var($supplierEmail, FILTER_VALIDATE_EMAIL)
-                && !in_array($supplierEmail, $to, true)
-            ) {
-                $cc[] = $supplierEmail;
-            }
-        }
+        // 3. Příjemci — jednotný resolver (#86), účel `documents`, včetně kopie
+        //    dodavateli (supplier.self_copy / cfg smtp.cc_supplier_on_send).
+        $r = $this->recipients->resolve(RecipientResolver::TYPE_DOCUMENTS, $invoice);
+        $to = $r['to'];
+        $bcc = $r['bcc'];
+        $cc = $r['cc'];
 
         if (empty($to)) {
             // Faktura je vystavená, ale nemá komu poslat — vrátit info, caller rozhodne co dál
@@ -114,27 +106,40 @@ final class AutoIssueAndSendService
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, false, $locale);
 
-        $this->mailer->sendTemplate(
-            'invoice_send',
-            $locale,
-            $to,
-            $vars,
-            null,
-            $cc,
-            [],
-            [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
-        );
+        try {
+            $this->mailer->sendTemplate(
+                'invoice_send',
+                $locale,
+                $to,
+                $vars,
+                null,
+                $cc,
+                $bcc,
+                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                $userId,
+            );
+        } catch (\Throwable $e) {
+            // Auto-send po schválení výkazu — selhání zalogujeme do přehledu e-mailů
+            // a propustíme dál (caller v approval flow si ho ošetří).
+            $this->logger->log('invoice.send_failed', $userId, 'invoice', $invoiceId, [
+                'to' => $to, 'cc' => $cc,
+                'auto_reason' => 'work_report_approved',
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $ua);
+            throw $e;
+        }
 
         $newStatus = $invoice['status'] === 'issued' ? 'sent' : $invoice['status'];
         $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW() WHERE id = ?')
             ->execute([$newStatus, $invoiceId]);
 
         // Archivuj kopii PDF jako 'sent' verzi — viz SendEmailAction
-        $sentToAll = array_values(array_unique(array_merge($to, $cc)));
+        $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
         $archiveId = $this->pdfArchive->archiveCopy($invoiceId, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
 
         $this->logger->log('invoice.sent', $userId, 'invoice', $invoiceId, [
-            'to' => $to, 'cc' => $cc,
+            'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
+            'resolved_recipients' => $r['resolved'],
             'pdf_path' => basename($pdfPath),
             'pdf_archive_id' => $archiveId,
             'auto_reason' => 'work_report_approved',
@@ -174,7 +179,7 @@ final class AutoIssueAndSendService
 
         $issueDate  = new \DateTimeImmutable($invoice['issue_date']);
         $supplierId = (int) $invoice['supplier_id'];
-        $varsymbol  = $this->varsymbol->next($supplierId, $invoice['invoice_type'], $issueDate);
+        $varsymbol  = $this->varsymbol->next($supplierId, $invoice['invoice_type'], $issueDate, (int) $invoice['client_id']);
         $snapshots  = $this->snapshots->build(
             (int) $invoice['client_id'],
             (int) $invoice['currency_id'],
@@ -203,27 +208,5 @@ final class AutoIssueAndSendService
         $this->renderer->invalidate($invoiceId, 'invalidate_allocate', archive: false);
 
         return $this->repo->find($invoiceId);
-    }
-
-    /** Stejná logika jako SendEmailAction::resolveRecipients. */
-    private function resolveRecipients(array $invoice): array
-    {
-        $emails = [];
-        if (!empty($invoice['client_main_email'])) {
-            $emails[] = $invoice['client_main_email'];
-        }
-        if (!empty($invoice['project_id'])) {
-            $stmt = $this->db->pdo()->prepare(
-                'SELECT email FROM project_billing_emails WHERE project_id = ? ORDER BY position'
-            );
-            $stmt->execute([$invoice['project_id']]);
-            foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $em) {
-                $em = trim((string) $em);
-                if ($em !== '' && !in_array($em, $emails, true)) {
-                    $emails[] = $em;
-                }
-            }
-        }
-        return $emails;
     }
 }
