@@ -18,8 +18,11 @@ use MyInvoice\Bootstrap;
  * Bold, varianta 4.1) leží v styles/fonts/inter/ a fungují identicky na
  * Win/Linux/Dockeru (cesta přes Bootstrap::rootDir(), žádný systémový font).
  *
- * Tabulkové číslice zůstávají v 'DejaVu Sans Mono' (bundled v mPDF) kvůli
- * zarovnání číselných sloupců — Inter má jen proporcionální číslice.
+ * Tabulkové číslice jedou přes 'jetbrainsmono' (JetBrains Mono, OFL) kvůli
+ * zarovnání číselných sloupců — Inter má jen proporcionální číslice. Font leží
+ * v api/resources/fonts/ (v REPU, deployuje se vždy), takže záměrně NEzávisíme
+ * na mPDF bundled DejaVuSansMono, který build cache / cleanup může smazat
+ * (→ Cannot find TTF DejaVuSansMono.ttf na deployi).
  */
 final class PdfFonts
 {
@@ -31,22 +34,36 @@ final class PdfFonts
      */
     public static function mpdfConfig(): array
     {
-        $fontDir  = (new ConfigVariables())->getDefaults()['fontDir'];
-        $fontData = (new FontVariables())->getDefaults()['fontdata'];
+        $defCfg   = (new ConfigVariables())->getDefaults();
+        $defFonts = (new FontVariables())->getDefaults();
+
+        // Registruj JEN fonty, které jsou v REPU (deployují se vždy) — záměrně
+        // NEzávisíme na mPDF bundled fontech (DejaVuSansMono apod.), které build
+        // cache / cleanup-mpdf-fonts.php může smazat (→ Cannot find TTF na deployi).
+        // dejavusans (z mPDF) necháváme jen jako backupSubsFont pro chybějící glyfy.
+        $fontData = array_intersect_key($defFonts['fontdata'], ['dejavusans' => 1]);
+        // Inter (OFL) — primární brandové písmo, self-hosted v styles/fonts/inter/.
+        // 'Inter SemiBold' v CSS se mapuje na 'intersemibold'.
+        $fontData['inter']         = ['R' => 'Inter-Regular.ttf', 'B' => 'Inter-Bold.ttf'];
+        $fontData['intersemibold'] = ['R' => 'Inter-SemiBold.ttf'];
+        // JetBrains Mono (OFL) — tabulkové číslice (zarovnání sloupců, IBANy, varsymboly).
+        // Stejný zdroj (api/resources/fonts/) jako MpdfFontConfig → deployuje se vždy.
+        $fontData['jetbrainsmono'] = ['R' => 'JetBrainsMono-Regular.ttf', 'B' => 'JetBrainsMono-Bold.ttf'];
 
         return [
-            'fontDir' => array_merge($fontDir, [Bootstrap::rootDir() . '/styles/fonts/inter']),
-            // mapování family → soubory; 'Inter SemiBold' v CSS se mapuje na 'intersemibold'.
-            'fontdata' => $fontData + [
-                'inter' => [
-                    'R' => 'Inter-Regular.ttf',
-                    'B' => 'Inter-Bold.ttf',
-                ],
-                'intersemibold' => [
-                    'R' => 'Inter-SemiBold.ttf',
-                ],
-            ],
-            'default_font' => 'inter',
+            'fontDir'          => array_merge(
+                $defCfg['fontDir'],
+                [MpdfFontConfig::fontDir(), Bootstrap::rootDir() . '/styles/fonts/inter'],
+            ),
+            'fontdata'         => $fontData,
+            'default_font'     => 'inter',
+            'useSubstitutions' => true,
+            'backupSubsFont'   => ['dejavusans'],
+            // Generické CSS rodiny → fonty, které se VŽDY deployují (jinak by
+            // `…, sans-serif` / `…, monospace` padlo na smazaný vendor font a shodilo render).
+            'sans_fonts'       => ['inter', 'dejavusans'],
+            'serif_fonts'      => ['dejavusans'],
+            'mono_fonts'       => ['jetbrainsmono', 'dejavusans'],
         ];
     }
 }
