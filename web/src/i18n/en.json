@@ -974,12 +974,12 @@
     "how_it_works": "How upgrades work",
     "how_docker_title": "Docker installation",
     "how_docker_desc": "Clicking 'Update' writes a flag file `storage/upgrade-requested.json`. A host-side watcher (`cmd/docker-update-watcher.(sh/ps1)` as systemd unit / Scheduled Task) picks it up and runs `cmd/docker-update.(sh/ps1)` — pulling the new image, restarting the stack, running migrations. The result and log appear on this page.",
-    "how_docker_setup": "If the watcher is not yet installed, follow § 38.4 of the manual (systemd unit on Linux, Scheduled Task on Windows). Without the watcher, run on the host manually after clicking 'Update':",
+    "how_docker_setup": "If the watcher is not yet installed, follow § 40.4 of the manual (systemd unit on Linux, Scheduled Task on Windows). Without the watcher, run on the host manually after clicking 'Update':",
     "how_native_title": "Native installation",
     "how_native_desc": "Clicking 'Update' writes a flag file `storage/upgrade-requested.json`. A watcher running on the host under your user account (`cmd/native-update-watcher.(sh/ps1)` as a systemd unit / cron @reboot / Scheduled Task) picks it up and runs `cmd/native-update.(sh/ps1)` — git checkout of the target tag, composer install, pnpm build, manual regeneration and DB migration. The result and log appear on this page. Requires PHP CLI + Composer + Node + pnpm on the host.",
-    "how_native_setup": "If the watcher is not yet installed, follow § 38.6 of the manual (systemd unit / cron on Linux, Scheduled Task on Windows). You can test it once in the foreground:",
+    "how_native_setup": "If the watcher is not yet installed, follow § 40.6 of the manual (systemd unit / cron on Linux, Scheduled Task on Windows). You can test it once in the foreground:",
     "how_native_manual_hint": "Without the watcher, run the equivalent steps on the host manually after clicking 'Update' (or use the production bundle without Composer / Node):",
-    "manual_link": "Details in the manual — § 38 Updates"
+    "manual_link": "Details in the manual — § 40 Updates"
   },
   "auth": {
     "login": "Sign in", "login_title": "Sign in", "login_subtitle": "Sign in to your account",

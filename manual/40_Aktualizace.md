@@ -276,9 +276,9 @@ php api/bin/migrate.php
 ```
 
 Vyžaduje na hostu **PHP CLI + Composer + Node + pnpm**. Pokud je nemáš
-(typicky sdílený hosting), použij production bundle — viz § 38.6.4.
+(typicky sdílený hosting), použij production bundle — viz § 40.6.4.
 
-### 38.6.1 Test režim (jednorázově, ve foregroundu)
+### 40.6.1 Test režim (jednorázově, ve foregroundu)
 
 Než nainstaluješ watcher jako daemon, otestuj ho ručně:
 
@@ -299,7 +299,7 @@ Klikni v UI **„Aktualizovat"** a do 30 s watcher flag zachytí, spustí
 `native-update.{sh,ps1}`, výsledek zapíše do `storage/upgrade-result.json`.
 Watcher zastav `Ctrl+C`.
 
-### 38.6.2 Instalace watcheru jako daemon (na produkci)
+### 40.6.2 Instalace watcheru jako daemon (na produkci)
 
 #### Linux — systemd unit
 
@@ -350,7 +350,7 @@ schtasks /run /tn "MyInvoice Native Update Watcher"
 
 Účet (`/ru`) musí mít v PATH git/php/composer/pnpm a zápis do složky instalace.
 
-### 38.6.3 Co watcher dělá
+### 40.6.3 Co watcher dělá
 
 1. Každých 30 s zkontroluje `storage/upgrade-requested.json`.
 2. Když ho najde → přečte `target_version`, přejmenuje na
@@ -365,7 +365,7 @@ schtasks /run /tn "MyInvoice Native Update Watcher"
 
 Interval pollování změníš přes ENV `MYINVOICE_WATCHER_INTERVAL` (sekundy).
 
-### 38.6.4 Bez Composer / Node — production bundle
+### 40.6.4 Bez Composer / Node — production bundle
 
 Pokud na hostu nemáš Composer/Node (sdílený hosting), nativní watcher
 nepoužiješ. Místo toho:
@@ -382,7 +382,7 @@ nepoužiješ. Místo toho:
    ```
 3. Spusť migraci: `php api/bin/migrate.php`
 
-### 38.6.5 Pokud watcher neběží
+### 40.6.5 Pokud watcher neběží
 
 UI flag soubor zapíše, ale nikdo ho nezpracuje. Stav „Upgrade probíhá…" se
 po ~15 min sám zruší (TTL self-healing), nebo ho odblokuješ tlačítkem
