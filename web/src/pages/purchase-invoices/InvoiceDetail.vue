@@ -9,6 +9,7 @@ import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 import { apiErrorMessage } from '@/api/errors'
+import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -210,12 +211,22 @@ function onPdfError(_code: string, message: string) {
   toast.error(message)
 }
 
-async function transition(target: PurchaseInvoiceStatus) {
+const paidAtInput = ref<string>(new Date().toISOString().slice(0, 10))
+const markPaidOpen = ref(false)
+
+function openMarkPaid() {
+  paidAtInput.value = new Date().toISOString().slice(0, 10)
+  markPaidOpen.value = true
+}
+
+async function transition(target: PurchaseInvoiceStatus, paidDate?: string) {
   if (!invoice.value) return
+  if (target === 'paid' && !paidDate) { openMarkPaid(); return }
   if (target === 'cancelled' && !confirm(t('purchase_invoice.confirm.cancel'))) return
   acting.value = true
   try {
-    invoice.value = await purchaseInvoicesApi.transition(invoice.value.id, target)
+    invoice.value = await purchaseInvoicesApi.transition(invoice.value.id, target, paidDate)
+    markPaidOpen.value = false
     toast.success(t(`purchase_invoice.transition.success_${target}`))
     purchaseInvoicesApi.activity(id.value).then(a => { activity.value = a }).catch(() => {})
   } catch (e) {
@@ -424,6 +435,62 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
   if (target === 'received' && from === 'cancelled') return t('purchase_invoice.actions.uncancel')
   return t(`purchase_invoice.actions.mark_${target}`)
 }
+
+// ─── Lišta akcí (sdílená ActionBar) ───
+// Primární = hlavní dopředný stavový přechod (typicky „Uhrazeno"); zaúčtování je sekundární,
+// reverzní přechody sekundární/neutrální, storno + exporty + smazání v „…" overflow.
+const purchaseActions = computed<ActionItem[]>(() => {
+  const inv = invoice.value
+  if (!inv) return []
+  const w = auth.canWrite
+  const items: ActionItem[] = []
+
+  items.push({ key: 'edit', label: t('common.edit'), icon: 'edit', tier: 'secondary', variant: 'success',
+    show: canEdit.value && w, to: `/purchase-invoices/${inv.id}/edit` })
+
+  if (w) {
+    for (const target of allowedTransitions.value) {
+      if (target === 'received' && (inv.status === 'paid' || inv.status === 'cancelled')) {
+        items.push({ key: `t-${target}`, label: transitionLabel(target), icon: 'uturn', tier: 'secondary', variant: 'neutral',
+          disabled: acting.value, run: () => transition('received') })
+      } else if (target === 'cancelled') {
+        items.push({ key: `t-${target}`, label: t('purchase_invoice.actions.mark_cancelled'), icon: 'x', tier: 'overflow', variant: 'danger',
+          disabled: acting.value, run: () => transition('cancelled') })
+      } else {
+        const icon: ActionItem['icon'] = target === 'paid' ? 'checkCircle' : target === 'received' ? 'check' : 'inbox'
+        items.push({ key: `t-${target}`, label: transitionLabel(target), icon,
+          tier: target === 'booked' ? 'secondary' : 'primary', variant: target === 'paid' ? 'success' : 'primary',
+          disabled: acting.value, title: target === 'booked' ? (t('purchase_invoice.actions.mark_booked_hint') as string) : undefined,
+          run: () => transition(target) })
+      }
+    }
+  }
+
+  items.push({ key: 'qr', label: t('purchase_invoice.qr.button'), icon: 'qr', tier: 'secondary', variant: 'primary',
+    show: canPayWithQr.value, run: openQr })
+
+  items.push({ key: 'orig', label: t('purchase_invoice.pdf.download_original'), icon: 'doc', tier: 'overflow', variant: 'neutral',
+    show: !!inv.pdf_path, href: purchaseInvoicesApi.pdfUrl(inv.id) })
+  items.push({ key: 'exp-pdf', label: t('purchase_invoice.export.our_pdf'), icon: 'doc', tier: 'overflow', variant: 'neutral',
+    href: purchaseInvoicesApi.ourPdfUrl(inv.id) })
+  items.push({ key: 'exp-isdoc', label: t('purchase_invoice.export.isdoc'), icon: 'inbox', tier: 'overflow', variant: 'primary',
+    href: purchaseInvoicesApi.isdocUrl(inv.id) })
+  items.push({ key: 'exp-pohoda', label: t('purchase_invoice.export.pohoda'), icon: 'doc', tier: 'overflow', variant: 'warning',
+    href: purchaseInvoicesApi.pohodaUrl(inv.id) })
+
+  items.push({ key: 'delete', label: t('common.delete'), icon: 'trash', tier: 'overflow', variant: 'danger',
+    show: canDelete.value && w, disabled: acting.value, run: remove })
+
+  // odkaz na dodavatele + admin „force" akce (pod „Pokročilé")
+  items.push({ key: 'vendor', label: t('purchase_invoice.vendor_detail'), icon: 'user', tier: 'overflow', variant: 'neutral',
+    show: !!inv.vendor_id, to: `/clients/${inv.vendor_id}` })
+  items.push({ key: 'force-edit', label: t('purchase_invoice.force_edit'), icon: 'edit', tier: 'advanced', variant: 'warning',
+    show: canForceEdit.value, title: t('purchase_invoice.force_edit_hint') as string, run: confirmForceEdit })
+  items.push({ key: 'force-delete', label: t('purchase_invoice.force_delete'), icon: 'trash', tier: 'advanced', variant: 'danger',
+    show: canForceDelete.value, title: t('purchase_invoice.confirm.force_delete_warning') as string, run: forceDelete })
+
+  return items
+})
 </script>
 
 <template>
@@ -468,81 +535,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
           {{ t(`purchase_invoice.document_kind.${invoice.document_kind}`) }}
         </span>
       </h1>
-      <div class="flex flex-wrap gap-2 md:justify-end">
-        <RouterLink v-if="canEdit && auth.canWrite" :to="`/purchase-invoices/${invoice.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('common.edit') }}
-        </RouterLink>
-        <!-- Stavové akce (hlavní) hned za Upravit; utility (PDF/Export) až za nimi. -->
-        <template v-if="auth.canWrite">
-        <template v-for="target in allowedTransitions" :key="target">
-          <!-- Reverse: paid→received (unmark paid) NEBO cancelled→received (un-cancel) — neutral styl -->
-          <button v-if="target === 'received' && (invoice.status === 'paid' || invoice.status === 'cancelled')"
-            type="button" @click="transition('received')" :disabled="acting"
-            class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
-            {{ transitionLabel('received') }}
-          </button>
-          <!-- Cancel: danger styl -->
-          <button v-else-if="target === 'cancelled'" type="button" @click="transition('cancelled')" :disabled="acting"
-            class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-            {{ t('purchase_invoice.actions.mark_cancelled') }}
-          </button>
-          <!-- Forward transitions — hlavní akce (fialová primary, za zeleným Upravit) -->
-          <button v-else type="button" @click="transition(target)" :disabled="acting"
-            :title="target === 'booked' ? t('purchase_invoice.actions.mark_booked_hint') : ''"
-            class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-            <svg v-if="target === 'paid'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-            <svg v-else-if="target === 'received'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-            <svg v-else class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2"/></svg>
-            {{ transitionLabel(target) }}
-          </button>
-        </template>
-        </template>
-        <!-- Zaplatit pomocí QR (i pro readonly — zobrazení QR z uloženého účtu) -->
-        <button v-if="canPayWithQr" type="button" @click="openQr"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4h6v6H4V4zm0 10h6v6H4v-6zM14 4h6v6h-6V4zm2 10h2m2 0v2m-4 2v2m4 0h2m-2-6h.01M14 18h.01"/></svg>
-          {{ t('purchase_invoice.qr.button') }}
-        </button>
-        <a v-if="invoice.pdf_path" :href="purchaseInvoicesApi.pdfUrl(invoice.id)" target="_blank"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
-          {{ t('purchase_invoice.pdf.download_original') }}
-        </a>
-        <!-- Export dropdown — Naše PDF / ISDOC / Pohoda (native details/summary) -->
-        <details class="relative inline-block">
-          <summary class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5 list-none">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-            {{ t('purchase_invoice.export.menu') }}
-            <svg class="w-3 h-3 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-          </summary>
-          <div class="absolute right-0 top-full mt-1 z-20 bg-surface border border-neutral-200 rounded-md shadow-lg min-w-[220px]">
-            <a :href="purchaseInvoicesApi.ourPdfUrl(invoice.id)" target="_blank"
-              class="cursor-pointer block px-4 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
-              <svg class="inline w-4 h-4 mr-1" viewBox="0 0 32 36"><path fill="#dc2626" d="M4 2h16l8 8v22a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><text x="16" y="26" fill="#fff" font-size="8" font-weight="700" text-anchor="middle">PDF</text></svg>
-              {{ t('purchase_invoice.export.our_pdf') }}
-            </a>
-            <a :href="purchaseInvoicesApi.isdocUrl(invoice.id)"
-              class="cursor-pointer block px-4 py-2 text-sm hover:bg-neutral-50 text-neutral-700 border-t border-neutral-100">
-              <svg class="inline w-4 h-4 mr-1 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2"/></svg>
-              {{ t('purchase_invoice.export.isdoc') }}
-            </a>
-            <a :href="purchaseInvoicesApi.pohodaUrl(invoice.id)"
-              class="cursor-pointer block px-4 py-2 text-sm hover:bg-neutral-50 text-neutral-700 border-t border-neutral-100">
-              <svg class="inline w-4 h-4 mr-1 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414"/></svg>
-              {{ t('purchase_invoice.export.pohoda') }}
-            </a>
-          </div>
-        </details>
-        <button v-if="canDelete && auth.canWrite" type="button" @click="remove"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
-          {{ t('common.delete') }}
-        </button>
-      </div>
+      <ActionBar :actions="purchaseActions" />
     </div>
 
     <!-- ═══ Vendor + číslo dokladu (řádek pod headerem, paralel s vystavenou InvoiceDetail) ═══ -->
@@ -990,32 +983,6 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
     </div>
 
-    <!-- ═══ More actions (vendor detail link, paralel s vystavenou InvoiceDetail) ═══ -->
-    <div v-if="invoice && (invoice.vendor_id || canForceEdit || canForceDelete)" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
-      <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.more_actions') }}</h3>
-      <div class="flex flex-wrap gap-2">
-        <RouterLink v-if="invoice.vendor_id" :to="`/clients/${invoice.vendor_id}`"
-          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM12 14a7 7 0 0 0-7 7h14a7 7 0 0 0-7-7z"/></svg>
-          {{ t('purchase_invoice.vendor_detail') }}
-        </RouterLink>
-        <!-- Force-edit pro received/booked/paid (admin only, s confirm() varováním) -->
-        <button v-if="canForceEdit" type="button" @click="confirmForceEdit"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/40 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5"
-          :title="t('purchase_invoice.force_edit_hint')">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('purchase_invoice.force_edit') }}
-        </button>
-        <!-- Force-delete pro received/booked (admin only, dvojí potvrzení) -->
-        <button v-if="canForceDelete" type="button" @click="forceDelete"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5"
-          :title="t('purchase_invoice.confirm.force_delete_warning')">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v3"/></svg>
-          {{ t('purchase_invoice.force_delete') }}
-        </button>
-      </div>
-    </div>
-
     <!-- ═══ Activity log (paralel s /invoices) ═══ -->
     <div v-if="activity.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <button type="button" @click="activityOpen = !activityOpen"
@@ -1056,6 +1023,23 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             <div v-if="a.payload" class="text-xs text-neutral-600 break-all whitespace-pre-wrap leading-snug">{{ payloadText(a.payload) }}</div>
           </li>
         </ul>
+      </div>
+    </div>
+
+    <!-- Modal: Označit jako uhrazené (datum úhrady) -->
+    <div v-if="markPaidOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-sm w-full p-5">
+        <h3 class="text-lg font-semibold mb-3">{{ t('purchase_invoice.modals.mark_paid_title') }}</h3>
+        <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('purchase_invoice.modals.mark_paid_date') }}</label>
+        <input v-model="paidAtInput" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
+        <div class="flex justify-end gap-2">
+          <button type="button" @click="markPaidOpen = false"
+            class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+          <button type="button" @click="transition('paid', paidAtInput)" :disabled="acting"
+            class="cursor-pointer px-4 h-9 text-sm bg-success-500 hover:bg-success-600 disabled:bg-neutral-300 text-white font-medium rounded-md">
+            {{ acting ? '…' : t('common.confirm') }}
+          </button>
+        </div>
       </div>
     </div>
 

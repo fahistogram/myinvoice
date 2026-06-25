@@ -129,7 +129,10 @@ final class InvoiceAmountPolicy
      */
     public static function shouldAutoMarkPaidOnIssue(array $invoice): bool
     {
-        return (string) ($invoice['invoice_type'] ?? '') === 'invoice'
+        // 'tax_document' = daňový doklad k přijaté platbě — z podstaty dokumentuje
+        // už přijatou úplatu (advance_paid_amount = brutto platby → amount_to_pay = 0),
+        // takže se při vystavení označí jako zaplacený stejně jako finál krytý zálohou.
+        return in_array((string) ($invoice['invoice_type'] ?? ''), ['invoice', 'tax_document'], true)
             && (int) ($invoice['parent_invoice_id'] ?? 0) > 0
             && (float) ($invoice['amount_to_pay'] ?? 0) <= 0.0;
     }

@@ -75,12 +75,8 @@ final class PdfArchiveService
             return (int) $existing['id'];
         }
 
-        // Cíl: storage/invoices/sup-{supplierId}/_archive/{YmdHis}-{sha8}-{originalname}
+        // Cíl: storage/invoices/sup-{supplierId}/_archive/{YYYY-MM}/{YmdHis}-{sha8}-{originalname}
         $supplierId = $this->resolveSupplierId($invoiceId);
-        $archiveDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices') . '/sup-' . $supplierId . '/_archive';
-        if (!is_dir($archiveDir)) {
-            @mkdir($archiveDir, 0755, true);
-        }
 
         $origName = basename($sourcePath);
         // Strip případný .new suffix z ne-přejmenovaných tmp souborů
@@ -91,6 +87,15 @@ final class PdfArchiveService
         // aby výsledný název končil na .pdf (jinak prohlížeč nepozná typ).
         $origName = preg_replace('/\.archcopy-[0-9a-f]+$/', '', $origName);
         $archiveName = date('Ymd-His') . '-' . substr($sha256, 0, 8) . '-' . $origName;
+
+        // Rozdělení po měsících: _archive/{YYYY-MM}/ (Y-m odvozené z prefixu názvu = datum
+        // archivace), ať v jednom adresáři nebydlí tisíce souborů. Sloupec `filename` zůstává
+        // JEN jméno (bez podsložky) → UI/stahování čisté; read/purge si Y-m dopočítají z prefixu
+        // a fallbackují na starý plochý layout.
+        $archiveDir = $this->archiveBaseDir($supplierId) . '/' . self::monthSubdir($archiveName);
+        if (!is_dir($archiveDir)) {
+            @mkdir($archiveDir, 0755, true);
+        }
         $archivePath = $archiveDir . '/' . $archiveName;
 
         // Preferuj rename (atomic), ale pokud je zdroj na jiném FS / locked,
@@ -186,8 +191,7 @@ final class PdfArchiveService
         if (!$filename) return null;
 
         $supplierId = $this->resolveSupplierId($invoiceId);
-        $path = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices') . '/sup-' . $supplierId
-              . '/_archive/' . (string) $filename;
+        $path = $this->archiveFilePath($supplierId, (string) $filename);
         return is_file($path) ? $path : null;
     }
 
@@ -209,15 +213,48 @@ final class PdfArchiveService
         if (empty($filenames)) return 0;
 
         $supplierId = $this->resolveSupplierId($invoiceId);
-        $dir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices') . '/sup-' . $supplierId . '/_archive';
         $deleted = 0;
         foreach ($filenames as $name) {
-            $path = $dir . '/' . (string) $name;
+            $path = $this->archiveFilePath($supplierId, (string) $name);
             if (is_file($path) && @unlink($path)) {
                 $deleted++;
             }
         }
         return $deleted;
+    }
+
+    /** Kořen archivu faktur dodavatele: storage/invoices/sup-{id}/_archive. */
+    private function archiveBaseDir(int $supplierId): string
+    {
+        return \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices')
+             . '/sup-' . $supplierId . '/_archive';
+    }
+
+    /**
+     * Měsíční podadresář z názvu souboru (prefix `YYYYMMDD-…`) → `YYYY-MM`. Když název
+     * nezačíná 8 číslicemi (legacy/neznámý formát), vrátí '' = plochý _archive.
+     */
+    private static function monthSubdir(string $filename): string
+    {
+        return preg_match('/^(\d{4})(\d{2})\d{2}-/', $filename, $m) === 1 ? $m[1] . '-' . $m[2] : '';
+    }
+
+    /**
+     * Absolutní cesta k archivovanému souboru. Zkusí měsíční podsložku
+     * (_archive/{YYYY-MM}/{filename}); pokud tam soubor není (STARÉ ploché archivy
+     * z doby před rozdělením), fallback na _archive/{filename}.
+     */
+    private function archiveFilePath(int $supplierId, string $filename): string
+    {
+        $base = $this->archiveBaseDir($supplierId);
+        $sub = self::monthSubdir($filename);
+        if ($sub !== '') {
+            $sharded = $base . '/' . $sub . '/' . $filename;
+            if (is_file($sharded)) {
+                return $sharded;
+            }
+        }
+        return $base . '/' . $filename;
     }
 
     private function resolveSupplierId(int $invoiceId): int

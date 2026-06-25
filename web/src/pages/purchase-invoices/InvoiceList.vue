@@ -10,7 +10,7 @@ import {
   type PurchaseInvoiceStatus,
   type PurchaseDocumentKind,
 } from '@/api/purchaseInvoices'
-import { formatMoney, formatDate, formatMonth } from '@/composables/useFormat'
+import { formatMoney, formatDate, formatMonth, taxDateClass } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
 import { useRowLink } from '@/composables/useRowLink'
 import { useToast } from '@/composables/useToast'
@@ -19,6 +19,7 @@ import { useYearOptions } from '@/composables/useYearOptions'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SearchableSelect from '@/components/ui/SearchableSelect.vue'
+import FilterBar from '@/components/ui/FilterBar.vue'
 import { clientsApi, type Client } from '@/api/clients'
 
 const { t, locale } = useI18n()
@@ -48,9 +49,25 @@ const dateTo = ref('')
 const overdueOnly = ref(false)
 const unpaidOnly = ref(false)
 const needsReviewOnly = ref(false)
+const paymentOrderedFilter = ref<'' | '1' | '0'>('')
 const currencyFilter = ref('')
 const vendorFilter = ref<number | ''>('')
 const vendors = ref<Client[]>([])
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry" (rok i hledání se nepočítají)
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (statusFilter.value) n++
+  if (kindFilter.value) n++
+  if (vendorFilter.value !== '') n++
+  if (monthFilter.value !== '') n++
+  if (dateFrom.value || dateTo.value) n++
+  if (overdueOnly.value) n++
+  if (unpaidOnly.value) n++
+  if (needsReviewOnly.value) n++
+  if (paymentOrderedFilter.value) n++
+  return n
+})
 
 // Hromadné akce
 const selectedIds = ref<number[]>([])
@@ -76,6 +93,7 @@ function loadFiltersFromQuery(q: typeof route.query) {
   overdueOnly.value = q.overdue === '1' || q.overdue === 'true'
   unpaidOnly.value  = q.unpaid === '1' || q.unpaid === 'true'
   needsReviewOnly.value = q.needs_review === '1' || q.needs_review === 'true'
+  paymentOrderedFilter.value = q.payment_ordered === '1' ? '1' : (q.payment_ordered === '0' ? '0' : '')
   statusFilter.value = typeof q.status === 'string' ? (q.status as PurchaseInvoiceStatus) : ''
   kindFilter.value   = typeof q.kind === 'string' ? (q.kind as PurchaseDocumentKind) : ''
   yearFilter.value   = typeof q.year === 'string' && q.year !== ''
@@ -106,12 +124,13 @@ function syncFiltersToUrl() {
   if (overdueOnly.value) q.overdue = '1'
   if (unpaidOnly.value) q.unpaid = '1'
   if (needsReviewOnly.value) q.needs_review = '1'
+  if (paymentOrderedFilter.value) q.payment_ordered = paymentOrderedFilter.value
   if (search.value) q.q = search.value
   router.replace({ query: q })
 }
 
 watch([statusFilter, kindFilter, yearFilter, monthFilter, dateFrom, dateTo,
-       overdueOnly, unpaidOnly, needsReviewOnly, currencyFilter, vendorFilter], () => {
+       overdueOnly, unpaidOnly, needsReviewOnly, paymentOrderedFilter, currencyFilter, vendorFilter], () => {
   syncFiltersToUrl()
   load()
 })
@@ -135,6 +154,7 @@ watch(() => route.query, (newQ) => {
     overdueOnly.value = false
     unpaidOnly.value = false
     needsReviewOnly.value = false
+    paymentOrderedFilter.value = ''
     currencyFilter.value = ''
     vendorFilter.value = ''
     search.value = ''
@@ -192,6 +212,7 @@ async function load(reset = true) {
       unpaid_only:   unpaidOnly.value   || undefined,
       overdue:       overdueOnly.value  || undefined,
       needs_review:  needsReviewOnly.value || undefined,
+      payment_ordered: paymentOrderedFilter.value || undefined,
       q:             search.value       || undefined,
       page: page.value,
     })
@@ -252,6 +273,14 @@ const rowClass = (inv: PurchaseInvoiceListItem): string => {
 }
 
 // ── Hromadné akce ─────────────────────────────────────────────────────
+function goToPaymentOrder() {
+  if (selectedIds.value.length === 0) return
+  router.push({
+    path: '/purchase-invoices/payment-orders',
+    query: { preselect: selectedIds.value.join(',') },
+  })
+}
+
 function toggleSelected(id: number) {
   const idx = selectedIds.value.indexOf(id)
   if (idx >= 0) selectedIds.value.splice(idx, 1)
@@ -335,6 +364,12 @@ async function bulkDelete() {
 
       <div class="flex items-center gap-2 flex-wrap">
         <!-- Bulk actions — viditelné jen pokud něco vybráno -->
+        <button v-if="(selectedIds.length > 0) && auth.canWrite"
+          @click="goToPaymentOrder"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-primary-500 text-primary-700 hover:bg-primary-50 text-sm font-medium rounded-md">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 0 0 3-3V8a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3z"/></svg>
+          {{ t('purchase_invoice.bulk.to_payment_order', { n: selectedIds.length }) }}
+        </button>
         <button v-if="(markReceivedSelected.length > 0) && auth.canWrite"
           @click="bulkTransition('received', markReceivedSelected)"
           :disabled="bulkBusy"
@@ -382,14 +417,15 @@ async function bulkDelete() {
     </div>
 
     <!-- ═══ Filtry v boxu ═══ -->
-    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
-      <div class="flex flex-wrap items-center gap-2">
+    <FilterBar :active-count="activeFilterCount">
+      <template #primary>
         <input
           v-model="search"
           type="search"
           :placeholder="t('purchase_invoice.filters.search_placeholder')"
           class="flex-1 min-w-48 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
         />
+      </template>
         <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('purchase_invoice.filters.all_statuses') }}</option>
           <option value="draft">{{ t('purchase_invoice.status.draft') }}</option>
@@ -441,8 +477,13 @@ async function bulkDelete() {
           <input v-model="needsReviewOnly" type="checkbox" class="rounded border-neutral-300 text-warning-600" />
           {{ t('purchase_invoice.filters.needs_review') }}
         </label>
-      </div>
-    </div>
+        <select v-model="paymentOrderedFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm"
+          :title="t('purchase_invoice.filters.payment_ordered')">
+          <option value="">{{ t('purchase_invoice.filters.payment_ordered_all') }}</option>
+          <option value="1">{{ t('purchase_invoice.filters.payment_ordered_yes') }}</option>
+          <option value="0">{{ t('purchase_invoice.filters.payment_ordered_no') }}</option>
+        </select>
+    </FilterBar>
 
     <!-- ═══ Loading / Error / Empty / Data ═══ -->
     <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
@@ -546,8 +587,8 @@ async function bulkDelete() {
                     </div>
                   </td>
                   <td class="px-4 py-2.5 text-center text-xs text-neutral-600">{{ t(`purchase_invoice.document_kind.${inv.document_kind}`) }}</td>
-                  <td class="px-4 py-2.5 text-center text-xs text-neutral-600">
-                    {{ formatDate(inv.tax_date || inv.issue_date) }}
+                  <td class="px-4 py-2.5 text-center text-xs">
+                    <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                   </td>
                   <td class="px-4 py-2.5 text-center text-xs">
                     <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : 'text-neutral-600'">
@@ -561,6 +602,13 @@ async function bulkDelete() {
                     <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
                       {{ t(`purchase_invoice.status.${inv.status}`) }}
                     </span>
+                    <div v-if="inv.payment_ordered_at" class="mt-1">
+                      <span class="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-600 border border-teal-500/30 inline-flex items-center gap-0.5"
+                        :title="t('purchase_invoice.payment_ordered_at_tooltip', { date: formatDate(inv.payment_ordered_at) })">
+                        <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        {{ t('purchase_invoice.payment_ordered_badge') }}
+                      </span>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -614,8 +662,14 @@ async function bulkDelete() {
                     {{ t(`purchase_invoice.status.${inv.status}`) }}
                   </span>
                 </div>
+                <div v-if="inv.payment_ordered_at" class="mt-1">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-600 border border-teal-500/30 inline-flex items-center gap-0.5">
+                    <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    {{ t('purchase_invoice.payment_ordered_badge') }}
+                  </span>
+                </div>
                 <div class="flex items-center justify-between gap-2 mt-1 text-xs text-neutral-500">
-                  <span>{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
+                  <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                   <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : ''">
                     {{ t('purchase_invoice.fields.due_date') }}: {{ formatDate(inv.due_date) }}
                   </span>

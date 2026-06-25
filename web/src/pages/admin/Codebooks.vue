@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive, watch, computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { settingsApi, type VatRate, type Country, type Unit } from '@/api/settings'
 import { suppliersApi, type SupplierListItem, type SupplierCreatePayload } from '@/api/suppliers'
@@ -15,6 +16,7 @@ import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 
 const { t } = useI18n()
+const route = useRoute()
 const toast = useToast()
 const supplierStore = useSupplierStore()
 const auth = useAuthStore()
@@ -38,7 +40,15 @@ async function loadAll() {
     ])
   } finally { loading.value = false }
 }
-onMounted(loadAll)
+onMounted(async () => {
+  await loadAll()
+  // Onboarding gate (#151): dashboard sem posílá s ?create=supplier → rovnou otevři
+  // formulář pro vytvoření prvního dodavatele.
+  if (route.query.create === 'supplier') {
+    tab.value = 'suppliers'
+    newSupplier()
+  }
+})
 
 // ─── Suppliers (multi-tenant firmy) — embed jako první tab ───────────────
 const supplierDraft = reactive<SupplierCreatePayload>({
@@ -957,10 +967,10 @@ watch(tab, (newTab) => {
 
     <!-- ====== EXPENSE CATEGORIES ====== -->
     <section v-else-if="tab === 'expense_categories'">
-      <div class="flex justify-between mb-3 gap-2">
+      <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 gap-2">
         <p class="text-sm text-neutral-500">{{ t('expense_categories.hint') }}</p>
         <button @click="newExpense"
-          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          class="cursor-pointer shrink-0 self-start whitespace-nowrap h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
           {{ t('expense_categories.new') }}
         </button>
@@ -1010,10 +1020,10 @@ watch(tab, (newTab) => {
 
     <!-- ====== REVENUE CATEGORIES (kategorie tržeb) ====== -->
     <section v-else-if="tab === 'revenue_categories'">
-      <div class="flex justify-between mb-3 gap-2">
+      <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 gap-2">
         <p class="text-sm text-neutral-500">{{ t('revenue_categories.hint') }}</p>
         <button @click="newRevenue"
-          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          class="cursor-pointer shrink-0 self-start whitespace-nowrap h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
           {{ t('revenue_categories.new') }}
         </button>
@@ -1057,10 +1067,10 @@ watch(tab, (newTab) => {
 
     <!-- ====== VAT CLASSIFICATIONS ====== -->
     <section v-else-if="tab === 'vat_classifications'">
-      <div class="flex justify-between mb-3 gap-2">
+      <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 gap-2">
         <p class="text-sm text-neutral-500">{{ t('vat_classifications.hint') }}</p>
         <button @click="newVatCls"
-          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          class="cursor-pointer shrink-0 self-start whitespace-nowrap h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
           {{ t('vat_classifications.new') }}
         </button>
@@ -1209,6 +1219,8 @@ watch(tab, (newTab) => {
               <input v-model.number="taxModel.social_min_base_main" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
             <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_min_sec') }}</span>
               <input v-model.number="taxModel.social_min_base_secondary" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
+            <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_social_sec_threshold') }}</span>
+              <input v-model.number="taxModel.social_secondary_participation_threshold" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
             <label class="block"><span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_health_min') }}</span>
               <input v-model.number="taxModel.health_min_base" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" /></label>
           </div>

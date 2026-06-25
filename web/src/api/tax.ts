@@ -34,6 +34,8 @@ export interface TaxConstantsData {
   health_assessment_pct: number
   social_min_base_main: number
   social_min_base_secondary: number
+  /** Rozhodná částka (zisk) pro povinnou účast na důch. pojištění u vedlejší SVČ */
+  social_secondary_participation_threshold: number
   health_min_base: number
   expense_caps: Record<string, number>
   mortgage_cap: number

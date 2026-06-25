@@ -136,13 +136,18 @@ onMounted(load)
               </span>
               <span v-if="s.validation_errors.length > 0" class="ml-1 text-xs text-danger-500">({{ s.validation_errors.length }})</span>
             </td>
-            <td class="px-4 py-2.5 text-right text-xs">
-              <button @click="downloadXml(s.id)" class="cursor-pointer text-primary-600 hover:text-primary-700 mr-3">
-                {{ t('reports.submissions.download_xml') }}
-              </button>
-              <button v-if="isAdmin" @click="deleteItem(s.id)" class="cursor-pointer text-danger-500 hover:text-danger-600">
-                {{ t('common.delete') }}
-              </button>
+            <td class="px-4 py-2.5 text-right">
+              <div class="inline-flex items-center justify-end gap-2">
+                <button type="button" @click="downloadXml(s.id)" :title="t('reports.submissions.download_xml')"
+                  class="cursor-pointer px-3 h-8 text-xs bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                  {{ t('reports.submissions.download_xml') }}
+                </button>
+                <button v-if="isAdmin" type="button" @click="deleteItem(s.id)" :title="t('common.delete')"
+                  class="cursor-pointer px-2 h-8 text-neutral-400 hover:text-danger-600 rounded-md inline-flex items-center">
+                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>

@@ -24,8 +24,12 @@ final class CronCatalog
      *   windows_schtasks:string,
      *   max_age_hours:int,
      *   weekdays_only:bool,
-     *   critical:bool
+     *   critical:bool,
+     *   requires_config?:string
      * }>
+     *
+     * `requires_config` (volitelné) = cfg klíč adresáře, bez kterého úloha nemá
+     * co dělat (scan vypnutý). UI ji pak skryje, dokud není nastaven (CronJobsAction).
      */
     public static function all(): array
     {
@@ -74,6 +78,7 @@ final class CronCatalog
                 'max_age_hours' => 4,
                 'weekdays_only' => false,
                 'critical' => false,
+                'requires_config' => 'bank_import.scan_root',
             ],
             [
                 'script' => 'cron-bank-email-notices',
@@ -92,6 +97,7 @@ final class CronCatalog
                 'max_age_hours' => 2,
                 'weekdays_only' => false,
                 'critical' => false,
+                'requires_config' => 'purchase_invoice.inbox_dir',
             ],
             [
                 'script' => 'cron-send-reminders',

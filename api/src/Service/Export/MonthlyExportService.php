@@ -189,7 +189,8 @@ final class MonthlyExportService
                     if ($inv === null) continue;
                     $typeLabel = match ($inv['invoice_type'] ?? 'invoice') {
                         'proforma' => 'Proforma', 'credit_note' => 'Dobropis',
-                        'cancellation' => 'Storno', default => 'Faktura',
+                        'cancellation' => 'Storno', 'tax_document' => 'DanovyDoklad',
+                        default => 'Faktura',
                     };
                     $base = $typeLabel . '-' . $this->sanitize((string) ($inv['varsymbol'] ?? ('draft-' . $id)));
                     if (in_array('sales_pdf', $parts, true)) {

@@ -307,62 +307,21 @@ final class ExportPurchaseInvoicesAction
     }
 
     /**
-     * Bulk Pohoda dataPack — jeden XML s `<dataPackItem>` per faktura.
-     *
-     * Strategy: vyrobíme jednoduchý dataPack wrapper kolem N invoice XML.
+     * Bulk Pohoda dataPack — jeden `<dat:dataPack>` s jednou `<dat:dataPackItem>` per
+     * faktura. Celý balíček staví `PohodaXmlExporter::buildXml()` JEDNÍM voláním nad
+     * polem faktur (žádné string-wrappování → žádný zanořený dataPack uvnitř položky).
      *
      * @param list<array<string,mixed>> $rows
      */
     private function exportPohodaDataPack(Response $response, Request $request, array $rows, ExportPeriod $period, int $supplierId): Response
     {
-        $ids = (string) bin2hex(random_bytes(4));
-        $packId = "PI-{$period->label}-{$ids}";
+        $ids = array_map(static fn ($r): int => (int) $r['id'], $rows);
+        $result = $this->exporter->toPohodaDataPack($ids, $supplierId);
 
-        $items = [];
-        $errors = [];
-        $itemSeq = 0;
-        foreach ($rows as $r) {
-            try {
-                $xml = $this->exporter->toPohodaXml((int) $r['id'], $supplierId);
-            } catch (\Throwable $e) {
-                $errors[] = "{$r['varsymbol']} — " . $e->getMessage();
-                continue;
-            }
-            // Extract inner `<pur:purchase>` element from individual XML — pragmatic
-            // string-level extraction (full DOM parse je overkill pro PoC).
-            $itemSeq++;
-            $items[] = [
-                'id'   => $itemSeq,
-                'vs'   => (string) ($r['varsymbol'] ?? ('id-' . $r['id'])),
-                'xml'  => $xml,
-            ];
-        }
-
-        if (empty($items)) {
+        if ($result['included'] === 0) {
             return Json::error($response, 'no_invoices_processed',
-                'Nepodařilo se vyexportovat žádnou fakturu.', 500, ['errors' => $errors]);
+                'Nepodařilo se vyexportovat žádnou fakturu.', 500, ['errors' => $result['errors']]);
         }
-
-        // Wrap do dataPack — jednoduchý XML string concat. Funguje pro Pohoda 2.x.
-        $dataPack = '<?xml version="1.0" encoding="utf-8"?>' . "\n";
-        $dataPack .= '<dat:dataPack version="2.0"';
-        $dataPack .= ' id="' . htmlspecialchars($packId, ENT_QUOTES | ENT_XML1) . '"';
-        $dataPack .= ' ico="" application="MyInvoice.cz"';
-        $dataPack .= ' note="Bulk export přijatých za ' . htmlspecialchars($period->label, ENT_QUOTES | ENT_XML1) . '"';
-        $dataPack .= ' xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd"';
-        $dataPack .= ' xmlns:pur="http://www.stormware.cz/schema/version_2/purchase.xsd"';
-        $dataPack .= ' xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd">' . "\n";
-        foreach ($items as $it) {
-            // Pohoda XSD vyžaduje striktně alfanumerický id (varsymbol může obsahovat
-            // libovolné znaky z user inputu — sanitize na [A-Za-z0-9._-] before embedding).
-            $safeVs = ExportFilename::sanitize((string) $it['vs'], 'invoice');
-            $dataPack .= '  <dat:dataPackItem version="2.0" id="' . $it['id'] . '_' . $safeVs . '">' . "\n";
-            // Strip XML declaration z individual XML (jen content)
-            $inner = preg_replace('/^<\?xml[^?]*\?>\s*/', '', $it['xml']) ?? $it['xml'];
-            $dataPack .= '    ' . $inner . "\n";
-            $dataPack .= '  </dat:dataPackItem>' . "\n";
-        }
-        $dataPack .= '</dat:dataPack>' . "\n";
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $this->logger->log('purchase_invoices.exported', $user['id'] ?? null, null, null, [
@@ -373,14 +332,14 @@ final class ExportPurchaseInvoicesAction
             'quarter' => $period->quarter,
             'date_from' => $period->dateFrom,
             'date_to_exclusive' => $period->dateToExclusive,
-            'included' => count($items),
+            'included' => $result['included'],
         ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
 
-        $response->getBody()->write($dataPack);
+        $response->getBody()->write($result['xml']);
         return $response
             ->withHeader('Content-Type', 'application/xml; charset=utf-8')
             ->withHeader('Content-Disposition', "attachment; filename=\"prijate-pohoda-{$period->label}.xml\"")
             ->withHeader('Cache-Control', 'no-store')
-            ->withHeader('X-Export-Warnings', count($errors) > 0 ? (string) count($errors) : '0');
+            ->withHeader('X-Export-Warnings', count($result['errors']) > 0 ? (string) count($result['errors']) : '0');
     }
 }

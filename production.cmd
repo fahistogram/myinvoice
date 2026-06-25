@@ -8,7 +8,7 @@ REM   2. backup api/vendor (rename na vendor.dev.bak) + z?skat produkcni vendor:
 REM        - cache hit (api/vendor.prod existuje, hash composer.lock sedi) = rename (instant)
 REM        - cache miss = composer install --no-dev (30-60s) + ulozit hash
 REM   3. php tools/generateManualHtml.php (HTML manu?l do manual/generated/)
-REM      php tools/exportManualToPdf.php   (PDF manu?l do manual/manual.pdf)
+REM      pwsh tools/export-pdf.ps1         (PDF manu?l do manual/manual.pdf, MD2PDF combine)
 REM   4. push na production remote vc. web/dist + manual/generated + manual/manual.pdf + api/vendor
 REM   5. cachovat: rename api/vendor -^> api/vendor.prod (pro pristi deploy)
 REM      stash web/dist + manual/generated + manual/manual.pdf do *.bak (preserve pres `git checkout master`)
@@ -110,9 +110,9 @@ if !CACHE_HIT!==1 (
 REM ====== 3. Manual HTML + PDF build ======
 echo.
 REM manual/generated se NEMAZE rucne — generateManualHtml.php sam unlinkne stara
-REM *.html a prepise _toc.php + search-index.json (fresh rebuild). exportManualToPdf.php
-REM prepise manual.pdf. Drivejsi `rmdir`/`del` jen zbytecne padaly na file-locku, kdyz
-REM mel AV (Defender) / editor otevreny handle na souboru ve slozce.
+REM *.html a prepise _toc.php + search-index.json (fresh rebuild). export-pdf.ps1
+REM (MD2PDF combine engine) prepise manual.pdf. Drivejsi `rmdir`/`del` jen zbytecne
+REM padaly na file-locku, kdyz mel AV (Defender) / editor otevreny handle na souboru.
 
 echo === Generate manual HTML ===
 php tools\generateManualHtml.php
@@ -121,8 +121,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo === Generate manual PDF ===
-php tools\exportManualToPdf.php
+REM Manual PDF: sdileny MD2PDF engine (combine rezim) pres tools\export-pdf.ps1.
+REM Engine se hleda v %MD2PDF_HOME%, jinak C:\work\MD2PDF. Vyzaduje PowerShell 7 (pwsh).
+echo === Generate manual PDF ^(MD2PDF combine^) ===
+where pwsh >nul 2>nul
+if errorlevel 1 (
+    set "PWSH=C:\bin64\PowerShell\7\pwsh.exe"
+) else (
+    set "PWSH=pwsh"
+)
+"!PWSH!" -NoProfile -ExecutionPolicy Bypass -File tools\export-pdf.ps1
 if errorlevel 1 (
     echo [ABORT] manual PDF export selhal.
     exit /b 1

@@ -18,7 +18,7 @@ Vyvíjí **[MyWebdesign.cz s.r.o.](https://mywebdesign.cz/)**
 
 📖 **Online dokumentace: [MyInvoice.cz/manual](https://myinvoice.cz/manual/)**
 
-> ⚠️ **Než začneš fakturovat — přečti si [Fakturujeme — daňový průvodce](manual/26_Fakturujeme.md).**
+> ⚠️ **Než začneš fakturovat — přečti si [Fakturujeme — daňový průvodce](manual/28_Fakturujeme.md).**
 > Vysvětluje, jak aplikace pracuje s plátci/neplátci DPH, sazbami, reverse charge,
 > kde má aplikace limitace (OSS, SK 23 %) a jak je obejít. **Správnost faktury
 > je vždy na uživateli — pro nestandardní situace konzultuj účetní.**
@@ -306,7 +306,7 @@ schtasks /run /tn "MyInvoice Update Watcher"
 ```
 
 Detaily, recovery při zaseknutém upgradu a odlaďování v manuálu §
-[38 Aktualizace](manual/38_Aktualizace.md).
+[38 Aktualizace](manual/40_Aktualizace.md).
 
 ### Varianta B — build z source (pro vývoj)
 
@@ -325,8 +325,15 @@ cmd/docker-install.sh
 ```
 
 Stejné kroky jako Varianta A, jen místo `pull` z GHCR postaví `myinvoice:latest`
-image lokálně (multi-stage: Vue build → composer → PHP 8.5 + Apache). Pomalejší,
-ale zachytí tvoje rozpracované úpravy v repu.
+image lokálně (multi-stage: Vue build → composer → PHP 8.5 + nginx z
+`Dockerfile.alpine`). Pomalejší, ale zachytí tvoje rozpracované úpravy v repu.
+
+> 🪶 **Image je alpine/nginx** (default) — ~92 MB a idle ~26 MB RAM aplikace
+> (Debian/Apache mělo ~293 MB). Funkčně identický; `/data` i DB volume jsou
+> kompatibilní, takže existující instalace se zmigruje sama při příštím
+> `cmd/docker-update`. Debian/Apache zůstává jako fallback (pin staršího
+> version tagu ≤ v4.31.0, nebo build z `Dockerfile`). Detaily +
+> RAM tuning → [§ 3.10](manual/03_Instalace_Docker.md).
 
 ### Varianta C — bez klonování repa (jen Docker, manuálně)
 

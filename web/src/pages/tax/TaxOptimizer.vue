@@ -337,6 +337,19 @@ async function save() {
                   {{ x.will ? t('tax.will_cross_in', { month: monthLabel(x.month) }) : t('tax.wont_cross') }}
                 </div>
               </div>
+
+              <!-- Vedlejší činnost: rozhodná částka pro placení sociálního pojištění (měří se proti zisku) -->
+              <div v-if="pred.secondary"
+                class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm border"
+                :class="pred.secondary.will ? 'bg-danger-50 border-danger-500/30 text-danger-600' : 'bg-success-50 border-success-600/20 text-success-700'">
+                <span>{{ pred.secondary.will ? '⚠' : '✓' }}</span>
+                <div>
+                  <b>{{ t('tax.limit_social_secondary') }}</b> · {{ formatMoney(pred.secondary.threshold, 'CZK') }} —
+                  {{ pred.secondary.will
+                    ? t('tax.social_secondary_cross', { month: monthLabel(pred.secondary.month), profit: formatMoney(pred.secondary.profit, 'CZK') })
+                    : t('tax.social_secondary_ok', { profit: formatMoney(pred.secondary.profit, 'CZK') }) }}
+                </div>
+              </div>
             </div>
 
             <!-- tip -->

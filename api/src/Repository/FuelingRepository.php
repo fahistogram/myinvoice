@@ -1,0 +1,225 @@
+<?php
+
+declare(strict_types=1);
+
+namespace MyInvoice\Repository;
+
+use MyInvoice\Infrastructure\Database\Connection;
+use PDO;
+
+/**
+ * Repository pro fuelings — tankování (ruční / z přijatých faktur / Axigon parser).
+ * Per tenant (supplier_id). Idempotentní sken přes UNIQUE(supplier_id, dedup_hash).
+ */
+final class FuelingRepository
+{
+    private const SOURCES = ['manual', 'invoice', 'axigon', 'axigon_ai', 'import'];
+
+    public function __construct(private readonly Connection $db) {}
+
+    /**
+     * @param array{car_id?:int, source?:string, vendor_id?:int, year?:int, month?:int, date_from?:string, date_to?:string, unassigned?:bool} $filters
+     * @return list<array<string,mixed>>
+     */
+    public function listForTenant(int $supplierId, array $filters = []): array
+    {
+        $where = ['f.supplier_id = ?'];
+        $params = [$supplierId];
+        if (!empty($filters['car_id']))    { $where[] = 'f.car_id = ?';    $params[] = (int) $filters['car_id']; }
+        if (!empty($filters['vendor_id'])) { $where[] = 'f.vendor_id = ?'; $params[] = (int) $filters['vendor_id']; }
+        if (!empty($filters['source']))    { $where[] = 'f.source = ?';    $params[] = (string) $filters['source']; }
+        if (!empty($filters['year']))      { $where[] = 'YEAR(f.fueled_date) = ?';  $params[] = (int) $filters['year']; }
+        if (!empty($filters['month']))     { $where[] = 'MONTH(f.fueled_date) = ?'; $params[] = (int) $filters['month']; }
+        if (!empty($filters['date_from'])) { $where[] = 'f.fueled_date >= ?'; $params[] = (string) $filters['date_from']; }
+        if (!empty($filters['date_to']))   { $where[] = 'f.fueled_date <= ?'; $params[] = (string) $filters['date_to']; }
+        if (!empty($filters['unassigned'])) { $where[] = 'f.car_id IS NULL'; }
+        $sql = 'SELECT f.*, c.registration AS car_registration, c.name AS car_name,
+                       cl.company_name AS vendor_name,
+                       pi.vendor_invoice_number AS source_invoice_number
+                  FROM fuelings f
+             LEFT JOIN cars c     ON c.id  = f.car_id
+             LEFT JOIN clients cl ON cl.id = f.vendor_id
+             LEFT JOIN purchase_invoices pi ON pi.id = f.source_purchase_invoice_id
+                 WHERE ' . implode(' AND ', $where) . '
+              ORDER BY f.fueled_date DESC, f.fueled_time DESC, f.id DESC';
+        $stmt = $this->db->pdo()->prepare($sql);
+        $stmt->execute($params);
+        return array_map(fn ($r) => $this->cast($r), $stmt->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+    public function find(int $id, int $supplierId): ?array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT f.*, c.registration AS car_registration, c.name AS car_name, cl.company_name AS vendor_name,
+                    pi.vendor_invoice_number AS source_invoice_number
+               FROM fuelings f
+          LEFT JOIN cars c     ON c.id  = f.car_id
+          LEFT JOIN clients cl ON cl.id = f.vendor_id
+          LEFT JOIN purchase_invoices pi ON pi.id = f.source_purchase_invoice_id
+              WHERE f.id = ? AND f.supplier_id = ?'
+        );
+        $stmt->execute([$id, $supplierId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row === false ? null : $this->cast($row);
+    }
+
+    public function create(int $supplierId, array $data, ?int $userId): int
+    {
+        $pdo = $this->db->pdo();
+        $pdo->prepare($this->insertSql())->execute($this->bind($supplierId, $data, $userId));
+        return (int) $pdo->lastInsertId();
+    }
+
+    /**
+     * Insert z parseru faktury — idempotentní (UNIQUE(supplier_id, dedup_hash)). Při duplicitě
+     * DOPLNÍ dříve chybějící litry / jednotkovou cenu (re-sken doplní starší záznamy bez množství),
+     * ale NIKDY nepřepíše už vyplněné hodnoty (COALESCE drží existující).
+     *
+     * Vrací: >0 = id nově vloženého; -1 = doplněn existující; 0 = beze změny (true duplicate).
+     */
+    public function insertScanned(int $supplierId, array $data, ?int $userId): int
+    {
+        $pdo = $this->db->pdo();
+        $sql = $this->insertSql()
+            . ' ON DUPLICATE KEY UPDATE
+                  quantity   = COALESCE(quantity, VALUES(quantity)),
+                  unit_price = COALESCE(unit_price, VALUES(unit_price))';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($this->bind($supplierId, $data, $userId));
+        $rc = $stmt->rowCount();
+        // MariaDB affected-rows: 1 = nový insert, 2 = update existujícího, 0 = beze změny.
+        if ($rc === 1) return (int) $pdo->lastInsertId();
+        return $rc >= 2 ? -1 : 0;
+    }
+
+    public function update(int $id, int $supplierId, array $data): bool
+    {
+        $b = $this->bind($supplierId, $data, null);
+        // bind() pořadí viz insertSql(); pro UPDATE vynecháme supplier_id (idx 0), created_by (poslední),
+        // a NEpřepisujeme source/dedup_hash/source_* (ruční editace nemění provenienci).
+        $stmt = $this->db->pdo()->prepare(
+            'UPDATE fuelings
+                SET car_id = ?, fueled_date = ?, fueled_time = ?, fuel_type = ?, quantity = ?, unit = ?,
+                    unit_price = ?, amount_without_vat = ?, amount_vat = ?, amount_with_vat = ?, currency = ?,
+                    odometer = ?, station = ?, vendor_id = ?, receipt_number = ?, note = ?
+              WHERE id = ? AND supplier_id = ?'
+        );
+        $stmt->execute([
+            $b[1], $b[2], $b[3], $b[4], $b[5], $b[6], $b[7], $b[8], $b[9], $b[10], $b[11],
+            $b[12], $b[13], $b[14], $b[18], $b[20],
+            $id, $supplierId,
+        ]);
+        return $stmt->rowCount() >= 0;
+    }
+
+    public function delete(int $id, int $supplierId): bool
+    {
+        $stmt = $this->db->pdo()->prepare('DELETE FROM fuelings WHERE id = ? AND supplier_id = ?');
+        $stmt->execute([$id, $supplierId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    /** Přiřadí všechna tankování dané faktury na auto (NULL = bez přiřazení). Vrací počet. */
+    public function reassignByInvoice(int $supplierId, int $purchaseInvoiceId, ?int $carId): int
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'UPDATE fuelings SET car_id = ? WHERE supplier_id = ? AND source_purchase_invoice_id = ?'
+        );
+        $stmt->execute([$carId, $supplierId, $purchaseInvoiceId]);
+        return $stmt->rowCount();
+    }
+
+    private function insertSql(): string
+    {
+        return 'INSERT INTO fuelings
+                  (supplier_id, car_id, fueled_date, fueled_time, fuel_type, quantity, unit, unit_price,
+                   amount_without_vat, amount_vat, amount_with_vat, currency, odometer, station, vendor_id,
+                   source, source_purchase_invoice_id, source_item_id, receipt_number, raw_text, dedup_hash,
+                   note, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+    }
+
+    /** @return list<mixed> Pořadí přesně dle insertSql(). */
+    private function bind(int $supplierId, array $data, ?int $userId): array
+    {
+        $source = $data['source'] ?? 'manual';
+        if (!in_array($source, self::SOURCES, true)) $source = 'manual';
+        return [
+            $supplierId,                                              // 0
+            $this->nullableInt($data['car_id'] ?? null),             // 1
+            (string) ($data['fueled_date'] ?? ''),                   // 2
+            $this->nullableStr($data['fueled_time'] ?? null),        // 3
+            $this->nullableStr($data['fuel_type'] ?? null, 60),      // 4
+            $this->nullableFloat($data['quantity'] ?? null),         // 5
+            (string) ($data['unit'] ?? 'l'),                         // 6
+            $this->nullableFloat($data['unit_price'] ?? null),       // 7
+            $this->nullableFloat($data['amount_without_vat'] ?? null), // 8
+            $this->nullableFloat($data['amount_vat'] ?? null),       // 9
+            (float) ($data['amount_with_vat'] ?? 0),                 // 10
+            strtoupper((string) ($data['currency'] ?? 'CZK')),       // 11
+            $this->nullableInt($data['odometer'] ?? null),           // 12
+            $this->nullableStr($data['station'] ?? null, 150),       // 13
+            $this->nullableInt($data['vendor_id'] ?? null),          // 14
+            $source,                                                 // 15
+            $this->nullableInt($data['source_purchase_invoice_id'] ?? null), // 16
+            $this->nullableInt($data['source_item_id'] ?? null),     // 17
+            $this->nullableStr($data['receipt_number'] ?? null, 40), // 18
+            $this->nullableStr($data['raw_text'] ?? null, 500),      // 19
+            $this->nullableStr($data['dedup_hash'] ?? null, 64),     // 20
+            $this->nullableStr($data['note'] ?? null),               // 21
+            $userId,                                                 // 22
+        ];
+    }
+
+    private function nullableInt(mixed $v): ?int
+    {
+        if ($v === null || $v === '') return null;
+        return (int) $v;
+    }
+
+    private function nullableFloat(mixed $v): ?float
+    {
+        if ($v === null || $v === '') return null;
+        return (float) $v;
+    }
+
+    private function nullableStr(mixed $v, ?int $max = null): ?string
+    {
+        $s = trim((string) ($v ?? ''));
+        if ($s === '') return null;
+        return $max !== null ? mb_substr($s, 0, $max) : $s;
+    }
+
+    private function cast(array $r): array
+    {
+        return [
+            'id'                         => (int) $r['id'],
+            'supplier_id'                => (int) $r['supplier_id'],
+            'car_id'                     => $r['car_id'] !== null ? (int) $r['car_id'] : null,
+            'car_registration'           => isset($r['car_registration']) && $r['car_registration'] !== null ? (string) $r['car_registration'] : null,
+            'car_name'                   => isset($r['car_name']) && $r['car_name'] !== null ? (string) $r['car_name'] : null,
+            'fueled_date'                => (string) $r['fueled_date'],
+            'fueled_time'                => $r['fueled_time'] !== null ? substr((string) $r['fueled_time'], 0, 5) : null,
+            'fuel_type'                  => $r['fuel_type'] !== null ? (string) $r['fuel_type'] : null,
+            'quantity'                   => $r['quantity'] !== null ? (float) $r['quantity'] : null,
+            'unit'                       => (string) $r['unit'],
+            'unit_price'                 => $r['unit_price'] !== null ? (float) $r['unit_price'] : null,
+            'amount_without_vat'         => $r['amount_without_vat'] !== null ? (float) $r['amount_without_vat'] : null,
+            'amount_vat'                 => $r['amount_vat'] !== null ? (float) $r['amount_vat'] : null,
+            'amount_with_vat'            => (float) $r['amount_with_vat'],
+            'currency'                   => (string) $r['currency'],
+            'odometer'                   => $r['odometer'] !== null ? (int) $r['odometer'] : null,
+            'odometer_estimated'         => isset($r['odometer_estimated']) && $r['odometer_estimated'] !== null ? (int) $r['odometer_estimated'] : null,
+            'station'                    => $r['station'] !== null ? (string) $r['station'] : null,
+            'vendor_id'                  => $r['vendor_id'] !== null ? (int) $r['vendor_id'] : null,
+            'vendor_name'                => isset($r['vendor_name']) && $r['vendor_name'] !== null ? (string) $r['vendor_name'] : null,
+            'source'                     => (string) $r['source'],
+            'source_purchase_invoice_id' => $r['source_purchase_invoice_id'] !== null ? (int) $r['source_purchase_invoice_id'] : null,
+            'source_invoice_number'      => isset($r['source_invoice_number']) && $r['source_invoice_number'] !== null ? (string) $r['source_invoice_number'] : null,
+            'receipt_number'             => $r['receipt_number'] !== null ? (string) $r['receipt_number'] : null,
+            'raw_text'                   => $r['raw_text'] !== null ? (string) $r['raw_text'] : null,
+            'note'                       => $r['note'] !== null ? (string) $r['note'] : null,
+            'created_at'                 => (string) $r['created_at'],
+        ];
+    }
+}

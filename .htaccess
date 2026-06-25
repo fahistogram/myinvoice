@@ -82,6 +82,17 @@ Options -Indexes -MultiViews
     </IfModule>
 </FilesMatch>
 
+# SPA entry (index.html) NESMÍ být cachovaná. Hashed assety výše jsou immutable, ale
+# index.html drží mapu na jejich aktuální hashe — když ji prohlížeč cachuje, po updatu
+# servíruje starou index.html odkazující na staré (z nového buildu smazané) chunky →
+# „Failed to fetch dynamically imported module" u lazy-loaded rout (issue #140).
+# Zrcadlí outboundRule „HTML no-cache" ve web.config (IIS), kde to už řešené je.
+<FilesMatch "\.html$">
+    <IfModule mod_headers.c>
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+    </IfModule>
+</FilesMatch>
+
 # API responses nesmí být cache-ované.
 # `<LocationMatch>` není povolený v .htaccess (jen ve server/vhost configu),
 # takže používáme rewrite-env trick: nastavíme proměnnou NOCACHE pro /api/* a

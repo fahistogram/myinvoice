@@ -1,0 +1,118 @@
+# MyInvoice.cz — Docker Compose pro Portainer / Dockge (pure-ENV, bez cfg souboru)
+#
+# Tahle varianta NEpotřebuje bind-mount `cfg.docker.php` — veškerá konfigurace
+# se předává přes proměnné prostředí (12-factor). To je přesně to, co GUI
+# nástroje jako Portainer (Stacks) a Dockge potřebují: stačí vložit tenhle
+# YAML, vyplnit pár proměnných a nasadit. Žádné klonování repa, žádné soubory
+# na hostu.
+#
+# ── Portainer ───────────────────────────────────────────────────────────────
+#   Stacks → Add stack → Web editor → vlož tento soubor → níže vyplň proměnné
+#   prostředí (sekce „Environment variables") → Deploy the stack.
+#   Nebo jedním klikem přes App Template (portainer-template.json), viz manuál § 3.11.
+#
+# ── Dockge ──────────────────────────────────────────────────────────────────
+#   + Compose → vlož tento soubor → vyplň `.env` v editoru → Save → Start.
+#
+# ── Povinné proměnné ────────────────────────────────────────────────────────
+#   DB_PASSWORD          heslo aplikačního DB uživatele      (openssl rand -base64 28)
+#   DB_ROOT_PASSWORD     root heslo MariaDB                   (openssl rand -base64 28)
+#   MYINVOICE_PEPPER     sůl k hashování hesel, 32B base64    (openssl rand -base64 32)
+#
+# ── Doporučené ──────────────────────────────────────────────────────────────
+#   MYINVOICE_SECRET_KEY 32B base64 pro šifrování TOTP secretů (openssl rand -base64 32).
+#                        Když prázdné → fallback HKDF z pepperu (TOTP funguje, ale
+#                        rotace pepperu pak zneplatní uložené 2FA).
+#   APP_PORT             host port (default 8080) → http://<host>:<APP_PORT>
+#
+# ── Pro produkci za HTTPS reverse proxy (Caddy/Traefik/nginx) ────────────────
+#   MYINVOICE_APP_URL=https://faktury.firma.cz   (přesná veřejná URL — do e-mailů)
+#   MYINVOICE_SESSION_COOKIE_SECURE=true
+#   MYINVOICE_SESSION_COOKIE_NAME=__Host-myinvoice_session
+#   Proxy musí posílat hlavičku `X-Forwarded-Proto: https` (jinak redirect loop).
+#
+# SMTP a další volby lze nastavit i později v aplikaci (Nastavení), nebo přes ENV
+# (klíče MYINVOICE_SMTP_* níže). Setup wizard po nasazení doběhne v prohlížeči.
+
+services:
+  app:
+    image: ghcr.io/radekhulan/myinvoice:latest   # v produkci pinni konkrétní verzi, např. :4.34.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:80"
+    volumes:
+      # Žádný cfg mount — vše přes ENV. Stateful data drží jediný named volume.
+      - app-data:/data
+    environment:
+      TZ: ${TZ:-Europe/Prague}
+      MYINVOICE_DATA_DIR: /data
+      MYINVOICE_ENABLE_CRON: ${MYINVOICE_ENABLE_CRON:-1}
+
+      # App
+      MYINVOICE_APP_ENV: ${MYINVOICE_APP_ENV:-production}
+      # Veřejná URL do e-mailových odkazů. Nech prázdné a setup wizard ji uloží
+      # podle URL, kterou v prohlížeči použiješ. Za reverse proxy ji nastav natvrdo.
+      MYINVOICE_APP_URL: ${MYINVOICE_APP_URL:-}
+      MYINVOICE_PEPPER: ${MYINVOICE_PEPPER:?MYINVOICE_PEPPER required — openssl rand -base64 32}
+      MYINVOICE_SECRET_KEY: ${MYINVOICE_SECRET_KEY:-}
+
+      # Databáze — míří na `db` service v tomto stacku.
+      MYINVOICE_DB_HOST: db
+      MYINVOICE_DB_PORT: "3306"
+      MYINVOICE_DB_NAME: ${DB_NAME:-myinvoice}
+      MYINVOICE_DB_USER: ${DB_USER:-myinvoice}
+      MYINVOICE_DB_PASS: ${DB_PASSWORD:?DB_PASSWORD required — openssl rand -base64 28}
+
+      # Cookies: default HTTP-friendly (přístup přes http://host:port). Za HTTPS
+      # proxy přepni na Secure + __Host- (viz hlavička souboru).
+      MYINVOICE_SESSION_COOKIE_SECURE: ${MYINVOICE_SESSION_COOKIE_SECURE:-false}
+      MYINVOICE_SESSION_COOKIE_NAME: ${MYINVOICE_SESSION_COOKIE_NAME:-myinvoice_session}
+
+      # SMTP (volitelné — lze nechat prázdné a doplnit v Nastavení). Prázdné klíče
+      # se v Configu ignorují, takže nepřebijí pozdější nastavení ze setup wizardu.
+      MYINVOICE_SMTP_HOST: ${MYINVOICE_SMTP_HOST:-}
+      MYINVOICE_SMTP_PORT: ${MYINVOICE_SMTP_PORT:-}
+      MYINVOICE_SMTP_ENCRYPTION: ${MYINVOICE_SMTP_ENCRYPTION:-}
+      MYINVOICE_SMTP_AUTH: ${MYINVOICE_SMTP_AUTH:-}
+      MYINVOICE_SMTP_USER: ${MYINVOICE_SMTP_USER:-}
+      MYINVOICE_SMTP_PASS: ${MYINVOICE_SMTP_PASS:-}
+      MYINVOICE_SMTP_FROM_EMAIL: ${MYINVOICE_SMTP_FROM_EMAIL:-}
+      MYINVOICE_SMTP_FROM_NAME: ${MYINVOICE_SMTP_FROM_NAME:-}
+
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=${DB_INNODB_BUFFER_POOL:-128M}
+      - --innodb-log-file-size=${DB_INNODB_LOG_SIZE:-48M}
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD required — openssl rand -base64 28}
+      MARIADB_DATABASE: ${DB_NAME:-myinvoice}
+      MARIADB_USER: ${DB_USER:-myinvoice}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required — openssl rand -base64 28}
+      TZ: ${TZ:-Europe/Prague}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["redis"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  db-data:
+  app-data:
+  redis-data:

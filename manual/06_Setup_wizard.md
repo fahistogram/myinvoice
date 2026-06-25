@@ -30,7 +30,7 @@ Klikni **Další**.
 ![Setup wizard krok 2](img/03_setup_dodavatel.webp)
 
 Vyplníš údaje o **prvním dodavateli** (firmě nebo OSVČ), za kterého budeš
-fakturovat. Můžeš jich později přidat víc — viz [33. Multi-supplier](33_Multi_supplier.md).
+fakturovat. Můžeš jich později přidat víc — viz [35. Multi-supplier](35_Multi_supplier.md).
 
 | Sekce | Popis |
 |---|---|
@@ -63,13 +63,20 @@ Sample data **nejdou doinstalovat zpětně** — pokud teď přeskočíš a pozd
 zjistíš, že je chceš, dostaneš `409 setup_done` (ochrana proti přepsání reálných
 faktur). Reset přes `php api/bin/reset.php` smaže všechno a wizard se objeví znovu.
 
+**Odebrání ukázkových dat.** Jakmile sis sadu vygeneroval a chceš začít načisto
+jen s vlastními daty, najdeš v **Systém → Nastavení** sekci **Ukázková data** s
+tlačítkem *Odebrat ukázková data* — smaže přesně vygenerovanou sadu a tvoje
+vlastní záznamy nechá být. Sekce se zobrazí jen tehdy, když nějaká ukázková data
+existují. Alternativně z příkazové řádky `php api/bin/reset.php --keep-users-supplier`
+smaže všechna byznys data, ale ponechá přihlášení a nastaveného dodavatele.
+
 Klikni **Dokončit**. Wizard tě **automaticky přihlásí** a přesměruje na
 [Přehled (dashboard)](08_Prehled.md).
 
 ## 6.4 Co dál po setupu
 
 1. Otevři **Systém → Nastavení** a doplň, co wizard nepokryl: e-mail kontakt,
-   doplnění více bankovních účtů — viz [34. Nastavení](34_Nastaveni.md).
+   doplnění více bankovních účtů — viz [36. Nastavení](36_Nastaveni.md).
 2. **Systém → Číselníky → Měny** — pokud fakturuješ i v EUR, doplň druhý účet
    (IBAN + BIC).
 3. **Systém → Uživatelé** — pokud má systém používat někdo další (účetní),

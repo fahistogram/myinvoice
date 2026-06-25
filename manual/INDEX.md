@@ -40,38 +40,40 @@ nasazuje). Zbytek je psaný pro běžného uživatele — bez programátorského
 17. [Přijaté faktury](17_Prijate_faktury.md)
 18. [Export přijatých](18_Export_prijatych.md)
 19. [AI extrakce](19_AI_extrakce.md)
+20. [Platební příkazy](20_Platebni_prikazy.md)
 
 ### Finance
 
-20. [CRM dashboard](20_CRM.md)
-21. [Tržby](21_Trzby.md)
-22. [Náklady](22_Naklady.md)
-23. [Banka](23_Banka.md)
-24. [Upomínky](24_Upominky.md)
+21. [CRM dashboard](21_CRM.md)
+22. [Tržby](22_Trzby.md)
+23. [Náklady](23_Naklady.md)
+24. [Banka](24_Banka.md)
+25. [Upomínky](25_Upominky.md)
 
 ### Dokumenty
 
-25. [Dokumenty](25_Dokumenty.md)
+26. [Dokumenty](26_Dokumenty.md)
+27. [Kniha jízd](27_Kniha_jizd.md)
 
 ### Daně
 
-26. [Daňový průvodce](26_Fakturujeme.md)
-27. [Výkazy DPH](27_Vykazy_DPH.md)
-28. [Kniha DPH](28_Kniha_DPH.md)
-29. [Souhrnné hlášení](29_Souhrnne_hlaseni.md)
-30. [Daň z příjmů](30_Dan_z_prijmu.md)
-31. [Daňový optimalizátor](31_Danovy_optimalizator.md)
-32. [Hromadný export](32_Hromadny_export.md)
+28. [Daňový průvodce](28_Fakturujeme.md)
+29. [Výkazy DPH](29_Vykazy_DPH.md)
+30. [Kniha DPH](30_Kniha_DPH.md)
+31. [Souhrnné hlášení](31_Souhrnne_hlaseni.md)
+32. [Daň z příjmů](32_Dan_z_prijmu.md)
+33. [Daňový optimalizátor](33_Danovy_optimalizator.md)
+34. [Hromadný export](34_Hromadny_export.md)
 
 ### Systém
 
-33. [Více dodavatelů](33_Multi_supplier.md)
-34. [Nastavení](34_Nastaveni.md)
-35. [Bankovní účty](35_Bankovni_ucty.md)
-36. [Elektronické podpisy](36_Elektronicke_podpisy.md)
-37. [Bezpečnost](37_Bezpecnost.md)
-38. [Aktualizace](38_Aktualizace.md)
-39. [REST API](39_API.md)
+35. [Více dodavatelů](35_Multi_supplier.md)
+36. [Nastavení](36_Nastaveni.md)
+37. [Bankovní účty](37_Bankovni_ucty.md)
+38. [Elektronické podpisy](38_Elektronicke_podpisy.md)
+39. [Bezpečnost](39_Bezpecnost.md)
+40. [Aktualizace](40_Aktualizace.md)
+41. [REST API](41_API.md)
 
 ### Reference
 

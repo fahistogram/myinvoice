@@ -139,13 +139,13 @@ final class GpcParser
         $counterpartyAccount = trim(substr($pad, 19, 16));
         $amountCents = (int) trim(substr($pad, 48, 12));
         $postingCode = trim(substr($pad, 60, 1));
-        $vs = trim(substr($pad, 61, 10), " 0");
-        if ($vs === '') $vs = trim(substr($pad, 61, 10));
+        // VS/KS/SS jsou zleva doplněné nulami (right-justified). Strhni JEN vedoucí nuly
+        // (padding) přes ltrim — NE trim(" 0"), které utne i VÝZNAMNÉ koncové nuly
+        // (issue #150: VS 260100010 → 26010001). Samé nuly / mezery → '' → null.
+        $vs = ltrim(trim(substr($pad, 61, 10)), '0');
         $bankCode = trim(substr($pad, 73, 4));   // pozice 74-77 (1-based)
-        $ks = trim(substr($pad, 77, 4), " 0");   // pozice 78-81, jen 4 znaky
-        if ($ks === '') $ks = trim(substr($pad, 77, 4));
-        $ss = trim(substr($pad, 81, 10), " 0");
-        if ($ss === '') $ss = trim(substr($pad, 81, 10));
+        $ks = ltrim(trim(substr($pad, 77, 4)), '0');   // pozice 78-81, jen 4 znaky
+        $ss = ltrim(trim(substr($pad, 81, 10)), '0');
         // Pole textová — konverze CP1250 → UTF-8 až po byte-aligned extrakci.
         $description = $this->cp1250ToUtf8(trim(substr($pad, 97, 20)));   // pozice 98-117 (client_name)
         $currency = trim(substr($pad, 117, 5));      // pozice 118-122 (currency code)

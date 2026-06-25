@@ -74,6 +74,57 @@ final class GpcParserTest extends TestCase
         self::assertSame('CZK',        $t['currency']);
     }
 
+    /**
+     * Issue #150: VS (a KS/SS) doplněné zleva nulami se nesmí přijít o VÝZNAMNÉ
+     * koncové nuly. Dřív `trim(" 0")` utínal nuly z obou stran → VS 260100010 → 26010001.
+     */
+    public function testTrailingZerosInSymbolsArePreserved(): void
+    {
+        $header = '074' . str_pad('1', 16) . str_pad('', 20) . '010126'
+            . str_pad('0', 14, '0') . '+' . str_pad('0', 14, '0') . '+'
+            . str_pad('0', 14, '0') . '+' . str_pad('0', 14, '0') . '+'
+            . '001' . '010126';
+        $tx = '075'
+            . str_pad('1', 16) . str_pad('1', 16) . str_pad('D', 13)
+            . str_pad('100', 12, '0', STR_PAD_LEFT) . '2'
+            . str_pad('260100010', 10, '0', STR_PAD_LEFT)          // VS končící nulou (zleva pad)
+            . '00' . '0100'
+            . str_pad('3100', 4, '0', STR_PAD_LEFT)                // KS končící nulami
+            . str_pad('5500', 10, '0', STR_PAD_LEFT)               // SS končící nulami
+            . '010126'
+            . str_pad('Test', 20) . '00203' . '010126';
+
+        $t = (new GpcParser())->parse($header . "\n" . $tx)['transactions'][0];
+        self::assertSame('260100010', $t['variable_symbol']);   // ne 26010001
+        self::assertSame('3100',      $t['constant_symbol']);    // ne 31
+        self::assertSame('5500',      $t['specific_symbol']);    // ne 55
+    }
+
+    /**
+     * Samé nuly / prázdné pole → null (žádný symbol), ne literál "0000000000".
+     */
+    public function testAllZeroSymbolsBecomeNull(): void
+    {
+        $header = '074' . str_pad('1', 16) . str_pad('', 20) . '010126'
+            . str_pad('0', 14, '0') . '+' . str_pad('0', 14, '0') . '+'
+            . str_pad('0', 14, '0') . '+' . str_pad('0', 14, '0') . '+'
+            . '001' . '010126';
+        $tx = '075'
+            . str_pad('1', 16) . str_pad('1', 16) . str_pad('D', 13)
+            . str_pad('100', 12, '0', STR_PAD_LEFT) . '2'
+            . str_pad('0', 10, '0', STR_PAD_LEFT)                  // VS = samé nuly
+            . '00' . '0100'
+            . str_pad('0', 4, '0', STR_PAD_LEFT)                   // KS = samé nuly
+            . str_pad('0', 10, '0', STR_PAD_LEFT)                  // SS = samé nuly
+            . '010126'
+            . str_pad('Test', 20) . '00203' . '010126';
+
+        $t = (new GpcParser())->parse($header . "\n" . $tx)['transactions'][0];
+        self::assertNull($t['variable_symbol']);
+        self::assertNull($t['constant_symbol']);
+        self::assertNull($t['specific_symbol']);
+    }
+
     public function testCurrencyMappingFromIsoNumeric(): void
     {
         // 00203 = CZK, 00978 = EUR, 00840 = USD — verify normalize ltrim works

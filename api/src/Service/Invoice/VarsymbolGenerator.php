@@ -69,6 +69,11 @@ final class VarsymbolGenerator
         if ($supplierId <= 0) {
             throw new \InvalidArgumentException("Neplatný supplier_id: {$supplierId}");
         }
+        // Daňový doklad k přijaté platbě se čísluje v řadě faktur (sdílí template
+        // i counter s 'invoice') — žádná dodatečná konfigurace, žádné kolize čísel.
+        if ($invoiceType === 'tax_document') {
+            $invoiceType = 'invoice';
+        }
         if (!in_array($invoiceType, self::SUPPORTED_TYPES, true)) {
             throw new \InvalidArgumentException("Nepodporovaný typ pro varsymbol: {$invoiceType}");
         }
@@ -141,6 +146,9 @@ final class VarsymbolGenerator
      */
     public function syncCounter(int $supplierId, string $invoiceType, ?\DateTimeInterface $for = null, int $clientId = 0): int
     {
+        if ($invoiceType === 'tax_document') {
+            $invoiceType = 'invoice'; // sdílená řada s fakturami (viz next())
+        }
         if ($supplierId <= 0 || !in_array($invoiceType, self::SUPPORTED_TYPES, true)) {
             return 0;
         }

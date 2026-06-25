@@ -127,6 +127,14 @@
      světlý #D7E8F6 a v dark módu zářil. Laděno k ostatním -50 stavům. */
   --color-accent-100: #16344C;
   --color-teal-50:    #102A2D;   /* stav „Odesláno" — tmavý tint */
+  /* Částečné úhrady (#89): badge „Částečně uhrazeno" (amber) a „Přeplaceno"
+     (purple) — bez override by světlé -50 tinty v dark módu zářily. Text -600/-700
+     naopak zesvětlit, default Tailwind hodnoty jsou na tmavém nečitelné. */
+  --color-amber-50:   #2B2113;
+  --color-amber-600:  #D99C3F;
+  --color-amber-700:  #E2AE5C;
+  --color-purple-50:  #241A33;
+  --color-purple-700: #C2A6EC;
 }
 
 html, body {

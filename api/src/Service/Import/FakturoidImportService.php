@@ -574,15 +574,12 @@ final class FakturoidImportService
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/invoices-imported'
                 : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices-imported');
         }
-        $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
-        if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
-
         $sha = hash('sha256', $pdf);
-        $disk = substr($sha, 0, 16) . '.pdf';
-        $diskPath = $tenantDir . DIRECTORY_SEPARATOR . $disk;
+        // Hash-shard layout (supplier-{id}/{2}/{16}.pdf) — sdílené s PurchaseInvoicePdfArchiver.
+        $diskPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::ensureShardPath($archiveRoot, $supplierId, $sha);
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
-        $relPath = 'supplier-' . $supplierId . '/' . $disk;
+        $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
         $name = ((string) ($inv['number'] ?? 'invoice')) . '.pdf';
         $this->db->pdo()->prepare(
             'UPDATE invoices SET imported_pdf_path = ?, imported_pdf_hash = ?,
@@ -609,15 +606,12 @@ final class FakturoidImportService
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/purchase-invoices'
                 : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
         }
-        $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
-        if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
-
         $sha = hash('sha256', $pdf);
-        $disk = substr($sha, 0, 16) . '.pdf';
-        $diskPath = $tenantDir . DIRECTORY_SEPARATOR . $disk;
+        // Hash-shard layout (supplier-{id}/{2}/{16}.pdf) — sdílené s PurchaseInvoicePdfArchiver.
+        $diskPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::ensureShardPath($archiveRoot, $supplierId, $sha);
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
-        $relPath = 'supplier-' . $supplierId . '/' . $disk;
+        $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
         $name = ((string) ($exp['number'] ?? 'expense')) . '.pdf';
         $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $name);
     }

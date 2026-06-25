@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { bankNameByCode, isKnownBankName } from '@/utils/czBankCodes'
 import {
   settingsApi,
   type BankEmailAccountMapping,
@@ -58,6 +59,14 @@ const bankDraftAccounts = ref<CrpDphAccount[]>([])
 const supplierHasDic = computed(() => /^\d{8,10}$/.test((supplier.value?.dic || '').replace(/\D/g, '')))
 
 const currencyDraft = reactive<Partial<CurrencyAccount>>({})
+// Auto-doplnění názvu banky podle kódu (číselník ČNB). Přepíše jen prázdný
+// nebo z číselníku pocházející název — ručně zadaný text nepřepisuje.
+watch(() => currencyDraft.bank_code, (code) => {
+  const name = bankNameByCode(code)
+  if (name && (!currencyDraft.bank_name || isKnownBankName(currencyDraft.bank_name))) {
+    currencyDraft.bank_name = name
+  }
+})
 const imapDraft = reactive<Partial<BankEmailImapSettings> & { password?: string }>(defaultImapDraft())
 const regexFieldDefinitions = [
   { key: 'variable_symbol', required: true },
@@ -95,6 +104,8 @@ function defaultImapDraft(): Partial<BankEmailImapSettings> & { password?: strin
     encryption: 'ssl',
     validate_cert: true,
     require_email_auth: false,
+    allow_forwarded: false,
+    forwarded_from: '',
     email_auth_serv_id: '',
     username: '',
     password: '',
@@ -446,11 +457,21 @@ function providerOwnerLabel(provider: BankEmailProvider): string {
   return provider.supplier_id === null ? t('bank_accounts.owner_system') : t('bank_accounts.owner_supplier')
 }
 
+// Jen 'regex' je editovatelný/duplikovatelný uživatelský provider; ostatní jsou
+// vestavěné kódové parsery konkrétní banky (needitují se). Fio dřív v tomhle
+// výčtu chybělo a propadalo na „Regex", takže v tabulce vypadalo stejně jako
+// editovatelný regex provider ČS — proto má teď taky vlastní název a neznámé
+// typy padají na obecný „Vestavěný parser", ne na „Regex".
 function parserTypeLabel(parserType: BankEmailProvider['parser_type']): string {
-  if (parserType === 'raiffeisenbank') return 'Raiffeisenbank'
-  if (parserType === 'unicredit') return 'UniCredit Bank'
-  if (parserType === 'csob') return 'ČSOB'
-  return 'Regex'
+  switch (parserType) {
+    case 'regex': return 'Regex'
+    case 'raiffeisenbank': return 'Raiffeisenbank'
+    case 'unicredit': return 'UniCredit Bank'
+    case 'csob': return 'ČSOB'
+    case 'fio': return 'Fio banka'
+    case 'creditas': return 'Creditas'
+    default: return t('bank_accounts.parser_builtin')
+  }
 }
 
 function providerSelectLabel(provider: BankEmailProvider): string {
@@ -506,6 +527,31 @@ function startEditProvider(provider: BankEmailProvider) {
     field_patterns: patterns,
     normalizer_config_json: JSON.stringify(provider.normalizer_config ?? {}, null, 2),
   })
+  providerFormOpen.value = true
+}
+
+// Duplikát libovolného (i systémového/globálního) regex provideru jako nový,
+// editovatelný provider dodavatele. Systémový ČS provider sám editovat nejde,
+// ale takhle si z něj uživatel udělá vlastní kopii a doladí ji (např. smaže
+// body_pattern, zvolní diakritiku) a otestuje přes „Test parseru" (#158).
+function startCloneProvider(provider: BankEmailProvider) {
+  if (provider.parser_type !== 'regex') return
+  const patterns = defaultFieldPatterns()
+  for (const field of regexFieldDefinitions) {
+    patterns[field.key] = String(provider.field_patterns?.[field.key] ?? '')
+  }
+  Object.assign(providerDraft, {
+    id: null, // null → uloží se jako nový provider, originál zůstane netknutý
+    name: `${provider.name} ${t('bank_accounts.provider_copy_suffix')}`,
+    code: '',
+    enabled: provider.enabled,
+    sender_whitelist: provider.sender_whitelist ?? '',
+    subject_pattern: provider.subject_pattern ?? '',
+    body_pattern: provider.body_pattern ?? '',
+    field_patterns: patterns,
+    normalizer_config_json: JSON.stringify(provider.normalizer_config ?? {}, null, 2),
+  })
+  syncProviderCode() // dogeneruje unikátní code z názvu kopie
   providerFormOpen.value = true
 }
 
@@ -920,6 +966,21 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
                 class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm font-mono" />
               <p class="text-xs text-neutral-500 mt-1">{{ t('bank_accounts.email_auth_serv_id_hint') }}</p>
             </div>
+            <div class="md:col-span-3 grid md:grid-cols-2 gap-4 mt-7 items-start">
+              <label class="flex items-start gap-2 text-sm">
+                <input v-model="imapDraft.allow_forwarded" type="checkbox" class="mt-0.5 rounded border-neutral-300 text-primary-600" />
+                <span>
+                  {{ t('bank_accounts.allow_forwarded') }}
+                  <span class="block text-xs text-neutral-500">{{ t('bank_accounts.allow_forwarded_hint') }}</span>
+                </span>
+              </label>
+              <div v-if="imapDraft.allow_forwarded">
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('bank_accounts.forwarded_from') }}</label>
+                <input v-model="imapDraft.forwarded_from" type="text" placeholder="jan@firma.cz"
+                  class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm font-mono" />
+                <p class="text-xs text-neutral-500 mt-1">{{ t('bank_accounts.forwarded_from_hint') }}</p>
+              </div>
+            </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('bank_accounts.on_success') }}</label>
               <select v-model="imapDraft.success_action" class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm">
@@ -999,8 +1060,12 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
                   <span :class="p.enabled ? 'text-success-600' : 'text-neutral-500'">{{ p.enabled ? t('common.yes') : t('common.no') }}</span>
                 </td>
                 <td class="px-3 py-2 text-right whitespace-nowrap">
-                  <button v-if="p.id !== null && p.supplier_id !== null && p.parser_type === 'regex'" type="button" @click="startEditProvider(p)"
+                  <button v-if="p.parser_type === 'regex'" type="button" @click="startCloneProvider(p)"
                     class="cursor-pointer text-primary-600 hover:text-primary-700 text-xs">
+                    {{ t('bank_accounts.provider_clone') }}
+                  </button>
+                  <button v-if="p.id !== null && p.supplier_id !== null && p.parser_type === 'regex'" type="button" @click="startEditProvider(p)"
+                    class="cursor-pointer text-primary-600 hover:text-primary-700 text-xs ml-2">
                     {{ t('common.edit') }}
                   </button>
                   <button v-if="p.id !== null && p.supplier_id !== null" type="button" @click="removeProvider(p)"

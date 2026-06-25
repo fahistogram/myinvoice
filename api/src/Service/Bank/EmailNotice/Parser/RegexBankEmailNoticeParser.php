@@ -26,23 +26,56 @@ final class RegexBankEmailNoticeParser extends AbstractBankEmailNoticeParser
 
     public function supports(BankEmailNoticeMessage $message, BankEmailNoticeProvider $provider): bool
     {
-        if (!$this->senderAllowed($message->sender, (string) ($provider->senderWhitelist ?? ''))) {
+        if (!$this->senderAllowedForwarded($message, (string) ($provider->senderWhitelist ?? ''))) {
             return false;
         }
         $subjectPattern = trim((string) ($provider->subjectPattern ?? ''));
-        if ($subjectPattern !== '' && !preg_match('~' . $subjectPattern . '~iu', $message->subject)) {
+        if ($subjectPattern !== '' && !$this->patternMatches($message->subject, $subjectPattern)) {
             return false;
         }
         $bodyPattern = trim((string) ($provider->bodyPattern ?? ''));
-        if ($bodyPattern !== '' && !preg_match('~' . $bodyPattern . '~iu', $this->normalizeText($message->text))) {
+        if ($bodyPattern !== '' && !$this->patternMatches($this->normalizeText($message->text), $bodyPattern)) {
             return false;
         }
         return true;
     }
 
+    /**
+     * Diakritiku-tolerantní detekce: nejdřív zkus pattern proti původnímu textu,
+     * a když nesedí (přeposlané avízo v legacy kódování / s chybějící diakritikou),
+     * zkus ho proti ASCII-sklopené variantě obojího. Bez toho stačilo, aby se cestou
+     * rozbilo jediné „ě"/„č" a `supports()` selhal s „žádný parser provider" (#158).
+     */
+    private function patternMatches(string $haystack, string $pattern): bool
+    {
+        if (preg_match('~' . $pattern . '~iu', $haystack) === 1) {
+            return true;
+        }
+        return preg_match('~' . $this->foldDiacritics($pattern) . '~iu', $this->foldDiacritics($haystack)) === 1;
+    }
+
+    /**
+     * Match field patternu se stejnou diakritiku-tolerantní logikou: strict varianta
+     * (zachová diakritiku v zachycených hodnotách u čistého UTF-8 avíza), jinak fallback
+     * na ASCII-sklopený text i pattern. Vrací pojmenované skupiny shodného matche, nebo null.
+     *
+     * @return array<int|string,string>|null
+     */
+    private function matchField(string $text, string $foldedText, string $pattern): ?array
+    {
+        if (preg_match('~' . $pattern . '~u', $text, $m) === 1) {
+            return $m;
+        }
+        if (preg_match('~' . $this->foldDiacritics($pattern) . '~u', $foldedText, $m) === 1) {
+            return $m;
+        }
+        return null;
+    }
+
     public function parse(BankEmailNoticeMessage $message, BankEmailNoticeProvider $provider): ParsedBankEmailNotice
     {
         $text = $this->normalizeText($message->text);
+        $foldedText = $this->foldDiacritics($text);
         $patterns = $provider->fieldPatterns;
 
         $data = [];
@@ -50,7 +83,8 @@ final class RegexBankEmailNoticeParser extends AbstractBankEmailNoticeParser
             if (!is_string($pattern) || trim($pattern) === '') {
                 continue;
             }
-            if (preg_match('~' . $pattern . '~u', $text, $m) !== 1) {
+            $m = $this->matchField($text, $foldedText, $pattern);
+            if ($m === null) {
                 continue;
             }
             foreach ($m as $key => $value) {
@@ -72,10 +106,29 @@ final class RegexBankEmailNoticeParser extends AbstractBankEmailNoticeParser
         // #110: šablona ČS „Odešla platba" nemusí obsahovat řádek „Číslo účtu:" —
         // jako fallback vytáhni vlastní účet z úvodní věty („z účtu NÁZEV 123/0800 právě
         // odešla platba…" / „na účet NÁZEV 123/0800 právě dorazila platba…").
+        // Matchujeme nad ASCII-sklopeným textem (#158: diakritika v avízu se cestou
+        // mohla rozbít); číslo účtu je stejně ASCII, takže sklopení nic neztratí.
         if (trim((string) ($data['recipient_account'] ?? '')) === ''
-            && preg_match('/(?:z\s+účtu|na\s+účet)\s+[^\n]{0,120}?(?<value>\d[\d\-]*\/\d{4})/iu', $text, $m) === 1
+            && preg_match('/(?:z\s+uctu|na\s+ucet)\s+[^\n]{0,120}?(?<value>\d[\d\-]*\/\d{4})/iu', $foldedText, $m) === 1
         ) {
             $data['recipient_account'] = trim($m['value']);
+        }
+
+        // #147: novější šablona ČS „Odešla platba" uvádí v bloku transakce řádky
+        // „Z účtu:" (odesílatel) a „Na účet:" (příjemce) místo „Číslo účtu:" /
+        // „Číslo účtu protistrany:". Která strana je vlastní účet a která protistrana
+        // se prohazuje podle směru platby, proto je mapujeme až podle „Směr platby"
+        // (dvojtečka v popisku odliší tyto řádky od úvodní věty bez dvojtečky).
+        $fromAccount = preg_match('/Z\s+uctu:\s*(?<value>\d[\d\-]*\/\d{4})/iu', $foldedText, $m) === 1 ? trim($m['value']) : '';
+        $toAccount = preg_match('/Na\s+ucet:\s*(?<value>\d[\d\-]*\/\d{4})/iu', $foldedText, $m) === 1 ? trim($m['value']) : '';
+        $outgoing = preg_match('/odchoz|výdej|vydej|výdaj|vydaj|debet|odepsán|odepsan|outgoing/u', mb_strtolower((string) ($data['direction'] ?? ''), 'UTF-8')) === 1;
+        $ownLineAccount = $outgoing ? $fromAccount : $toAccount;
+        $counterpartyLineAccount = $outgoing ? $toAccount : $fromAccount;
+        if (trim((string) ($data['recipient_account'] ?? '')) === '' && $ownLineAccount !== '') {
+            $data['recipient_account'] = $ownLineAccount;
+        }
+        if (trim((string) ($data['counterparty_account'] ?? '')) === '' && $counterpartyLineAccount !== '') {
+            $data['counterparty_account'] = $counterpartyLineAccount;
         }
 
         foreach (['variable_symbol', 'amount', 'currency', 'posted_at', 'recipient_account'] as $required) {

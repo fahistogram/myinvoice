@@ -32,10 +32,13 @@ final class DefaultClassificationCodeTest extends TestCase
         $f = fn (string $iso) =>
             PurchaseInvoiceRepository::defaultClassificationCode(0.0, false, $iso);
 
-        $this->assertSame('24', $f('DE'), 'EU vendor 0 % → přijetí služby z EU');
-        $this->assertSame('24', $f('IE'));
-        $this->assertSame('25', $f('US'), '3. země 0 % → dovoz');
-        $this->assertSame('25', $f('GB'));
+        // Zahraniční 0 % = reverse charge SLUŽBA (nejčastější: digitální předplatná).
+        // EU → 24e (ř.5), 3. země → 24 (ř.12). Zboží (ř.3/ř.7) ze sazby nepoznáme →
+        // u zboží vybírá kód AI/uživatel.
+        $this->assertSame('24e', $f('DE'), 'EU vendor 0 % → služba z EU (ř.5)');
+        $this->assertSame('24e', $f('IE'));
+        $this->assertSame('24', $f('US'), '3. země 0 % → služba ze 3. země (ř.12)');
+        $this->assertSame('24', $f('GB'));
     }
 
     public function testEuReverseChargeStandardRate(): void

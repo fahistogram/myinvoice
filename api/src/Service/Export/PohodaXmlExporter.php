@@ -7,6 +7,7 @@ namespace MyInvoice\Service\Export;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\TaxConstantsRepository;
+use MyInvoice\Service\Bank\VariableSymbolNormalizer;
 
 /**
  * Stormware Pohoda XML data package exporter.
@@ -19,11 +20,16 @@ use MyInvoice\Repository\TaxConstantsRepository;
  *
  * Vytváří jeden `<dat:dataPack>` se všemi fakturami za dané období.
  *
- * Mapování invoice_type → invoiceType:
- *   invoice      → issuedInvoice
- *   proforma     → issuedAdvanceInvoice
- *   credit_note  → issuedCreditNotice
+ * Směr dokladu řídí `$cfg['direction']` ('issued' = default | 'purchase'):
+ * Mapování invoice_type → invoiceType (vydané / přijaté):
+ *   invoice      → issuedInvoice        / receivedInvoice
+ *   proforma     → issuedAdvanceInvoice / receivedAdvanceInvoice
+ *   credit_note  → issuedCreditNotice   / receivedCreditNotice
  *   cancellation → (přeskakuje se — interní storno se do Pohody neexportuje)
+ *
+ * `partnerIdentity` nese protistranu: u vydané faktury odběratele (client),
+ * u přijaté faktury dodavatele (vendor → supplier_snapshot). Hodnoty invoiceType
+ * jsou z `inv:invoiceTypeType` (žádný „issuedTaxDocument" — ten v enum NEEXISTUJE).
  *
  * Per-supplier konfigurace (volitelná):
  *   pohoda_account_code  → <inv:account><typ:ids>...</typ:ids></inv:account>
@@ -127,6 +133,10 @@ final class PohodaXmlExporter
         $dataPack->setAttribute('note', 'Export ' . date('Y-m-d H:i'));
         $dom->appendChild($dataPack);
 
+        // Směr dokladů v balíčku: 'purchase' = přijaté faktury (protistrana = dodavatel,
+        // typ dokladu received*), jinak vydané (issued*). Nastavuje PurchaseInvoiceExportService.
+        $isPurchase = ($cfg['direction'] ?? '') === 'purchase';
+
         foreach ($invoices as $idx => $invoice) {
             $item = $dom->createElementNS(self::NS_DAT, 'dat:dataPackItem');
             $item->setAttribute('version', '2.0');
@@ -139,18 +149,41 @@ final class PohodaXmlExporter
 
             // Header
             $hdr = $dom->createElementNS(self::NS_INV, 'inv:invoiceHeader');
-            $invType = match ($invoice['invoice_type']) {
-                'proforma'    => 'issuedAdvanceInvoice',
-                'credit_note' => 'issuedCreditNotice',
-                default       => 'issuedInvoice',
-            };
+            $invType = $isPurchase
+                ? match ($invoice['invoice_type']) {
+                    'proforma'    => 'receivedAdvanceInvoice',
+                    'credit_note' => 'receivedCreditNotice',
+                    default       => 'receivedInvoice',
+                }
+                : match ($invoice['invoice_type']) {
+                    'proforma'     => 'issuedAdvanceInvoice',
+                    'credit_note'  => 'issuedCreditNotice',
+                    // „issuedTaxDocument" NENÍ v invoiceTypeType (XSD) — daňový doklad
+                    // k přijaté platbě exportujeme jako běžnou vydanou fakturu.
+                    'tax_document' => 'issuedInvoice',
+                    default        => 'issuedInvoice',
+                };
             $this->el($dom, $hdr, self::NS_INV, 'inv:invoiceType', $invType);
 
-            $num = $dom->createElementNS(self::NS_INV, 'inv:number');
-            $this->el($dom, $num, self::NS_TYP, 'typ:numberRequested', (string) ($invoice['varsymbol'] ?? ''));
-            $hdr->appendChild($num);
+            $vs = (string) ($invoice['varsymbol'] ?? '');
+            // Evidenční číslo dokladu (numberRequested) jen u VYDANÝCH — je to NAŠE číslo
+            // z naší číselné řady. U PŘIJATÉ faktury je `varsymbol` číslo DODAVATELE; vnucovat
+            // ho do naší řady (navíc numberRequested má checkDuplicity=true → import spadne na
+            // duplicitě a u nečíselného čísla je to i špatný typ) je chyba — necháme Pohodu
+            // přidělit interní číslo z agendy přijatých faktur (element vynecháme).
+            if (!$isPurchase && $vs !== '') {
+                $num = $dom->createElementNS(self::NS_INV, 'inv:number');
+                $this->el($dom, $num, self::NS_TYP, 'typ:numberRequested', $vs);
+                $hdr->appendChild($num);
+            }
 
-            $this->el($dom, $hdr, self::NS_INV, 'inv:symVar', (string) ($invoice['varsymbol'] ?? ''));
+            // Variabilní symbol je platební pole Pohody → musí být číselný (max 10). `varsymbol`
+            // může nést nečíselné znaky (číslo dokladu dodavatele i naše řada `2026-00001`),
+            // proto normalizujeme stejně jako pro banku/QR. Prázdný symVar neemitujeme.
+            $symVar = VariableSymbolNormalizer::forPayment($vs);
+            if ($symVar !== '') {
+                $this->el($dom, $hdr, self::NS_INV, 'inv:symVar', $symVar);
+            }
             $this->el($dom, $hdr, self::NS_INV, 'inv:date', (string) $invoice['issue_date']);
             if (!empty($invoice['tax_date'])) {
                 $this->el($dom, $hdr, self::NS_INV, 'inv:dateTax', (string) $invoice['tax_date']);
@@ -160,11 +193,21 @@ final class PohodaXmlExporter
 
             // Klasifikace DPH (per-faktura — vezme se nejvyšší VAT rate z položek; mix se v praxi
             // řeší per-položka v invoiceItem). Pohoda vyžaduje strukturované dítě, ne prostý text.
-            $defaultVatClass = $this->classifyVat($invoice);
-            $classEl = $dom->createElementNS(self::NS_INV, 'inv:classificationVAT');
-            $this->el($dom, $classEl, self::NS_TYP, 'typ:ids', $defaultVatClass['ids']);
-            $this->el($dom, $classEl, self::NS_TYP, 'typ:classificationVATType', $defaultVatClass['type']);
-            $hdr->appendChild($classEl);
+            // `typ:ids` jsou členění DPH kódy Pohody (UDA5 = USKUTEČNĚNÉ/výstupní plnění) —
+            // platí pro VYDANÉ. U PŘIJATÝCH faktur (vstupní DPH / nárok na odpočet) by výstupní
+            // kód byl chybný směr a navíc je členění specifické pro konkrétní instalaci Pohody,
+            // proto kód neposíláme a necháme Pohodu doplnit správné členění pro agendu
+            // receivedInvoice; uvádíme jen typ (inland/nonSubsume).
+            // U zálohové/proforma faktury se classificationVAT dle schématu nepoužívá → vynecháme.
+            if (($invoice['invoice_type'] ?? '') !== 'proforma') {
+                $defaultVatClass = $this->classifyVat($invoice);
+                $classEl = $dom->createElementNS(self::NS_INV, 'inv:classificationVAT');
+                if (!$isPurchase) {
+                    $this->el($dom, $classEl, self::NS_TYP, 'typ:ids', $defaultVatClass['ids']);
+                }
+                $this->el($dom, $classEl, self::NS_TYP, 'typ:classificationVATType', $defaultVatClass['type']);
+                $hdr->appendChild($classEl);
+            }
 
             // Číslo objednávky / poznámka
             if (!empty($invoice['note_above_items'])) {
@@ -192,8 +235,10 @@ final class PohodaXmlExporter
                 $this->codeRef($dom, $hdr, 'inv:contract', (string) $cfg['pohoda_contract_code']);
             }
 
-            // Klient (partnerIdentity)
-            $client = $this->resolveClient($invoice);
+            // Obchodní partner (partnerIdentity): u vydané faktury odběratel (client),
+            // u přijaté faktury dodavatel (vendor ze supplier_snapshot). Pohoda do
+            // partnerIdentity vždy plní protistranu dokladu.
+            $client = $isPurchase ? $this->resolveSupplier($invoice) : $this->resolveClient($invoice);
             $partner = $dom->createElementNS(self::NS_INV, 'inv:partnerIdentity');
             $address = $dom->createElementNS(self::NS_TYP, 'typ:address');
             $this->el($dom, $address, self::NS_TYP, 'typ:company', (string) ($client['company_name'] ?? ''));
@@ -230,7 +275,9 @@ final class PohodaXmlExporter
             $detail = $dom->createElementNS(self::NS_INV, 'inv:invoiceDetail');
             foreach ($invoice['items'] ?? [] as $item) {
                 $row = $dom->createElementNS(self::NS_INV, 'inv:invoiceItem');
-                $this->el($dom, $row, self::NS_INV, 'inv:text', (string) ($item['description'] ?? ''));
+                // Pohoda invoice.xsd omezuje text položky na 90 znaků (facet maxLength) —
+                // delší popisy ořízneme, jinak XSD validace spadne (mb_substr kvůli diakritice).
+                $this->el($dom, $row, self::NS_INV, 'inv:text', mb_substr((string) ($item['description'] ?? ''), 0, 90));
                 $this->el($dom, $row, self::NS_INV, 'inv:quantity', $this->fmt((float) $item['quantity']));
                 $this->el($dom, $row, self::NS_INV, 'inv:unit', (string) ($item['unit'] ?? 'ks'));
                 // CoefficientOfRefundables (1 = celé)
@@ -277,17 +324,23 @@ final class PohodaXmlExporter
             $totals = $invoice['totals'] ?? [];
             $bd = $invoice['vat_breakdown'] ?? [];
 
-            // homeCurrency = vždy v CZK. Pro CZK fakturu z totals/vat_breakdown,
-            // pro foreign fakturu z czk_recap (přepočet ČNB kurzem). Když czk_recap
-            // chybí (foreign faktura bez kurzu — legacy), padáme na 1:1 z totals
-            // (uživatel by měl doplnit kurz; export jinak nemá CZK účetní hodnoty).
+            // homeCurrency = VŽDY v CZK. Pro CZK fakturu z totals/vat_breakdown, pro
+            // foreign fakturu primárně z czk_recap (přepočet ČNB kurzem po sazbách).
+            // Když czk_recap chybí (typicky přijaté faktury), přepočteme buckety z měny
+            // dokladu na CZK kurzem — jinak by homeCurrency nesla cizoměnové částky
+            // označené jako CZK. (Pohoda u cizoměnového dokladu CZK stranu sice ignoruje
+            // a dopočítá z foreignCurrency × kurz, ale nesmí tam být chybná měna.)
             $homeCurrency = $dom->createElementNS(self::NS_INV, 'inv:homeCurrency');
-            $homeBuckets  = $isForeign && !empty($invoice['czk_recap'])
-                ? $this->bucketsFromCzkRecap($invoice['czk_recap'], $this->highBoundary($invoice))
-                : $this->bucketsFromBreakdown($bd, $this->highBoundary($invoice));
-            $homeTotal = $isForeign && !empty($invoice['czk_recap'])
-                ? (float) $invoice['czk_recap']['total_with_vat_czk']
-                : (float) ($totals['with_vat'] ?? 0);
+            if ($isForeign && !empty($invoice['czk_recap'])) {
+                $homeBuckets = $this->bucketsFromCzkRecap($invoice['czk_recap'], $this->highBoundary($invoice));
+            } else {
+                $homeBuckets = $this->bucketsFromBreakdown($bd, $this->highBoundary($invoice));
+                if ($isForeign && $exchangeRate > 0.0) {
+                    foreach ($homeBuckets as $k => $v) {
+                        $homeBuckets[$k] = $v * $exchangeRate;
+                    }
+                }
+            }
 
             $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:priceNone',    $this->fmt($homeBuckets['none']));
             $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:priceLow',     $this->fmt($homeBuckets['low']));
@@ -299,31 +352,32 @@ final class PohodaXmlExporter
             $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:price3', '0.00');
             $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:price3VAT', '0.00');
             $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:price3Sum', '0.00');
-            $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:round',
-                ($r = (float) ($totals['rounding'] ?? 0)) !== 0.0 && !$isForeign ? $this->fmt($r) : '0.00');
-            $this->el($dom, $homeCurrency, self::NS_TYP, 'typ:priceSum', $this->fmt($homeTotal));
+            // `round` je typ:typeRound = xsd:choice → musí obalit <typ:priceRound>, ne nést
+            // prostou hodnotu. Emitujeme jen u CZK dokladu s reálným zaokrouhlením.
+            // POZOR: `typeCurrencyHome` NEMÁ `priceSum` — celkovou částku si Pohoda dopočítá
+            // z bucketů + round (dřív tu byl neplatný <typ:priceSum>).
+            $rounding = (float) ($totals['rounding'] ?? 0);
+            if (!$isForeign && $rounding !== 0.0) {
+                $roundWrap = $dom->createElementNS(self::NS_TYP, 'typ:round');
+                $this->el($dom, $roundWrap, self::NS_TYP, 'typ:priceRound', $this->fmt($rounding));
+                $homeCurrency->appendChild($roundWrap);
+            }
             $sum->appendChild($homeCurrency);
 
             // foreignCurrency — jen pro non-CZK faktury. Obsahuje měnu, kurz, množství
             // a totals v cizí měně. Pohoda po importu má jak CZK účetní hodnoty
             // (homeCurrency), tak originál v cizí měně (foreignCurrency).
             if ($isForeign) {
+                // `typeCurrencyForeign` (XSD) povoluje JEN: currency, rate, amount, priceSum, round.
+                // Per-sazbové buckety (priceNone/priceLow/…) sem NEpatří — ty jsou pouze v homeCurrency
+                // (CZK účetní hodnoty). Cizoměnový doklad nese jen celkovou částku v priceSum.
                 $foreign = $dom->createElementNS(self::NS_INV, 'inv:foreignCurrency');
                 $cur = $dom->createElementNS(self::NS_TYP, 'typ:currency');
                 $this->el($dom, $cur, self::NS_TYP, 'typ:ids', $invCurrency);
                 $foreign->appendChild($cur);
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:rate', number_format($exchangeRate, 6, '.', ''));
                 $this->el($dom, $foreign, self::NS_TYP, 'typ:amount', '1');
-
-                $fb = $this->bucketsFromBreakdown($bd, $this->highBoundary($invoice));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceNone',    $this->fmt($fb['none']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceLow',     $this->fmt($fb['low']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceLowVAT',  $this->fmt($fb['lowVat']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceLowSum',  $this->fmt($fb['low'] + $fb['lowVat']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceHigh',    $this->fmt($fb['high']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceHighVAT', $this->fmt($fb['highVat']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceHighSum', $this->fmt($fb['high'] + $fb['highVat']));
-                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceSum',     $this->fmt((float) ($totals['with_vat'] ?? 0)));
+                $this->el($dom, $foreign, self::NS_TYP, 'typ:priceSum', $this->fmt((float) ($totals['with_vat'] ?? 0)));
                 $sum->appendChild($foreign);
             }
 
@@ -373,6 +427,11 @@ final class PohodaXmlExporter
     private function resolveClient(array $invoice): array
     {
         return $this->dataResolver->client($invoice);
+    }
+
+    private function resolveSupplier(array $invoice): array
+    {
+        return $this->dataResolver->supplier($invoice);
     }
 
     private function fmt(float $value): string

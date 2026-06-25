@@ -17,7 +17,7 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 |---|---|
 | ☐ | Checkbox pro hromadnou akci |
 | Číslo | Variabilní symbol — např. `2605001` (formát YYMMNNN) |
-| Typ | 🟦 Faktura / 🟨 Zálohová / 🟥 Dobropis / ⚫ Storno |
+| Typ | 🟦 Faktura / 🟨 Zálohová / 🟥 Dobropis / ⚫ Storno / 🧾 Daňový doklad k platbě |
 | Klient | Jméno klienta (klikatelné) |
 | Vystaveno | Datum vystavení |
 | Splatnost | Datum splatnosti — červeně pokud po dni a faktura není zaplacená |
@@ -46,6 +46,8 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 | 📧 **Odesláno** (`sent`) | E-mail s PDF odešel klientovi | Zaplatit, upomínka |
 | ⏰ **Upomínka** (`reminded`) | Upomínkový e-mail odešel | Zaplatit, další upomínka (s cooldownem), dobropis |
 | 💰 **Zaplaceno** (`paid`) | Platba přišla a byla spárována | (terminální) |
+| 🟠 **Částečně uhrazeno** | Přišla jen část peněz (evidence plateb) — zbytek je dál pohledávka | Doplatit, částečná úhrada, upomínka |
+| 🟣 **Přeplaceno** | Evidované platby převyšují částku k úhradě | (řeší se ručně — vratka / dobropis) |
 | ⚫ **Storno** (`cancellation`) | Interní storno — faktura ztratila platnost | (terminální) |
 | 🔄 **Dobropis** (`credit_note`) | Vytvořen opravný daňový doklad | (terminální) |
 
@@ -112,7 +114,8 @@ Funguje fulltext česky i anglicky.
   drobné chyby (špatná částka, chybějící popis), pošlou se klientovi všechny
   najednou.
 - **„Označit zaplacené" je manuální fallback** — primárně se faktury označují
-  zaplacenými automaticky při importu bankovního výpisu (viz [23. Banka](23_Banka.md)).
+  zaplacenými automaticky při importu bankovního výpisu (viz [24. Banka](24_Banka.md)).
+  Částečné platby a evidenci úhrad popisuje [§ 11.1.2](11_Faktura_PDF.md).
 - **Filtr „Po splatnosti"** je nejrychlejší způsob, jak zjistit, kdo dluží —
   klik na řádek a hned máš tlačítko **Upomínka**.
 - **Klik na číslo faktury** otevře [Detail faktury](11_Faktura_PDF.md).

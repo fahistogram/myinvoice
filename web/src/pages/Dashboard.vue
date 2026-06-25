@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useSupplierStore } from '@/stores/supplier'
 
 const { t } = useI18n()
 import { dashboardApi, type DashboardSummary } from '@/api/dashboard'
@@ -15,13 +16,23 @@ import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
+const supplierStore = useSupplierStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
+
+// Onboarding gate (#151): bez dodavatele je dashboard prázdný a všechny zakládací akce
+// padají → místo dat ukážeme výzvu k vytvoření prvního dodavatele.
+const hasSupplier = computed(() => supplierStore.hasSupplier)
 
 const summary = ref<DashboardSummary | null>(null)
 const loading = ref(true)
 const error = ref('')
 
 async function loadSummary() {
+  // Žádný dodavatel → nenačítej summary (vrátilo by jen prázdná data), ukaž gate.
+  if (!hasSupplier.value) {
+    loading.value = false
+    return
+  }
   try {
     summary.value = await dashboardApi.summary()
   } catch (e: any) {
@@ -111,6 +122,23 @@ const hasCostsData = computed(() => (summary.value?.purchase_costs_by_month ?? [
 
 <template>
   <div>
+    <!-- Onboarding gate (#151): dodavatel přeskočen v setupu → bez něj nelze nic založit -->
+    <div v-if="!hasSupplier" class="max-w-2xl mx-auto bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center">
+      <div class="w-14 h-14 bg-primary-100 rounded-full mx-auto mb-4 flex items-center justify-center">
+        <svg class="w-7 h-7 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v5m-4 0h4"/>
+        </svg>
+      </div>
+      <h2 class="text-xl font-semibold mb-2">{{ t('dashboard.no_supplier.title') }}</h2>
+      <p class="text-neutral-500 mb-6">{{ t('dashboard.no_supplier.intro') }}</p>
+      <RouterLink v-if="isAdmin" to="/admin/codebooks?create=supplier"
+        class="px-5 h-10 inline-flex items-center bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+        {{ t('dashboard.no_supplier.cta_admin') }}
+      </RouterLink>
+      <p v-else class="text-sm text-neutral-600">{{ t('dashboard.no_supplier.non_admin') }}</p>
+    </div>
+
+    <template v-else>
     <div v-if="loading" class="text-center text-neutral-500 py-12">{{ t('dashboard.loading_data') }}</div>
 
     <div v-else-if="error" class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">
@@ -592,6 +620,7 @@ const hasCostsData = computed(() => (summary.value?.purchase_costs_by_month ?? [
       </div>
       </div>
     </div>
+    </template>
 
     <!-- Výkaz práce modal — otevřený z tlačítka „Výkaz" na kartě konceptu. -->
     <WorkReportModal v-if="wrModalInvoiceId > 0"
