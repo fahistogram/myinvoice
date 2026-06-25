@@ -10,6 +10,7 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Invoice\InvoicePaymentService;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Stats\StatsRecomputer;
@@ -35,6 +36,7 @@ final class UnmarkPaidAction
         private readonly IpMatcher $ipMatcher,
         private readonly StatsRecomputer $stats,
         private readonly InvoicePdfRenderer $pdf,
+        private readonly InvoicePaymentService $payments,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -71,9 +73,33 @@ final class UnmarkPaidAction
             );
         }
 
-        // Revert na předchozí stav: 'sent' pokud byla odeslaná (sent_at != NULL), jinak 'issued'.
-        // Reminder stav (reminded) se nezachovává — uživatel může upomínku poslat znovu.
+        // Guard #2: k některé z plateb existuje (nestornovaný) daňový doklad k přijaté
+        // platbě — smazání platby by rozbilo daňovou stopu. Nejdřív doklad smazat/stornovat.
+        $tdStmt = $this->db->pdo()->prepare(
+            "SELECT COUNT(*)
+               FROM invoice_payments p
+               JOIN invoices td ON td.id = p.tax_document_invoice_id
+              WHERE p.invoice_id = ? AND td.status <> 'cancelled'"
+        );
+        $tdStmt->execute([$id]);
+        if ((int) $tdStmt->fetchColumn() > 0) {
+            return Json::error(
+                $response,
+                'has_tax_document',
+                'K platbám faktury existuje daňový doklad k přijaté platbě. Nejdřív ho smaž (koncept) nebo stornuj.',
+                409,
+            );
+        }
+
         $previousPaidAt = (string) ($invoice['paid_at'] ?? '');
+
+        // Smaže evidované platby + přepočítá paid_total; u dokladu s kladnou částkou
+        // k úhradě tím service rovnou revertuje status (sent/issued) a vyčistí paid_at.
+        $this->payments->deleteAllForInvoice($id);
+
+        // Finální doklad krytý zálohou (amount_to_pay <= 0, žádné platby) service
+        // nerevertuje — bookkeeping flip vrátíme přímo (původní chování).
+        // Reminder stav (reminded) se nezachovává — uživatel může upomínku poslat znovu.
         $this->db->pdo()->prepare(
             "UPDATE invoices
                 SET status  = IF(sent_at IS NOT NULL, 'sent', 'issued'),

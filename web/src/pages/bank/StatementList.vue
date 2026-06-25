@@ -18,6 +18,8 @@ const statements = ref<BankStatement[]>([])
 const loading = ref(false)
 const uploading = ref(false)
 const scanning = ref(false)
+// Tlačítko „Skenovat adresář" jen když je v cfg.php nastavený bank_import.scan_root.
+const scanConfigured = ref(false)
 const lastResult = ref<ImportResult | null>(null)
 const error = ref('')
 
@@ -48,6 +50,7 @@ async function load() {
     statements.value = r.items
     total.value = r.total
     perPage.value = r.limit
+    scanConfigured.value = r.scan_configured
   } finally { loading.value = false }
 }
 function goToPage(p: number) {
@@ -55,6 +58,13 @@ function goToPage(p: number) {
   if (np !== page.value) { page.value = np; load() }
 }
 onMounted(load)
+
+// E-mailová avíza jsou měsíční agregát (statement_date = 1. den měsíce), proto
+// u nich nedává smysl ukazovat konkrétní datum — zobrazíme název měsíce
+// (sdílený `monthLabel` níže přijímá 'YYYY-MM').
+function statementDateLabel(s: BankStatement): string {
+  return s.source === 'email_notice' ? monthLabel((s.statement_date ?? '').slice(0, 7)) : formatDate(s.statement_date)
+}
 
 // Seskupení výpisů po měsících (YYYY-MM z statement_date), zachová pořadí ze
 // serveru. Tabulka i karty se opticky rozdělí měsíčními hlavičkami.
@@ -150,7 +160,7 @@ async function onFileSelected(e: Event) {
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('bank.subtitle') }}</p>
       </div>
       <div class="flex items-center gap-2">
-        <button v-if="authStore.canWrite" @click="onScan" :disabled="scanning"
+        <button v-if="authStore.canWrite && scanConfigured" @click="onScan" :disabled="scanning"
           class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-primary-500/40 text-primary-700 hover:bg-primary-50 disabled:opacity-50 text-sm font-medium rounded-md">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/></svg>
           {{ scanning ? '…' : t('bank.scan_folder') }}
@@ -203,7 +213,16 @@ async function onFileSelected(e: Event) {
             </td>
           </tr>
           <tr v-for="s in group.items" :key="s.id" @click="router.push(`/bank/${s.id}`)" class="cursor-pointer hover:bg-neutral-50">
-            <td class="px-3 py-2 text-xs">{{ formatDate(s.statement_date) }}<span v-if="s.statement_number" class="text-neutral-400 ml-1">#{{ s.statement_number }}</span></td>
+            <td class="px-3 py-2 text-xs">
+              <span class="inline-flex items-center gap-1.5">
+                <span>{{ statementDateLabel(s) }}</span>
+                <span v-if="s.source === 'email_notice'" :title="t('bank.email_notice_hint')"
+                  class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
+                  {{ t('bank.email_notice_badge') }}
+                </span>
+                <span v-if="s.statement_number" class="text-neutral-400">#{{ s.statement_number }}</span>
+              </span>
+            </td>
             <td class="px-3 py-2 text-xs">
               <div class="font-mono">{{ s.account_number }}</div>
               <div v-if="s.account_label" class="text-neutral-400 mt-0.5">{{ s.account_label }}</div>
@@ -258,8 +277,12 @@ async function onFileSelected(e: Event) {
           @click="router.push(`/bank/${s.id}`)"
           class="cursor-pointer hover:bg-neutral-50 px-3 py-3">
           <div class="flex items-baseline justify-between gap-2">
-            <div class="font-medium text-neutral-900 flex items-center gap-1.5">
-              {{ formatDate(s.statement_date) }}<span v-if="s.statement_number" class="text-neutral-400 ml-1">#{{ s.statement_number }}</span>
+            <div class="font-medium text-neutral-900 flex items-center gap-1.5 flex-wrap">
+              {{ statementDateLabel(s) }}<span v-if="s.statement_number" class="text-neutral-400 ml-1">#{{ s.statement_number }}</span>
+              <span v-if="s.source === 'email_notice'" :title="t('bank.email_notice_hint')"
+                class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
+                {{ t('bank.email_notice_badge') }}
+              </span>
               <span v-if="s.currency" class="text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium">{{ s.currency }}</span>
             </div>
             <div class="font-mono text-sm font-semibold whitespace-nowrap">{{ formatMoney(s.curr_balance, s.currency ?? 'CZK') }}</div>

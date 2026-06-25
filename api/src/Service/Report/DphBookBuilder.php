@@ -175,11 +175,20 @@ final class DphBookBuilder
             $s['subtotal_base']  = $sb;
             $s['subtotal_vat']   = $sv;
             $s['subtotal_total'] = $st;
-            // Do souhrnů započítáváme jen non-secondary řádky aby se dovoz služby
-            // nezdvojoval. (Sekce 43/47 jsou secondary mirror sekce 12/40-45.)
-            // Bucket dle prefixu klíče (NE dle sectionOrder — ten je jen pořadí zobrazení).
-            if (empty($s['is_secondary'])) {
-                $bucket = str_starts_with($s['key'], '36.') ? 'issued' : 'received';
+            // Bilance DPH = daň na výstupu − odpočet na vstupu. Bucket dle ČÍSLA ŘÁDKU
+            // DPHDP3, ne dle prefixu sekce ani is_secondary:
+            //   - ř. < 40  = výstup (prodej ř.1/2 I samovyměření reverse charge ř.3–13),
+            //   - ř. ≥ 40  = odpočet na vstupu (ř.40/41/42 + zrcadlo ř.43),
+            //   - ř. 47    = jen doplňující údaj o hodnotě majetku → mimo bilanci.
+            // Tím se reverse charge ve „Výsledné DPH" SPRÁVNĚ vyruší (samovyměřená daň
+            // ř.3–13 na výstupu +X, zrcadlový odpočet ř.43 −X = 0) a Kniha sedí s DPH
+            // přiznáním. Dřív padal RC primární řádek (43.0xx) do `received`, čímž se
+            // bilance o samovyměřenou daň podhodnocovala.
+            $lineNo = (int) $s['dphdp3_line'];
+            if ($lineNo !== 47) {
+                $bucket = $lineNo > 0
+                    ? ($lineNo < 40 ? 'issued' : 'received')
+                    : (str_starts_with($s['key'], '36.') ? 'issued' : 'received');
                 ${$bucket}['base']  += $sb;
                 ${$bucket}['vat']   += $sv;
                 ${$bucket}['total'] += $st;
@@ -333,6 +342,7 @@ final class DphBookBuilder
             // Pod 43 jsou primary řádky RC/dovozových párů (ř.3/7/10/12 …) i mirror
             // odpočet ř.43 — popis dle řádku, stejně jako POHODA u svého členění.
             $what = match ($line) {
+                '5', '6'   => 'Přijetí služby z EU - sazba',
                 '12', '13' => 'Z dovozu služby - sazba',
                 '3', '4'   => 'Pořízení z EU',
                 '7'        => 'Dovoz zboží ze 3. země',

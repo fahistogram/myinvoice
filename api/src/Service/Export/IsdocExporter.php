@@ -132,9 +132,10 @@ final class IsdocExporter
         foreach ($invoices as $inv) {
             $vs = $inv['varsymbol'] ?? ('draft-' . $inv['id']);
             $type = match ($inv['invoice_type']) {
-                'proforma'    => 'Proforma',
-                'credit_note' => 'Dobropis',
-                default       => 'Faktura',
+                'proforma'     => 'Proforma',
+                'credit_note'  => 'Dobropis',
+                'tax_document' => 'DanovyDoklad',
+                default        => 'Faktura',
             };
             $zip->addFromString("$type-{$vs}.isdoc", $this->buildXml($inv));
         }
@@ -178,6 +179,7 @@ final class IsdocExporter
             'proforma'     => 4,  // zálohová faktura = nedaňový zálohový list
             'credit_note'  => 2,  // opravný daňový doklad (dobropis)
             'cancellation' => 2,  // storno řešíme jako dobropis
+            'tax_document' => 5,  // daňový zálohový list = daňový doklad k přijaté platbě
             default        => 1,  // faktura — daňový doklad
         };
         $this->el($dom, $root, 'DocumentType', (string) $docType);

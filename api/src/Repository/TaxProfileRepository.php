@@ -93,7 +93,7 @@ final class TaxProfileRepository
               WHERE i.supplier_id = ?
                 AND i.status = 'paid'
                 AND i.paid_at IS NOT NULL
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND COALESCE(i.income_tax_exempt, 0) = 0
                 AND YEAR(i.paid_at) = ?"
         );
@@ -117,7 +117,7 @@ final class TaxProfileRepository
               WHERE i.supplier_id = ?
                 AND i.status = 'paid'
                 AND i.paid_at IS NOT NULL
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND COALESCE(i.income_tax_exempt, 0) = 1
                 AND YEAR(i.paid_at) = ?"
         );
@@ -140,7 +140,7 @@ final class TaxProfileRepository
               WHERE i.supplier_id = ?
                 AND i.status = 'paid'
                 AND i.paid_at IS NOT NULL
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND COALESCE(i.income_tax_exempt, 0) = 0
                 AND YEAR(i.paid_at) = ?
            GROUP BY MONTH(i.paid_at)"

@@ -7,7 +7,14 @@ namespace MyInvoice\Service\Import;
 /**
  * Parser Pohoda XML data package — extrahuje faktury do normalizovaného array.
  *
- * Vrací {supplier_ic, invoices[]} — supplier IČO je z dataPack@ico, faktury z dataPackItem.
+ * Vrací {supplier_ic, invoices[]} — supplier IČO je z root@ico, faktury z dataPackItem.
+ *
+ * Podporuje dva tvary souboru:
+ *   1. import data package — root `<dat:dataPack>`, faktura element `<inv:invoice>`
+ *      (to, co PohodaXmlExporter zapisuje).
+ *   2. export response package — root `<rsp:responsePack>` s `<lst:listInvoice>` a
+ *      fakturami v `<lst:invoice>` (uživatelský export z Pohody, např. VydFaktury.xml).
+ *      Hlavička/detail/summary uvnitř jsou v `inv:` namespace stejně jako u importu.
  *
  * Mapuje zpět to, co PohodaXmlExporter zapisuje. Robustní vůči chybějícím elementům.
  *
@@ -32,6 +39,7 @@ final class PohodaXmlParser
     private const NS_DAT = 'http://www.stormware.cz/schema/version_2/data.xsd';
     private const NS_INV = 'http://www.stormware.cz/schema/version_2/invoice.xsd';
     private const NS_TYP = 'http://www.stormware.cz/schema/version_2/type.xsd';
+    private const NS_LST = 'http://www.stormware.cz/schema/version_2/list.xsd';
 
     /**
      * @return array{supplier_ic:?string, invoices:list<array<string,mixed>>}
@@ -54,8 +62,10 @@ final class PohodaXmlParser
         }
 
         $root = $dom->documentElement;
-        if ($root->localName !== 'dataPack') {
-            throw new \RuntimeException('Není Pohoda XML — root není dataPack.');
+        // dataPack = import balík (faktura <inv:invoice>); responsePack = export
+        // z Pohody (faktury v <lst:invoice>). Oba nesou IČO v root@ico.
+        if ($root->localName !== 'dataPack' && $root->localName !== 'responsePack') {
+            throw new \RuntimeException('Není Pohoda XML — root není dataPack ani responsePack.');
         }
 
         $supplierIc = $root->getAttribute('ico') ?: null;
@@ -64,10 +74,13 @@ final class PohodaXmlParser
         $xpath->registerNamespace('dat', self::NS_DAT);
         $xpath->registerNamespace('inv', self::NS_INV);
         $xpath->registerNamespace('typ', self::NS_TYP);
+        $xpath->registerNamespace('lst', self::NS_LST);
 
         $invoices = [];
+        // `inv:invoice` (dataPack) i `lst:invoice` (responsePack/listInvoice) — jen
+        // jeden z nich kdy matchne; vnitřní hlavička je v obou shodně `inv:`.
         /** @var \DOMElement $invEl */
-        foreach ($xpath->query('//inv:invoice') ?: [] as $invEl) {
+        foreach ($xpath->query('//inv:invoice | //lst:invoice') ?: [] as $invEl) {
             try {
                 $invoices[] = $this->parseInvoice($invEl, $xpath);
             } catch (\Throwable $e) {

@@ -26,15 +26,23 @@ final class CreateClientAction
 
     public function __invoke(Request $request, Response $response): Response
     {
+        // Nejdřív supplier kontext: bez dodavatele jsou currencies prázdné a klientský
+        // formulář by spadl na matoucí „Validace selhala" (currency_default_id=0). Vrať
+        // jasnou, akční hlášku místo toho (#151). FE onboarding gate sem uživatele nepustí.
+        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        if ($supplierId === 0) {
+            return Json::error(
+                $response,
+                'no_supplier',
+                'Nelze vytvořit klienta — nejdříve vytvořte dodavatele (Nastavení → Číselníky → Dodavatelé).',
+                400,
+            );
+        }
+
         $body = (array) ($request->getParsedBody() ?? []);
         $errors = Validation::client($body);
         if (!empty($errors)) {
             return Json::error($response, 'validation_failed', 'Validace selhala', 400, ['fields' => $errors]);
-        }
-
-        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
-        if ($supplierId === 0) {
-            return Json::error($response, 'no_supplier', 'Nelze vytvořit klienta — chybí supplier kontext.', 400);
         }
         try {
             $id = $this->repo->create($body, $supplierId);

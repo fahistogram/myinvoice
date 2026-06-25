@@ -15,7 +15,7 @@ final class InvoiceValidation
         $err = [];
 
         $type = (string) ($data['invoice_type'] ?? 'invoice');
-        if (!in_array($type, ['invoice', 'proforma', 'credit_note', 'cancellation'], true)) {
+        if (!in_array($type, ['invoice', 'proforma', 'credit_note', 'cancellation', 'tax_document'], true)) {
             $err['invoice_type'][] = 'Neplatný typ dokladu';
         }
 

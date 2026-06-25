@@ -14,7 +14,8 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 /**
  * POST /api/auth/setup-sample
  *
- * Vygeneruje testovací sample data (5 klientů, 8 zakázek, 20 faktur, 4 dobropisy)
+ * Vygeneruje testovací sample data (5 klientů, 8 zakázek, 20 faktur, 4 dobropisy,
+ * 4 dodavatelé, 12 přijatých faktur, 2 pravidelné fakturace, kniha jízd: 1 auto/15 jízd/6 tankování)
  * pro prvního admin usera a prvního supplieru.
  *
  * VYŽADUJE auth jako admin (po /setup je auto-login). Eliminuje veřejné okno,

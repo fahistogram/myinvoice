@@ -1,0 +1,100 @@
+{
+  "version": "3",
+  "templates": [
+    {
+      "type": 3,
+      "title": "MyInvoice.cz",
+      "name": "myinvoice",
+      "description": "Český fakturační systém (PHP 8.5 + Vue 3 + MariaDB). Vydané i přijaté faktury, DPH/kontrolní/souhrnné hlášení, daň z příjmů, banka, upomínky, AI extrakce dokladů, multi-supplier. Self-hosted, jeden veřejný image z GHCR.",
+      "note": "Vyplň povinné proměnné (DB_PASSWORD, DB_ROOT_PASSWORD, MYINVOICE_PEPPER) — hesla vygeneruj přes <code>openssl rand -base64 28</code> a pepper/secret přes <code>openssl rand -base64 32</code>. Po nasazení otevři http://&lt;host&gt;:&lt;APP_PORT&gt; a doběhne setup wizard. Migrace DB se spustí automaticky při startu. Pro produkci za HTTPS reverse proxy nastav navíc MYINVOICE_APP_URL, MYINVOICE_SESSION_COOKIE_SECURE=true a MYINVOICE_SESSION_COOKIE_NAME=__Host-myinvoice_session.",
+      "categories": ["Finance", "Invoicing", "Accounting"],
+      "platform": "linux",
+      "logo": "https://raw.githubusercontent.com/radekhulan/myinvoice/master/styles/logo.svg",
+      "repository": {
+        "url": "https://github.com/radekhulan/myinvoice",
+        "stackfile": "docker-compose.portainer.yml"
+      },
+      "env": [
+        {
+          "name": "DB_PASSWORD",
+          "label": "DB heslo aplikace (povinné)",
+          "description": "Heslo aplikačního MariaDB uživatele. Vygeneruj: openssl rand -base64 28"
+        },
+        {
+          "name": "DB_ROOT_PASSWORD",
+          "label": "DB root heslo (povinné)",
+          "description": "Root heslo MariaDB. Vygeneruj: openssl rand -base64 28"
+        },
+        {
+          "name": "MYINVOICE_PEPPER",
+          "label": "App pepper (povinné)",
+          "description": "Sůl k hashování hesel, 32B base64. Vygeneruj: openssl rand -base64 32"
+        },
+        {
+          "name": "MYINVOICE_SECRET_KEY",
+          "label": "Secret key pro 2FA (doporučené)",
+          "description": "32B base64 pro šifrování TOTP secretů. Prázdné = fallback z pepperu. Vygeneruj: openssl rand -base64 32"
+        },
+        {
+          "name": "APP_PORT",
+          "label": "Host port",
+          "description": "Port na hostiteli → http://<host>:<port>",
+          "default": "8080"
+        },
+        {
+          "name": "MYINVOICE_APP_URL",
+          "label": "Veřejná URL (za HTTPS proxy)",
+          "description": "Přesná veřejná URL do e-mailových odkazů, např. https://faktury.firma.cz. Nech prázdné pro přístup přes IP/port — wizard ji doplní sám.",
+          "default": ""
+        },
+        {
+          "name": "MYINVOICE_SESSION_COOKIE_SECURE",
+          "label": "Secure cookies (HTTPS)",
+          "description": "Nech false pro přístup přes http://. Za HTTPS reverse proxy přepni na true.",
+          "select": [
+            { "text": "false — přístup přes http:// (default)", "value": "false", "default": true },
+            { "text": "true — za HTTPS reverse proxy", "value": "true" }
+          ]
+        },
+        {
+          "name": "MYINVOICE_SESSION_COOKIE_NAME",
+          "label": "Název session cookie",
+          "description": "Pro http:// nech myinvoice_session. Za HTTPS proxy nastav __Host-myinvoice_session.",
+          "default": "myinvoice_session"
+        },
+        {
+          "name": "MYINVOICE_SMTP_HOST",
+          "label": "SMTP host (volitelné)",
+          "description": "Lze nechat prázdné a nastavit později v aplikaci (Nastavení).",
+          "default": ""
+        },
+        {
+          "name": "MYINVOICE_SMTP_PORT",
+          "label": "SMTP port (volitelné)",
+          "description": "25 plain | 465 SSL | 587 STARTTLS",
+          "default": ""
+        },
+        {
+          "name": "MYINVOICE_SMTP_USER",
+          "label": "SMTP uživatel (volitelné)",
+          "default": ""
+        },
+        {
+          "name": "MYINVOICE_SMTP_PASS",
+          "label": "SMTP heslo (volitelné)",
+          "default": ""
+        },
+        {
+          "name": "MYINVOICE_SMTP_FROM_EMAIL",
+          "label": "Odesílatel — e-mail (volitelné)",
+          "default": ""
+        },
+        {
+          "name": "TZ",
+          "label": "Časové pásmo",
+          "default": "Europe/Prague"
+        }
+      ]
+    }
+  ]
+}

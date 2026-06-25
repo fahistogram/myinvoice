@@ -13,6 +13,7 @@ declare(strict_types=1);
  *   - 8 zakázek (1-3 na klienta)
  *   - 20 vystavených faktur za poslední 2 měsíce
  *   - 4 dobropisy (k 4 z těch 20 faktur)
+ *   - kniha jízd: 1 firemní auto, 15 jízd, 6 tankování
  *
  * Vyžaduje již proběhlý `setup.php` (admin user + supplier v DB).
  *
@@ -51,12 +52,31 @@ if ($adminId === 0 || $supplierId === 0) {
     exit(1);
 }
 
+// Guard: sample data se generují JEN do prázdné DB (stejně jako HTTP setup wizard).
+// Bez něj druhý běh duplikoval klienty/doklady a padal na UNIQUE (cars.registration).
+$guard = $pdo->prepare(
+    'SELECT (SELECT COUNT(*) FROM clients          WHERE supplier_id = ?)
+          + (SELECT COUNT(*) FROM invoices         WHERE supplier_id = ?)
+          + (SELECT COUNT(*) FROM purchase_invoices WHERE supplier_id = ?)'
+);
+$guard->execute([$supplierId, $supplierId, $supplierId]);
+if ((int) $guard->fetchColumn() > 0) {
+    fwrite(STDERR, "[sample] Pro dodavatele #$supplierId už existují klienti nebo doklady —\n");
+    fwrite(STDERR, "         ukázková data lze generovat jen do prázdné DB.\n");
+    fwrite(STDERR, "         Nejdřív je odeber:\n");
+    fwrite(STDERR, "           php api/bin/reset.php --keep-users-supplier   (smaže jen byznys data)\n");
+    fwrite(STDERR, "           php api/bin/reset.php                         (úplný reset)\n");
+    fwrite(STDERR, "         nebo v aplikaci: Nastavení → Odebrat ukázková data.\n");
+    exit(1);
+}
+
 echo "================================================\n";
 echo "  MyInvoice.cz — SAMPLE TEST DATA\n";
 echo "================================================\n";
 echo "  Supplier:   #$supplierId\n";
 echo "  Admin:      #$adminId\n";
-echo "  Vygeneruje: 5 klientů, 8 zakázek, 20 faktur, 4 dobropisy, 2 pravidelné fakturace\n";
+echo "  Vygeneruje: 5 klientů, 8 zakázek, 20 faktur, 4 dobropisy, 2 pravidelné fakturace,\n";
+echo "              kniha jízd (1 auto, 15 jízd, 6 tankování)\n";
 echo "  Období:     poslední 2 měsíce\n";
 echo "================================================\n\n";
 
@@ -75,4 +95,5 @@ try {
 
 echo "================================================\n";
 printf("  HOTOVO. %d klientů, %d zakázek, %d faktur, %d dobropisů, %d pravidelných fakturací.\n", $r['clients'], $r['projects'], $r['invoices'], $r['credit_notes'], $r['recurring']);
+printf("          Kniha jízd: %d auto, %d jízd, %d tankování.\n", $r['cars'], $r['trips'], $r['fuelings']);
 echo "================================================\n";

@@ -36,7 +36,12 @@ final class UnlinkAdvanceAction
         }
 
         $supplierId = SupplierGuard::currentId($request);
-        $this->repo->unlinkAdvance($id, $supplierId);
+        try {
+            $this->repo->unlinkAdvance($id, $supplierId);
+        } catch (\RuntimeException $e) {
+            // Daňový doklad k přijaté platbě (#89) — strukturální vazba, nelze rozpojit.
+            return Json::error($response, 'unlink_refused', $e->getMessage(), 409);
+        }
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());

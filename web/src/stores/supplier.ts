@@ -22,6 +22,10 @@ export const useSupplierStore = defineStore('supplier', () => {
   const availableSuppliers = ref<SupplierBrief[]>([])
 
   const hasMultiple = computed(() => availableSuppliers.value.length > 1)
+  // False = onboarding přeskočil dodavatele (žádný supplier v DB). Bez dodavatele je
+  // celá aplikace nepoužitelná (data jsou supplier-scoped, currencies se sázejí per-supplier),
+  // proto router + dashboard navigují uživatele na vytvoření prvního dodavatele.
+  const hasSupplier = computed(() => availableSuppliers.value.length > 0)
   const currentSupplier = computed<SupplierBrief | null>(() =>
     availableSuppliers.value.find(s => s.id === currentSupplierId.value) ?? null,
   )
@@ -58,6 +62,7 @@ export const useSupplierStore = defineStore('supplier', () => {
     currentSupplierId,
     availableSuppliers,
     hasMultiple,
+    hasSupplier,
     currentSupplier,
     setSupplier,
     setAvailable,

@@ -168,9 +168,9 @@ final class UploadPurchaseInvoicePdfAction
                 ['existing_purchase_invoice_id' => $existingByHash]);
         }
 
-        // Finální storage
-        $diskName = substr($sha256, 0, 16) . '.pdf';
-        $finalPath = $tenantDir . DIRECTORY_SEPARATOR . $diskName;
+        // Finální storage — hash-shard layout (supplier-{id}/{2}/{16}.pdf), sdílené
+        // s PurchaseInvoicePdfArchiver. Shard adresář se vytvoří uvnitř ensureShardPath.
+        $finalPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::ensureShardPath($archiveDir, $supplierId, $sha256);
         if (!@rename($tmpPath, $finalPath)) {
             if (!@copy($tmpPath, $finalPath)) {
                 @unlink($tmpPath);
@@ -187,7 +187,7 @@ final class UploadPurchaseInvoicePdfAction
 
         // Persist metadata. Pdf_path je relativní k archive_storage root, aby byl portable
         // mezi instalacemi (pokud uživatel přesune storage, hodnota dál ukazuje na správný file).
-        $relativePath = 'supplier-' . $supplierId . '/' . $diskName;
+        $relativePath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha256);
         $originalName = $this->sanitizeFilename((string) $file->getClientFilename());
         // Obsah je teď PDF → sjednoť i příponu názvu (jinak by se „uctenka.jpg"
         // stáhla jako .jpg, ač je uvnitř PDF).

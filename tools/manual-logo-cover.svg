@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="MyInvoice">
+  <!-- Bílá knockout varianta loga PRO TITULNÍ STRANU manuálu (fialový full-bleed
+       podklad). Bez gradientového badge pozadí — to se na tmavě fialové titulce
+       zobrazí jako nesourodý světlejší obdélník (Chrome SVG renderuje věrně,
+       mPDF gradient tiše zahazuje → odtud rozdíl mezi renderery). Bílý wordmark
+       + bílý kroužek s fialovým „check" splyne s titulkou u OBOU rendererů. -->
+  <path d="M14 46 V18 L24 18 L32 34 L40 18 L50 18 V46 H43 V28 L34 44 L30 44 L21 28 V46 Z" fill="#FFFFFF"/>
+  <circle cx="50" cy="14" r="9" fill="#FFFFFF"/>
+  <path d="M46 14 L49 17 L54 11" fill="none" stroke="#4c1d95" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

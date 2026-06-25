@@ -216,6 +216,25 @@ JSON schema:
   "supply_nature": "goods"|"services"|"mixed"|null
 }
 
+DŮLEŽITÉ k DATŮM (`issue_date`, `tax_date`, `due_date`) — NEJDŮLEŽITĚJŠÍ, ČTI POZORNĚ:
+- Na faktuře jsou typicky TŘI různá data. Přiřaď je VÝHRADNĚ podle POPISKU u data,
+  NIKDY podle pořadí/pozice na stránce. Stejné datum se může opakovat u více popisků.
+- `issue_date` = DATUM VYSTAVENÍ dokladu. Popisky: „Datum vystavení", „Vystaveno",
+  „Datum vystavení dokladu", „Vystavená dňa" / „Dátum vystavenia" (SK), „Date of issue",
+  „Invoice date", „Issued".
+- `tax_date` = DUZP = DATUM USKUTEČNĚNÍ ZDANITELNÉHO PLNĚNÍ. Popisky: „Datum uskutečnění
+  zdanitelného plnění", „Datum uskut. zdaň. plnění", „Den uskut. zdaň. plnění", „DUZP",
+  „Datum zdanitelného plnění", „Datum plnění", „Datum dodání", „Datum dodávky" /
+  „Dátum dodania" (SK), „Date of supply", „Tax point". Pokud na dokladu NENÍ → vrať null
+  (systém pak použije datum vystavení). DUZP je daňově zásadní — přiřaď ho PŘESNĚ podle
+  tohoto popisku, nezaměňuj ho se splatností ani vystavením.
+- `due_date` = DATUM SPLATNOSTI. Popisky: „Datum splatnosti", „Splatnost", „Splatno do",
+  „Splatné do" (SK), „Zaplaťte do", „Úhrada do", „Due date", „Payment due", „Date due".
+- LOGICKÁ KONTROLA (uplatni po přiřazení): splatnost je platební lhůta = vystavení + N dní,
+  takže `due_date` je VŽDY ≥ `issue_date` (NIKDY dřív než vystavení). `tax_date` (DUZP) bývá
+  shodné nebo blízké datu vystavení. Pokud ti z přiřazení vyjde splatnost DŘÍVE než vystavení,
+  spletl ses v popiscích — přečti data znovu a oprav přiřazení.
+
 DŮLEŽITÉ k poli `document_kind`:
 - Pokud nadpis / hlavička PDF obsahuje "Opravný daňový doklad", "Dobropis",
   "Opravná faktura", "Credit note", "Storno faktura", "Storno doklad",
@@ -460,6 +479,97 @@ EOT;
             ];
         } catch (\Throwable $e) {
             $this->logger->error('Anthropic extractInvoice failed', ['supplier_id' => $supplierId, 'error' => $e->getMessage()]);
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Vytěží jednotlivá tankování z detailního výpisu benzínky (typicky str. 2 PDF),
+     * když interní parser nedokáže poskládat řádky. Univerzální fallback pro Axigon
+     * i jiné karetní společnosti.
+     *
+     * @return array{ok:bool, transactions?:list<array<string,mixed>>, error?:string, model?:string, usage?:array}
+     */
+    public function extractFuelTransactions(int $supplierId, string $pdfBytes, ?string $modelOverride = null): array
+    {
+        $creds = $this->getCredentials($supplierId);
+        if ($creds === null) {
+            return ['ok' => false, 'error' => 'Anthropic API key nenastaven pro tohoto suppliera.'];
+        }
+        if (strlen($pdfBytes) > self::MAX_PDF_BYTES) {
+            return ['ok' => false, 'error' => 'PDF přesahuje limit ' . self::MAX_PDF_BYTES . ' B.'];
+        }
+        if (!str_starts_with($pdfBytes, '%PDF')) {
+            return ['ok' => false, 'error' => 'Soubor není validní PDF.'];
+        }
+
+        $model = $modelOverride ?: $creds['default_model'];
+        $base64Pdf = base64_encode($pdfBytes);
+
+        $systemPrompt = <<<'EOT'
+Jsi expert na čtení detailních výpisů tankování z faktur palivových karet (Axigon, CCS, Shell, Eurowag…).
+Z PDF vytáhneš JEDNOTLIVÉ transakce (každé tankování / službu jako samostatný řádek) ve striktním JSON.
+
+Schema:
+{"transactions": [
+  {
+    "fueled_date": "YYYY-MM-DD",        // datum transakce
+    "fueled_time": "HH:MM" | null,      // čas, pokud je uveden
+    "fuel_type": "string",              // název zboží/paliva, např. "Prémiová nafta", "Natural 95", "Mytí vozu"
+    "quantity": number | null,          // množství (litry), null pokud neuvedeno
+    "unit_price": number | null,        // jednotková cena po slevě (za litr), null pokud neuvedeno
+    "amount_without_vat": number | null,// cena bez DPH za řádek
+    "amount_vat": number | null,        // DPH za řádek
+    "amount_with_vat": number,          // celkem s DPH za řádek (POVINNÉ)
+    "station": "string" | null,         // místo / síť, např. "Město, Ulice / Shell"
+    "receipt_number": "string" | null,  // číslo účtenky, pokud je
+    "is_fuel": true | false             // true = pohonná hmota; false = služba (mytí, plošná cena, poplatek, dálniční známka)
+  }
+]}
+
+Pravidla:
+- Vrať VŠECHNY řádky transakcí (palivo i služby), ne jen palivo. is_fuel rozliš podle názvu zboží.
+- Čísla bez měny a bez oddělovačů tisíců (z "1 234,56 Kč" vrať 1234.56).
+- Datum normalizuj na YYYY-MM-DD (z "27.05.2026" → "2026-05-27"; dvojmístný rok → 20xx).
+- NEvracej souhrnné/CELKEM řádky ani hlavičky karet — jen jednotlivé transakce.
+- Odpověz JEN samotným JSON, bez markdownu.
+EOT;
+
+        try {
+            ['code' => $code, 'body' => $body] = $this->postWithRetry([
+                'model'      => $model,
+                'max_tokens' => 8192,
+                'system'     => $systemPrompt,
+                'messages'   => [[
+                    'role'    => 'user',
+                    'content' => [
+                        ['type' => 'document', 'source' => ['type' => 'base64', 'media_type' => 'application/pdf', 'data' => $base64Pdf]],
+                        ['type' => 'text', 'text' => 'Vytáhni jednotlivé transakce tankování z detailního výpisu podle JSON schema. Odpověz JEN JSON.'],
+                    ],
+                ]],
+            ], $creds['api_key']);
+            if ($code !== 200) {
+                $msg = is_array($body) ? ($body['error']['message'] ?? 'HTTP ' . $code) : 'HTTP ' . $code;
+                return ['ok' => false, 'error' => $msg];
+            }
+            $text = (string) ($body['content'][0]['text'] ?? '');
+            if ($text === '') return ['ok' => false, 'error' => 'Prázdná odpověď od Claude'];
+            $text = preg_replace('/^```(?:json)?\s*|\s*```\s*$/m', '', $text);
+            $data = json_decode((string) $text, true);
+            if (!is_array($data) || !isset($data['transactions']) || !is_array($data['transactions'])) {
+                return ['ok' => false, 'error' => 'Claude vrátil invalid JSON: ' . substr((string) $text, 0, 200)];
+            }
+            $this->db->pdo()->prepare(
+                'UPDATE supplier SET anthropic_extractions_count = anthropic_extractions_count + 1 WHERE id = ?'
+            )->execute([$supplierId]);
+            return [
+                'ok'           => true,
+                'transactions' => array_values($data['transactions']),
+                'model'        => $body['model'] ?? $model,
+                'usage'        => $body['usage'] ?? null,
+            ];
+        } catch (\Throwable $e) {
+            $this->logger->error('Anthropic extractFuelTransactions failed', ['supplier_id' => $supplierId, 'error' => $e->getMessage()]);
             return ['ok' => false, 'error' => $e->getMessage()];
         }
     }

@@ -10,6 +10,7 @@ import {
 } from '@/api/recurring'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
+import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -189,6 +190,30 @@ async function removeAction() {
     toast.error(e?.response?.data?.error?.message || 'Error')
   } finally { busy.value = false }
 }
+
+// ─── Lišta akcí (sdílená ActionBar) ───
+// Primární = hlavní akce dle stavu: aktivní → „Spustit teď", pozastavené → „Obnovit".
+const recurringActions = computed<ActionItem[]>(() => {
+  const r = tpl.value
+  if (!r) return []
+  const w = auth.canWrite
+  const active = r.status === 'active'
+  const paused = r.status === 'paused'
+  return [
+    { key: 'run', label: t('recurring.actions.run_now'), icon: 'play', tier: 'primary', variant: 'primary',
+      show: active && w, disabled: busy.value, run: () => openRunNow('issue') },
+    { key: 'resume', label: t('recurring.actions.resume'), icon: 'play', tier: 'primary', variant: 'success',
+      show: paused && w, disabled: busy.value, run: resumeAction },
+    { key: 'edit', label: t('recurring.actions.edit'), icon: 'edit', tier: 'secondary', variant: 'success',
+      show: w, to: { name: 'recurring-edit', params: { id: r.id } } },
+    { key: 'run-draft', label: t('recurring.actions.run_now_draft'), icon: 'doc', tier: 'secondary', variant: 'primary',
+      show: active && w, disabled: busy.value, run: () => openRunNow('draft') },
+    { key: 'pause', label: t('recurring.actions.pause'), icon: 'pause', tier: 'overflow', variant: 'warning',
+      show: active && w, disabled: busy.value, run: pauseAction },
+    { key: 'delete', label: t('recurring.actions.delete'), icon: 'trash', tier: 'overflow', variant: 'danger',
+      show: w, disabled: busy.value, run: removeAction },
+  ]
+})
 </script>
 
 <template>
@@ -209,38 +234,7 @@ async function removeAction() {
             </span>
           </h1>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <RouterLink v-if="auth.canWrite" :to="{ name: 'recurring-edit', params: { id: tpl.id } }"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-            {{ t('recurring.actions.edit') }}
-          </RouterLink>
-          <button v-if="tpl.status === 'active' && auth.canWrite" @click="openRunNow('issue')" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-            {{ t('recurring.actions.run_now') }}
-          </button>
-          <button v-if="tpl.status === 'active' && auth.canWrite" @click="openRunNow('draft')" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
-            {{ t('recurring.actions.run_now_draft') }}
-          </button>
-          <button v-if="tpl.status === 'active' && auth.canWrite" @click="pauseAction" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-warning-500/40 rounded-md text-warning-700 hover:bg-warning-50">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 9v6m4-6v6m7-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-            {{ t('recurring.actions.pause') }}
-          </button>
-          <button v-if="tpl.status === 'paused' && auth.canWrite" @click="resumeAction" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-success-500/40 rounded-md text-success-700 hover:bg-success-50">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-            {{ t('recurring.actions.resume') }}
-          </button>
-          <button v-if="auth.canWrite" @click="removeAction" :disabled="busy"
-            class="cursor-pointer inline-flex items-center gap-1.5 px-3 h-9 text-sm border border-danger-500/50 rounded-md text-danger-500 hover:bg-danger-50">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
-            {{ t('recurring.actions.delete') }}
-          </button>
-        </div>
+        <ActionBar :actions="recurringActions" />
       </div>
 
       <!-- Banner: poslední generování (typicky cronem) selhalo -->

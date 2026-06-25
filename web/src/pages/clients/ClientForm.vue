@@ -102,6 +102,7 @@ const form = ref<ClientPayload>({
   // Default: customer. Override z ?role=vendor query (klik 'Nový dodavatel' v list).
   is_customer: route.query.role !== 'vendor',
   is_vendor: route.query.role === 'vendor',
+  is_fuel_station: false,
   auto_send_reminders: true,
   payment_due_default: null,
   payment_due_unit: null,
@@ -271,6 +272,7 @@ function sanitize(c: Client): Partial<ClientPayload> {
     is_vat_payer: c.is_vat_payer ?? true,
     is_customer: c.is_customer !== false,
     is_vendor:   c.is_vendor   === true,
+    is_fuel_station: c.is_fuel_station === true,
     auto_send_reminders: c.auto_send_reminders ?? true,
     payment_due_default: c.payment_due_default ?? null,
     payment_due_unit: c.payment_due_unit ?? null,
@@ -560,8 +562,8 @@ async function submit() {
           </div>
         </div>
 
-        <!-- E-mailové kontakty dle účelu (#86) — jen plný editor, ne embedded modal -->
-        <div v-if="!embedded" class="border border-neutral-200 rounded-md p-3 space-y-3">
+        <!-- E-mailové kontakty dle účelu (#86) — plný editor i embedded modal (faktura/new) -->
+        <div class="border border-neutral-200 rounded-md p-3 space-y-3">
           <div class="flex items-center justify-between gap-2 flex-wrap">
             <div>
               <div class="text-sm font-medium text-neutral-700">{{ t('client.email_contacts.title') }}</div>
@@ -747,6 +749,11 @@ async function submit() {
           <p v-if="!form.is_customer && !form.is_vendor" class="text-xs text-danger-600 mt-1">
             {{ t('client.roles_required') }}
           </p>
+          <label v-if="form.is_vendor" class="flex items-center gap-2 text-sm mt-3">
+            <input v-model="form.is_fuel_station" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+            <span>{{ t('client.is_fuel_station_label') }}</span>
+            <span class="text-xs text-neutral-400">{{ t('client.is_fuel_station_hint') }}</span>
+          </label>
         </div>
 
         <!-- Výchozí kategorie nákladu (jen pro dodavatele) -->

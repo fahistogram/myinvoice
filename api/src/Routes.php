@@ -66,6 +66,10 @@ use MyInvoice\Action\Invoice\ListInvoicesAction;
 use MyInvoice\Action\Invoice\PreviewVarsymbolAction;
 use MyInvoice\Action\Invoice\MarkPaidAction;
 use MyInvoice\Action\Invoice\UnmarkPaidAction;
+use MyInvoice\Action\Invoice\ListPaymentsAction;
+use MyInvoice\Action\Invoice\CreatePaymentAction;
+use MyInvoice\Action\Invoice\DeletePaymentAction;
+use MyInvoice\Action\Invoice\CreatePaymentTaxDocumentAction;
 use MyInvoice\Action\Invoice\BulkReissueAction;
 use MyInvoice\Action\Invoice\CloneInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\AdvanceCandidatesAction;
@@ -83,6 +87,7 @@ use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\GetPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\PaymentQrAction;
+use MyInvoice\Action\PurchaseInvoice\PaymentOrderAction;
 use MyInvoice\Action\PurchaseInvoice\ListPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\PurchaseInvoiceActivityAction;
 use MyInvoice\Action\PurchaseInvoice\ScanInboxAction;
@@ -113,7 +118,12 @@ use MyInvoice\Action\Invoice\SendTestReminderAction;
 use MyInvoice\Action\Invoice\UpdateInvoiceAction;
 use MyInvoice\Action\WorkReport\GetWorkReportAction;
 use MyInvoice\Action\WorkReport\SaveWorkReportAction;
+use MyInvoice\Action\WorkReport\SaveWorkReportMaterialsAction;
 use MyInvoice\Action\WorkReport\DeleteWorkReportAction;
+use MyInvoice\Action\WorkReport\WorkReportLinkAction;
+use MyInvoice\Action\WorkReport\PublicWorkReportGetAction;
+use MyInvoice\Action\WorkReport\PublicWorkReportRequestCodeAction;
+use MyInvoice\Action\WorkReport\PublicWorkReportVerifyAction;
 use MyInvoice\Action\Project\ArchiveProjectAction;
 use MyInvoice\Action\Project\CreateProjectAction;
 use MyInvoice\Action\Project\DeleteProjectAction;
@@ -165,6 +175,10 @@ final class Routes
         $app->post ('/api/admin/update/refresh', [UpdateAction::class, 'refresh']);
         $app->post ('/api/admin/update/trigger', [UpdateAction::class, 'trigger']);
         $app->post ('/api/admin/update/cancel',  [UpdateAction::class, 'cancel']);
+
+        // Admin — správa ukázkových (sample) dat (issue #162); admin-only přes RoleMiddleware
+        $app->get   ('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'status']);
+        $app->delete('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'delete']);
 
         $app->group('/api/auth', function ($g) {
             $g->get ('/setup-status',    SetupStatusAction::class);
@@ -237,6 +251,11 @@ final class Routes
         $app->post  ('/api/clients/{id:[0-9]+}/archive',   ArchiveClientAction::class);
         $app->post  ('/api/clients/{id:[0-9]+}/unarchive', ArchiveClientAction::class);
         $app->delete('/api/clients/{id:[0-9]+}',           DeleteClientAction::class);
+        // Sledovací odkaz na výkaz práce (klient — všechny otevřené výkazy klienta)
+        $app->get   ('/api/clients/{id:[0-9]+}/work-report-link',            [WorkReportLinkAction::class, 'getClient']);
+        $app->get   ('/api/clients/{id:[0-9]+}/work-report-link/recipients', [WorkReportLinkAction::class, 'recipientsClient']);
+        $app->post  ('/api/clients/{id:[0-9]+}/work-report-link/send',       [WorkReportLinkAction::class, 'sendClient']);
+        $app->delete('/api/clients/{id:[0-9]+}/work-report-link',            [WorkReportLinkAction::class, 'revokeClient']);
 
         // Projects
         $app->get   ('/api/clients/{client_id:[0-9]+}/projects', ListProjectsAction::class);
@@ -247,6 +266,11 @@ final class Routes
         $app->put   ('/api/projects/{id:[0-9]+}',    UpdateProjectAction::class);
         $app->post  ('/api/projects/{id:[0-9]+}/archive', ArchiveProjectAction::class);
         $app->delete('/api/projects/{id:[0-9]+}',         DeleteProjectAction::class);
+        // Sledovací odkaz na výkaz práce (zakázka — jen otevřené výkazy dané zakázky)
+        $app->get   ('/api/projects/{id:[0-9]+}/work-report-link',            [WorkReportLinkAction::class, 'getProject']);
+        $app->get   ('/api/projects/{id:[0-9]+}/work-report-link/recipients', [WorkReportLinkAction::class, 'recipientsProject']);
+        $app->post  ('/api/projects/{id:[0-9]+}/work-report-link/send',       [WorkReportLinkAction::class, 'sendProject']);
+        $app->delete('/api/projects/{id:[0-9]+}/work-report-link',            [WorkReportLinkAction::class, 'revokeProject']);
 
         // Invoices (M3 — draft + editor + sumace; vystavení/odeslání/PDF přijde v M4)
         $app->get    ('/api/invoices',              ListInvoicesAction::class);
@@ -260,6 +284,11 @@ final class Routes
         $app->post   ('/api/invoices/{id:[0-9]+}/issue',     IssueInvoiceAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/mark-paid', MarkPaidAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/unmark-paid', UnmarkPaidAction::class);
+        // Evidence plateb / částečné úhrady (#89) + daňový doklad k přijaté platbě (zálohy)
+        $app->get    ('/api/invoices/{id:[0-9]+}/payments', ListPaymentsAction::class);
+        $app->post   ('/api/invoices/{id:[0-9]+}/payments', CreatePaymentAction::class);
+        $app->delete ('/api/invoices/{id:[0-9]+}/payments/{paymentId:[0-9]+}', DeletePaymentAction::class);
+        $app->post   ('/api/invoices/{id:[0-9]+}/payments/{paymentId:[0-9]+}/tax-document', CreatePaymentTaxDocumentAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/cancel',    CancelInvoiceAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/pdf',       PdfAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/pdfs',      ListPdfsAction::class);
@@ -319,6 +348,16 @@ final class Routes
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/payment-qr',     PaymentQrAction::class);
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/payment-qr/extract-account', [PaymentQrAction::class, 'extractAccount']);
         $app->put    ('/api/purchase-invoices/{id:[0-9]+}/payment-account', [PaymentQrAction::class, 'updateAccount']);
+        // Platební příkazy (payment orders) — hromadný příkaz k úhradě z nezaplacených
+        // přijatých faktur do CSV/PDF/ABO(KPC). Literální „payment-orders" je nečíselné,
+        // takže nekoliduje s GET /{id:[0-9]+}. POST je write (RoleMiddleware dle metody).
+        $app->get    ('/api/purchase-invoices/payment-orders/candidates',          [PaymentOrderAction::class, 'candidates']);
+        $app->get    ('/api/purchase-invoices/payment-orders/verify-account',       [PaymentOrderAction::class, 'verifyAccount']);
+        $app->get    ('/api/purchase-invoices/payment-orders',                      [PaymentOrderAction::class, 'history']);
+        $app->post   ('/api/purchase-invoices/payment-orders',                      [PaymentOrderAction::class, 'create']);
+        $app->post   ('/api/purchase-invoices/payment-orders/mark',                 [PaymentOrderAction::class, 'markOrdered']);
+        $app->get    ('/api/purchase-invoices/payment-orders/{id:[0-9]+}/download', [PaymentOrderAction::class, 'download']);
+        $app->get    ('/api/purchase-invoices/payment-orders/{id:[0-9]+}',          [PaymentOrderAction::class, 'show']);
 
         // Pravidelné fakturace (recurring templates)
         $app->get    ('/api/recurring',                       [RecurringTemplateAction::class, 'list']);
@@ -334,6 +373,7 @@ final class Routes
         // Work reports — výkaz víceprací (M5)
         $app->get    ('/api/invoices/{id:[0-9]+}/work-report', GetWorkReportAction::class);
         $app->put    ('/api/invoices/{id:[0-9]+}/work-report', SaveWorkReportAction::class);
+        $app->put    ('/api/invoices/{id:[0-9]+}/work-report/materials', SaveWorkReportMaterialsAction::class);
         $app->delete ('/api/invoices/{id:[0-9]+}/work-report', DeleteWorkReportAction::class);
 
         // Schvalování výkazu zákazníkem (M8)
@@ -344,6 +384,11 @@ final class Routes
         // Public schvalovací endpointy (bez auth, jen token)
         $app->get    ('/api/public/approval/{token:[a-f0-9]{32,128}}',          PublicApprovalGetAction::class);
         $app->post   ('/api/public/approval/{token:[a-f0-9]{32,128}}/decide',   PublicApprovalDecideAction::class);
+
+        // Public náhled na výkaz práce (bez auth; token + e-mailová autorizace kódem)
+        $app->get    ('/api/public/work-report/{token:[a-f0-9]{32,128}}',              PublicWorkReportGetAction::class);
+        $app->post   ('/api/public/work-report/{token:[a-f0-9]{32,128}}/request-code', PublicWorkReportRequestCodeAction::class);
+        $app->post   ('/api/public/work-report/{token:[a-f0-9]{32,128}}/verify',       PublicWorkReportVerifyAction::class);
 
         // Dashboard
         $app->get ('/api/dashboard/summary',          SummaryAction::class);
@@ -540,6 +585,7 @@ final class Routes
         $app->delete('/api/bank-statements/{id:[0-9]+}',     [BankStatementAction::class, 'delete']);
         $app->post ('/api/bank-statements/{id:[0-9]+}/rematch', [BankStatementAction::class, 'rematch']);
         $app->get  ('/api/bank-transactions/{id:[0-9]+}/match-candidates', [BankStatementAction::class, 'matchCandidates']);
+        $app->get  ('/api/bank-transactions/{id:[0-9]+}/split-suggestions', [BankStatementAction::class, 'splitSuggestions']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/match',   [BankStatementAction::class, 'manualMatch']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/unmatch', [BankStatementAction::class, 'unmatch']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/ignore',  [BankStatementAction::class, 'ignore']);
@@ -587,6 +633,43 @@ final class Routes
         $app->get   ('/api/documents/{id:[0-9]+}/download',   [DocumentFileAction::class, 'download']);
         $app->get   ('/api/documents/{id:[0-9]+}/preview',    [DocumentFileAction::class, 'preview']);
         $app->get   ('/api/documents/{id:[0-9]+}/thumb',      [DocumentFileAction::class, 'thumb']);
+
+        // Kniha jízd (logbook) — auta, jízdy, tankování, kategorie cest
+        $app->get   ('/api/logbook/cars',                 [\MyInvoice\Action\Logbook\CarsAction::class, 'list']);
+        $app->post  ('/api/logbook/cars',                 [\MyInvoice\Action\Logbook\CarsAction::class, 'create']);
+        $app->get   ('/api/logbook/cars/{id:[0-9]+}',     [\MyInvoice\Action\Logbook\CarsAction::class, 'get']);
+        $app->put   ('/api/logbook/cars/{id:[0-9]+}',     [\MyInvoice\Action\Logbook\CarsAction::class, 'update']);
+        $app->delete('/api/logbook/cars/{id:[0-9]+}',     [\MyInvoice\Action\Logbook\CarsAction::class, 'delete']);
+
+        $app->get   ('/api/logbook/trip-categories',              [\MyInvoice\Action\Logbook\TripCategoriesAction::class, 'list']);
+        $app->post  ('/api/logbook/trip-categories',              [\MyInvoice\Action\Logbook\TripCategoriesAction::class, 'create']);
+        $app->put   ('/api/logbook/trip-categories/{id:[0-9]+}',  [\MyInvoice\Action\Logbook\TripCategoriesAction::class, 'update']);
+        $app->delete('/api/logbook/trip-categories/{id:[0-9]+}',  [\MyInvoice\Action\Logbook\TripCategoriesAction::class, 'delete']);
+
+        $app->post  ('/api/logbook/trips/import',         \MyInvoice\Action\Logbook\ImportTripsAction::class);
+        $app->get   ('/api/logbook/trips/export',         \MyInvoice\Action\Logbook\ExportTripsAction::class);
+        $app->get   ('/api/logbook/trips/purposes',       [\MyInvoice\Action\Logbook\TripsAction::class, 'purposes']);
+        $app->get   ('/api/logbook/trips/places',         [\MyInvoice\Action\Logbook\TripsAction::class, 'places']);
+        $app->get   ('/api/logbook/trips',                [\MyInvoice\Action\Logbook\TripsAction::class, 'list']);
+        $app->post  ('/api/logbook/trips',                [\MyInvoice\Action\Logbook\TripsAction::class, 'create']);
+        $app->get   ('/api/logbook/trips/{id:[0-9]+}',    [\MyInvoice\Action\Logbook\TripsAction::class, 'get']);
+        $app->put   ('/api/logbook/trips/{id:[0-9]+}',    [\MyInvoice\Action\Logbook\TripsAction::class, 'update']);
+        $app->delete('/api/logbook/trips/{id:[0-9]+}',    [\MyInvoice\Action\Logbook\TripsAction::class, 'delete']);
+
+        $app->get   ('/api/logbook/fuelings/export',      \MyInvoice\Action\Logbook\ExportFuelingsAction::class);
+        $app->get   ('/api/logbook/fuelings',             [\MyInvoice\Action\Logbook\FuelingsAction::class, 'list']);
+        $app->post  ('/api/logbook/fuelings',             [\MyInvoice\Action\Logbook\FuelingsAction::class, 'create']);
+        $app->get   ('/api/logbook/fuelings/{id:[0-9]+}', [\MyInvoice\Action\Logbook\FuelingsAction::class, 'get']);
+        $app->put   ('/api/logbook/fuelings/{id:[0-9]+}', [\MyInvoice\Action\Logbook\FuelingsAction::class, 'update']);
+        $app->delete('/api/logbook/fuelings/{id:[0-9]+}', [\MyInvoice\Action\Logbook\FuelingsAction::class, 'delete']);
+
+        $app->get   ('/api/logbook/summary/export',       [\MyInvoice\Action\Logbook\SummaryAction::class, 'export']);
+        $app->get   ('/api/logbook/summary',              [\MyInvoice\Action\Logbook\SummaryAction::class, 'view']);
+
+        $app->post  ('/api/logbook/fuel-invoices/backfill',           [\MyInvoice\Action\Logbook\FuelInvoicesAction::class, 'backfill']);
+        $app->get   ('/api/logbook/fuel-invoices',                    [\MyInvoice\Action\Logbook\FuelInvoicesAction::class, 'list']);
+        $app->get   ('/api/logbook/fuel-invoices/{id:[0-9]+}/items',  [\MyInvoice\Action\Logbook\FuelInvoicesAction::class, 'items']);
+        $app->post  ('/api/logbook/fuel-invoices/{id:[0-9]+}/assign', [\MyInvoice\Action\Logbook\FuelInvoicesAction::class, 'assign']);
 
         // 404 fallback pro /api/*
         $app->any('/api/{path:.*}', function ($req, $res) {

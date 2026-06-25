@@ -1,0 +1,147 @@
+<?php
+
+declare(strict_types=1);
+
+namespace MyInvoice\Action\Logbook;
+
+use MyInvoice\Http\Json;
+use MyInvoice\Http\SupplierGuard;
+use MyInvoice\Middleware\AuthMiddleware;
+use MyInvoice\Repository\CarRepository;
+use MyInvoice\Repository\TripRepository;
+use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\IpMatcher;
+use Psr\Http\Message\ResponseInterface as Response;
+use Psr\Http\Message\ServerRequestInterface as Request;
+
+/**
+ * Jízdy (kniha jízd):
+ *   GET    /api/logbook/trips         — list (?car_id=&category_id=&year=&month=&date_from=&date_to=&q=)
+ *   GET    /api/logbook/trips/{id}
+ *   POST   /api/logbook/trips
+ *   PUT    /api/logbook/trips/{id}
+ *   DELETE /api/logbook/trips/{id}
+ */
+final class TripsAction
+{
+    public function __construct(
+        private readonly TripRepository $repo,
+        private readonly CarRepository $cars,
+        private readonly ActivityLogger $logger,
+        private readonly IpMatcher $ipMatcher,
+    ) {}
+
+    public function list(Request $request, Response $response): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        $q = $request->getQueryParams();
+        $filters = array_intersect_key($q, array_flip(['car_id', 'category_id', 'year', 'month', 'date_from', 'date_to', 'q']));
+        return Json::ok($response, $this->repo->listForTenant($supplierId, $filters));
+    }
+
+    public function get(Request $request, Response $response, array $args): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        $trip = $this->repo->find((int) ($args['id'] ?? 0), $supplierId);
+        if ($trip === null) return Json::error($response, 'not_found', 'Jízda nenalezena.', 404);
+        return Json::ok($response, $trip);
+    }
+
+    /** Našeptávač účelů cest — distinct dříve zadané účely. */
+    public function purposes(Request $request, Response $response): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        return Json::ok($response, $this->repo->distinctPurposes($supplierId));
+    }
+
+    /** Našeptávač míst (odkud / kam) — distinct dříve zadaná místa. */
+    public function places(Request $request, Response $response): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        return Json::ok($response, $this->repo->distinctPlaces($supplierId));
+    }
+
+    public function create(Request $request, Response $response): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        $body = (array) ($request->getParsedBody() ?? []);
+        $err = $this->prepare($supplierId, $body);
+        if ($err !== null) return Json::error($response, 'validation_failed', $err, 400);
+
+        $id = $this->repo->create($supplierId, $body, $this->userId($request));
+        $this->log($request, 'trip.created', $id, $body);
+        return Json::ok($response, $this->repo->find($id, $supplierId), 201);
+    }
+
+    public function update(Request $request, Response $response, array $args): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        $id = (int) ($args['id'] ?? 0);
+        if ($this->repo->find($id, $supplierId) === null) {
+            return Json::error($response, 'not_found', 'Jízda nenalezena.', 404);
+        }
+        $body = (array) ($request->getParsedBody() ?? []);
+        $err = $this->prepare($supplierId, $body);
+        if ($err !== null) return Json::error($response, 'validation_failed', $err, 400);
+
+        $this->repo->update($id, $supplierId, $body);
+        $this->log($request, 'trip.updated', $id, $body);
+        return Json::ok($response, $this->repo->find($id, $supplierId));
+    }
+
+    public function delete(Request $request, Response $response, array $args): Response
+    {
+        $supplierId = SupplierGuard::currentId($request);
+        $id = (int) ($args['id'] ?? 0);
+        if ($this->repo->find($id, $supplierId) === null) {
+            return Json::error($response, 'not_found', 'Jízda nenalezena.', 404);
+        }
+        $this->repo->delete($id, $supplierId);
+        $this->log($request, 'trip.deleted', $id, []);
+        return Json::ok($response, ['deleted' => true]);
+    }
+
+    /** Validace + dopočet distance_km (mění $body in-place). */
+    private function prepare(int $supplierId, array &$body): ?string
+    {
+        $carId = (int) ($body['car_id'] ?? 0);
+        if ($carId <= 0) return 'Auto je povinné.';
+        if ($this->cars->find($carId, $supplierId) === null) return 'Auto neexistuje.';
+
+        $date = trim((string) ($body['trip_date'] ?? ''));
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) return 'Neplatné datum (formát YYYY-MM-DD).';
+
+        $odoStart = $this->intOrNull($body['odometer_start'] ?? null);
+        $odoEnd   = $this->intOrNull($body['odometer_end'] ?? null);
+        $distance = isset($body['distance_km']) && $body['distance_km'] !== '' ? (float) $body['distance_km'] : null;
+        if ($distance === null || $distance <= 0) {
+            if ($odoStart !== null && $odoEnd !== null && $odoEnd >= $odoStart) {
+                $distance = (float) ($odoEnd - $odoStart);
+            } else {
+                return 'Vyplň ujeté km nebo platný stav tachometru (od ≤ do).';
+            }
+        }
+        if ($odoStart !== null && $odoEnd !== null && $odoEnd < $odoStart) {
+            return 'Konečný stav tachometru nesmí být menší než počáteční.';
+        }
+        $body['distance_km'] = $distance;
+        return null;
+    }
+
+    private function intOrNull(mixed $v): ?int
+    {
+        return ($v === null || $v === '') ? null : (int) $v;
+    }
+
+    private function userId(Request $request): ?int
+    {
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        return (int) ($user['id'] ?? 0) ?: null;
+    }
+
+    private function log(Request $request, string $action, int $id, array $payload): void
+    {
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log($action, $this->userId($request), 'trip', $id, $payload, $ip, $request->getHeaderLine('User-Agent'));
+    }
+}

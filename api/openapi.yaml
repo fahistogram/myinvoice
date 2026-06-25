@@ -101,6 +101,8 @@ tags:
     description: CRM dashboard — KPI, aging, koncentrace, cash-flow, action-items
   - name: Tax
     description: Daňový optimalizátor (srovnání režimů, predikce ročních limitů)
+  - name: Logbook
+    description: Kniha jízd — vozidla, jízdy, tankování a daňové souhrny
 
 paths:
   /api/v1/health:
@@ -541,6 +543,153 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Invoice' }
+
+  /api/v1/invoices/{id}/payments:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [Invoices]
+      summary: Evidované platby faktury
+      description: |
+        Seznam plateb (částečných úhrad) faktury nebo zálohové faktury + souhrn:
+        `paid_total`, `remaining` (= `amount_to_pay - paid_total`) a odvozený
+        `payment_status` (`unpaid` / `partially_paid` / `paid` / `overpaid`).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  paid_total: { type: number, format: float }
+                  amount_to_pay: { type: number, format: float }
+                  remaining: { type: number, format: float }
+                  payment_status:
+                    type: string
+                    nullable: true
+                    enum: [unpaid, partially_paid, paid, overpaid]
+    post:
+      tags: [Invoices]
+      summary: Zaeviduje (částečnou) úhradu faktury
+      description: |
+        Přidá platbu v měně faktury. Pokud suma plateb pokryje `amount_to_pay`
+        (tolerance 0,05), faktura se označí jako zaplacená (`paid_at` = datum
+        poslední platby). Stávající `mark-paid` je zkratka „platba na zbytek".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                  format: float
+                  description: Částka platby v měně faktury (> 0)
+                paid_on:
+                  type: string
+                  format: date
+                  description: Datum platby (default = dnes)
+                variable_symbol: { type: string, nullable: true, maxLength: 20 }
+                bank_reference: { type: string, nullable: true, maxLength: 120 }
+                note: { type: string, nullable: true, maxLength: 255 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoice: { $ref: '#/components/schemas/Invoice' }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  payment: { $ref: '#/components/schemas/InvoicePayment' }
+                  became_paid: { type: boolean }
+                  remaining: { type: number, format: float }
+        '409':
+          description: Neplatný stav/částka (draft, storno, dobropis…)
+
+  /api/v1/invoices/{id}/payments/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: path
+        name: paymentId
+        required: true
+        schema: { type: integer, format: int64 }
+    delete:
+      tags: [Invoices]
+      summary: Smaže evidovanou platbu
+      description: |
+        Platbu navázanou na bankovní transakci nelze smazat (409) — ruší se přes
+        unmatch v detailu výpisu. Platbu s vystaveným daňovým dokladem k přijaté
+        platbě lze smazat až po smazání/stornu dokladu. Pokud po smazání přestane
+        být doklad pokrytý, vrátí se ze stavu `paid` zpět (`sent`/`issued`).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoice: { $ref: '#/components/schemas/Invoice' }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  became_unpaid: { type: boolean }
+                  remaining: { type: number, format: float }
+        '409':
+          description: Platba je zamčená (bankovní vazba / daňový doklad)
+
+  /api/v1/invoices/{id}/payments/{paymentId}/tax-document:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: path
+        name: paymentId
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Invoices]
+      summary: Vystaví daňový doklad k přijaté platbě (DRAFT)
+      description: |
+        K platbě **zálohové faktury** vystaví koncept daňového dokladu k přijaté
+        platbě (`invoice_type = tax_document`, § 28 odst. 2 ZDPH): DUZP = datum
+        platby, DPH shora koeficientem (§ 37), částka rozdělená mezi sazby DPH
+        proformy poměrně. Jen plátce DPH a ne-reverse-charge plnění. Idempotentní —
+        existující nestornovaný doklad k platbě vrátí beze změny.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tax_document_id: { type: integer, format: int64 }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+        '409':
+          description: Podmínky nesplněny (neplátce DPH, reverse charge, není proforma)
 
   /api/v1/invoices/{id}/pdf:
     parameters:
@@ -3857,6 +4006,261 @@ paths:
             application/pdf:
               schema: { type: string, format: binary }
 
+  /api/v1/logbook/cars:
+    get:
+      tags: [Logbook]
+      summary: Seznam vozidel
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: include_archived, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Car' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří vozidlo
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CarInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/cars/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail vozidla
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví vozidlo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CarInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže vozidlo (nebo archivuje, je-li použito)
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/trips:
+    get:
+      tags: [Logbook]
+      summary: Seznam jízd
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: car_id, schema: { type: integer } }
+        - { in: query, name: category_id, schema: { type: integer } }
+        - { in: query, name: year, schema: { type: integer } }
+        - { in: query, name: month, schema: { type: integer } }
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Trip' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří jízdu
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TripInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/trips/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail jízdy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví jízdu
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TripInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže jízdu
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/fuelings:
+    get:
+      tags: [Logbook]
+      summary: Seznam tankování
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: car_id, schema: { type: integer } }
+        - { in: query, name: source, schema: { type: string } }
+        - { in: query, name: year, schema: { type: integer } }
+        - { in: query, name: month, schema: { type: integer } }
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Fueling' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří tankování (ruční)
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FuelingInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/fuelings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail tankování
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví tankování
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FuelingInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže tankování
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/trip-categories:
+    get:
+      tags: [Logbook]
+      summary: Číselník kategorií cest
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: include_archived, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/TripCategory' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/logbook/summary:
+    get:
+      tags: [Logbook]
+      summary: Roční daňový/účetní souhrn (per vozidlo)
+      description: |
+        Souhrn za zvolený rok: ujeto km, rozpad služební/soukromé (poměr pro krácení),
+        stav tachometru počítaný z jízd, tankování (litry, náklad, spotřeba),
+        kontrola návaznosti tachometru a informativní srovnání s paušálem na dopravu.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: year, schema: { type: integer } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogbookSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -3959,6 +4363,7 @@ components:
         - health_assessment_pct
         - social_min_base_main
         - social_min_base_secondary
+        - social_secondary_participation_threshold
         - health_min_base
         - mortgage_cap
         - pension_cap
@@ -3983,6 +4388,7 @@ components:
         health_assessment_pct: { type: number }
         social_min_base_main: { type: number }
         social_min_base_secondary: { type: number }
+        social_secondary_participation_threshold: { type: number, description: Rozhodná částka (zisk) pro povinnou účast na důch. pojištění u vedlejší SVČ }
         health_min_base: { type: number }
         mortgage_cap: { type: number, description: Strop odpočtu úroků z hypotéky }
         pension_cap: { type: number }
@@ -4343,10 +4749,16 @@ components:
         varsymbol: { type: string, nullable: true, description: "Variabilní symbol = číslo faktury. Přiděluje se při issue (u draft je null nebo manuální override)." }
         invoice_type:
           type: string
-          enum: [invoice, proforma, credit_note, cancellation]
+          enum: [invoice, proforma, credit_note, cancellation, tax_document]
+          description: "tax_document = daňový doklad k přijaté platbě zálohy (§ 28/2 ZDPH); DUZP = datum platby, parent_invoice_id = proforma."
         status:
           type: string
           enum: [draft, issued, sent, reminded, paid, cancelled]
+        payment_status:
+          type: string
+          nullable: true
+          enum: [unpaid, partially_paid, paid, overpaid]
+          description: "Odvozený platební stav (#89) z paid_total vs. amount_to_pay (tolerance 0,05). Null pro draft/cancelled."
         payment_method:
           type: string
           enum: [bank_transfer, card, cash, other]
@@ -4377,6 +4789,7 @@ components:
         rounding: { type: number, format: float, description: "Zaokrouhlení (CZK)" }
         advance_paid_amount: { type: number, format: float, description: "Záloha k odečtení (u faktury vystavované po proforme)" }
         amount_to_pay: { type: number, format: float, description: "total_with_vat + rounding − advance_paid_amount" }
+        paid_total: { type: number, format: float, description: "Suma evidovaných plateb (invoice_payments, #89); zbývá k úhradě = amount_to_pay − paid_total" }
         discount_percent: { type: number, format: float, description: "Procentuální sleva z celé faktury (0 = žádná). Materializuje se jako záporná položka „Sleva X %\" v `items`." }
         totals:
           type: object
@@ -5282,6 +5695,30 @@ components:
         per_page: { type: integer, example: 50 }
         pages:    { type: integer, example: 9 }
 
+    InvoicePayment:
+      type: object
+      description: "Evidovaná platba faktury / zálohové faktury (#89). N:1 — jedna faktura může mít víc plateb (splátky, více převodů, avíza)."
+      properties:
+        id: { type: integer, format: int64 }
+        invoice_id: { type: integer, format: int64 }
+        paid_on: { type: string, format: date }
+        amount: { type: number, format: float, description: "Částka v měně faktury (> 0)" }
+        currency: { type: string, example: CZK, description: "Denormalizovaný kód měny faktury v okamžiku platby" }
+        variable_symbol: { type: string, nullable: true }
+        bank_reference: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        source:
+          type: string
+          enum: [manual, mark_paid, bank, legacy]
+          description: "manual = ruční záznam, mark_paid = zkratka „označit zaplaceno“, bank = bankovní párování (GPC i e-mailové avízo), legacy = backfill z dob před evidencí plateb"
+        bank_transaction_id: { type: integer, format: int64, nullable: true, description: "Vazba na bankovní transakci (taková platba se maže přes unmatch ve výpisu)" }
+        bank_statement_id: { type: integer, format: int64, nullable: true }
+        tax_document_invoice_id: { type: integer, format: int64, nullable: true, description: "Daňový doklad k přijaté platbě vystavený k této platbě (jen u záloh)" }
+        tax_document_varsymbol: { type: string, nullable: true }
+        tax_document_status: { type: string, nullable: true, enum: [draft, issued, sent, reminded, paid, cancelled] }
+        created_by: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+
     InvoiceItem:
       type: object
       properties:
@@ -5774,3 +6211,201 @@ components:
               purchase_invoice_id: { type: integer, nullable: true }
               isdoc_invoice_count: { type: integer, nullable: true }
               supplier_ic: { type: string, nullable: true }
+
+    Car:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        registration: { type: string }
+        name: { type: string, nullable: true }
+        brand: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        vin: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
+        odometer_start: { type: integer, nullable: true }
+        odometer_start_date: { type: string, format: date, nullable: true }
+        is_default: { type: boolean }
+        is_archived: { type: boolean }
+        note: { type: string, nullable: true }
+        last_odometer: { type: integer, nullable: true, description: Poslední známý stav tachometru (z jízd) }
+        trips_count: { type: integer, nullable: true }
+        fuelings_count: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+    CarInput:
+      type: object
+      required: [registration]
+      properties:
+        registration: { type: string, maxLength: 20 }
+        name: { type: string, nullable: true }
+        brand: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        vin: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
+        odometer_start: { type: integer, nullable: true }
+        odometer_start_date: { type: string, format: date, nullable: true }
+        is_default: { type: boolean }
+        is_archived: { type: boolean }
+        note: { type: string, nullable: true }
+    Trip:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        car_id: { type: integer }
+        car_registration: { type: string, nullable: true }
+        trip_date: { type: string, format: date }
+        time_start: { type: string, nullable: true }
+        time_end: { type: string, nullable: true }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        distance_km: { type: number }
+        category_id: { type: integer, nullable: true }
+        category_label: { type: string, nullable: true }
+        category_is_private: { type: boolean, nullable: true }
+        purpose: { type: string, nullable: true }
+        origin: { type: string, nullable: true }
+        destination: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    TripInput:
+      type: object
+      required: [car_id, trip_date]
+      properties:
+        car_id: { type: integer }
+        trip_date: { type: string, format: date }
+        time_start: { type: string, nullable: true }
+        time_end: { type: string, nullable: true }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        distance_km: { type: number, nullable: true, description: "Prázdné = dopočítá se z tachometru (konec − začátek)" }
+        category_id: { type: integer, nullable: true }
+        purpose: { type: string, nullable: true }
+        origin: { type: string, nullable: true }
+        destination: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+    Fueling:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        car_id: { type: integer, nullable: true }
+        car_registration: { type: string, nullable: true }
+        fueled_date: { type: string, format: date }
+        fueled_time: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        unit: { type: string }
+        unit_price: { type: number, nullable: true }
+        amount_without_vat: { type: number, nullable: true }
+        amount_vat: { type: number, nullable: true }
+        amount_with_vat: { type: number }
+        currency: { type: string }
+        odometer: { type: integer, nullable: true }
+        station: { type: string, nullable: true }
+        vendor_id: { type: integer, nullable: true }
+        vendor_name: { type: string, nullable: true }
+        source: { type: string, enum: [manual, invoice, axigon, axigon_ai, import] }
+        source_purchase_invoice_id: { type: integer, nullable: true }
+        source_invoice_number: { type: string, nullable: true }
+        receipt_number: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    FuelingInput:
+      type: object
+      required: [fueled_date, amount_with_vat]
+      properties:
+        car_id: { type: integer, nullable: true }
+        fueled_date: { type: string, format: date }
+        fueled_time: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        unit: { type: string }
+        unit_price: { type: number, nullable: true }
+        amount_with_vat: { type: number }
+        currency: { type: string }
+        odometer: { type: integer, nullable: true }
+        station: { type: string, nullable: true }
+        vendor_id: { type: integer, nullable: true }
+        note: { type: string, nullable: true }
+    TripCategory:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        label: { type: string }
+        is_private: { type: boolean }
+        display_order: { type: integer }
+        is_archived: { type: boolean }
+        trips_count: { type: integer, nullable: true }
+    LogbookSummary:
+      type: object
+      properties:
+        year: { type: integer }
+        available_years: { type: array, items: { type: integer } }
+        vehicles: { type: array, items: { $ref: '#/components/schemas/SummaryVehicle' } }
+        totals: { $ref: '#/components/schemas/SummaryTotals' }
+        monthly: { $ref: '#/components/schemas/MonthlyKm' }
+    MonthlyKm:
+      type: object
+      description: Najeté km po měsících (12 hodnot, leden..prosinec) — vybraný rok vs předchozí.
+      properties:
+        year: { type: integer }
+        prev_year: { type: integer }
+        current: { type: array, items: { type: number } }
+        previous: { type: array, items: { type: number } }
+    SummaryVehicle:
+      type: object
+      properties:
+        car_id: { type: integer }
+        registration: { type: string }
+        name: { type: string, nullable: true }
+        trips_count: { type: integer }
+        km: { type: number }
+        business_km: { type: number }
+        private_km: { type: number }
+        uncategorized_km: { type: number }
+        private_ratio: { type: number }
+        business_ratio: { type: number }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        fuel_count: { type: integer }
+        liters: { type: number }
+        liters_count: { type: integer }
+        liters_incomplete: { type: boolean }
+        kwh: { type: number, description: Charged energy (kWh) for electric/PHEV vehicles. }
+        kwh_count: { type: integer }
+        kwh_incomplete: { type: boolean }
+        fuel_cost: { type: number }
+        avg_consumption: { type: number, nullable: true, description: Fuel consumption l/100 km. }
+        avg_consumption_kwh: { type: number, nullable: true, description: Electric consumption kWh/100 km. }
+        continuity_issues: { type: integer }
+        continuity_detail:
+          type: array
+          items:
+            type: object
+            properties:
+              prev_date: { type: string, format: date }
+              prev_end: { type: integer }
+              date: { type: string, format: date }
+              start: { type: integer }
+              gap: { type: integer }
+        pausal_months: { type: integer }
+        pausal_rate: { type: integer }
+        pausal_year: { type: integer }
+    SummaryTotals:
+      type: object
+      properties:
+        vehicles_count: { type: integer }
+        trips_count: { type: integer }
+        km: { type: number }
+        business_km: { type: number }
+        private_km: { type: number }
+        uncategorized_km: { type: number }
+        private_ratio: { type: number }
+        fuel_count: { type: integer }
+        liters: { type: number }
+        kwh: { type: number, description: Total charged energy (kWh). }
+        fuel_cost: { type: number }
+        avg_consumption: { type: number, nullable: true }
+        avg_consumption_kwh: { type: number, nullable: true }
+        liters_incomplete: { type: boolean }
+        kwh_incomplete: { type: boolean }
+        continuity_issues: { type: integer }

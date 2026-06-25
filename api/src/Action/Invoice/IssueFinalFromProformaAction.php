@@ -43,8 +43,11 @@ final class IssueFinalFromProformaAction
         if ($proforma['invoice_type'] !== 'proforma') {
             return Json::error($response, 'not_proforma', 'Lze pouze ze zálohové faktury (proforma).', 409);
         }
-        if ($proforma['status'] !== 'paid') {
-            return Json::error($response, 'not_paid', 'Proforma musí být označená jako zaplacená.', 409);
+        // Vyúčtovat lze zaplacenou i ČÁSTEČNĚ uhrazenou proformu (#89) — plnění může
+        // proběhnout dřív, než dorazí celá záloha; odpočet pokryje jen přijaté platby
+        // a zbytek zůstane na finálním dokladu k úhradě.
+        if ($proforma['status'] !== 'paid' && (float) ($proforma['paid_total'] ?? 0) <= 0) {
+            return Json::error($response, 'not_paid', 'Proforma musí mít alespoň částečnou úhradu.', 409);
         }
 
         $body = (array) ($request->getParsedBody() ?? []);

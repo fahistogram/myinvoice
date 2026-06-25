@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
 import { invoicesApi, type MonthGroup, type InvoiceListItem } from '@/api/invoices'
-import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass } from '@/composables/useFormat'
+import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass, displayStatus, taxDateClass } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
 import { useRowLink } from '@/composables/useRowLink'
 import { useToast } from '@/composables/useToast'
@@ -15,6 +15,7 @@ import { useYearOptions } from '@/composables/useYearOptions'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SearchableSelect from '@/components/ui/SearchableSelect.vue'
+import FilterBar from '@/components/ui/FilterBar.vue'
 import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const { t, tm, rt } = useI18n()
@@ -47,6 +48,20 @@ const unpaidOnly = ref(false)
 const currencyFilter = ref<string>('')
 const clients = ref<Client[]>([])
 const currencies = ref<Currency[]>([])
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry" (rok i hledání se nepočítají — rok má výchozí hodnotu, hledání je vždy vidět)
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (statusFilter.value) n++
+  if (typeFilter.value) n++
+  if (clientFilter.value !== '') n++
+  if (currencyFilter.value) n++
+  if (monthFilter.value !== '') n++
+  if (dateFrom.value || dateTo.value) n++
+  if (overdueOnly.value) n++
+  if (unpaidOnly.value) n++
+  return n
+})
 
 const selectedIds = ref<number[]>([])
 const bulkBusy = ref(false)
@@ -517,14 +532,15 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
     </div>
 
     <!-- Filtry -->
-    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
-      <div class="flex flex-wrap items-center gap-2">
+    <FilterBar :active-count="activeFilterCount">
+      <template #primary>
         <input
           v-model="search"
           type="search"
           :placeholder="t('invoice.search_placeholder')"
           class="flex-1 min-w-48 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
         />
+      </template>
         <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('invoice.all_statuses') }}</option>
           <option value="draft">{{ t('status.draft') }}</option>
@@ -582,8 +598,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 0 1 2-2h11l5 5v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           {{ t('invoice.csv_export') }}
         </button>
-      </div>
-    </div>
+    </FilterBar>
 
     <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <TableSkeleton :rows="8" :cols="7" />
@@ -661,8 +676,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   <div v-if="inv.project_name" class="text-xs text-neutral-500 truncate max-w-md">{{ inv.project_name }}</div>
                 </td>
                 <td class="px-4 py-2.5 text-center text-xs text-neutral-600">{{ typeLabel(inv.invoice_type) }}</td>
-                <td class="px-4 py-2.5 text-center text-xs text-neutral-600">
-                  {{ formatDate(inv.tax_date || inv.issue_date) }}
+                <td class="px-4 py-2.5 text-center text-xs">
+                  <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                 </td>
                 <td class="px-4 py-2.5 text-center text-xs">
                   <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : 'text-neutral-600'">
@@ -674,15 +689,15 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                 </td>
                 <td class="px-4 py-2.5 text-center" @click.stop>
                   <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
-                  <button v-if="inv.status === 'draft' && auth.canWrite"
+                  <button v-if="inv.status === 'draft' && inv.invoice_type !== 'tax_document' && auth.canWrite"
                     @click="openWorkReport(inv.id)"
                     class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                     :title="t('invoice.wr_btn')">
                     <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2"/></svg>
                     {{ t('invoice.wr_btn') }}
                   </button>
-                  <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
-                    {{ statusLabel(inv.status) }}
+                  <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(displayStatus(inv.status, inv.payment_status))">
+                    {{ statusLabel(displayStatus(inv.status, inv.payment_status)) }}
                   </span>
                   <span v-if="inv.sent_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
                     :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
@@ -734,7 +749,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                 </div>
                 <div class="flex items-center justify-between gap-2 mt-2">
                   <div class="text-xs text-neutral-600 whitespace-nowrap">
-                    {{ formatDate(inv.tax_date || inv.issue_date) }}
+                    <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                     <span class="text-neutral-400"> → </span>
                     <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : ''">
                       {{ formatDate(inv.due_date) }}
@@ -746,7 +761,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
                     <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
-                    <button v-if="inv.status === 'draft' && auth.canWrite"
+                    <button v-if="inv.status === 'draft' && inv.invoice_type !== 'tax_document' && auth.canWrite"
                       @click="openWorkReport(inv.id)"
                       class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                       :title="t('invoice.wr_btn')">

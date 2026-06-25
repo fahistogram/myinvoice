@@ -32,8 +32,14 @@ final class CloneInvoiceAction
     public function __invoke(Request $request, Response $response, array $args): Response
     {
         $id = (int) ($args['id'] ?? 0);
-        if (!SupplierGuard::owns($request, $this->repo->find($id))) {
+        $invoice = $this->repo->find($id);
+        if (!SupplierGuard::owns($request, $invoice)) {
             return Json::error($response, 'not_found', 'Faktura nenalezena.', 404);
+        }
+        // Daňový doklad k přijaté platbě je vázaný na konkrétní platbu — kopie nedává
+        // smysl (vzniká vždy automaticky z platby zálohové faktury).
+        if (($invoice['invoice_type'] ?? '') === 'tax_document') {
+            return Json::error($response, 'invalid_type', 'Daňový doklad k přijaté platbě nelze klonovat.', 409);
         }
         $body = (array) ($request->getParsedBody() ?? []);
         $incrementMonth = (bool) ($body['increment_month_in_descriptions'] ?? false);

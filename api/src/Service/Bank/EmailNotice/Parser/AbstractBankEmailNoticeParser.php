@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Bank\EmailNotice\Parser;
 
+use MyInvoice\Service\Bank\EmailNotice\BankEmailNoticeMessage;
 use MyInvoice\Service\Bank\EmailNotice\EmailNoticeTextNormalizer;
 use MyInvoice\Service\Bank\VariableSymbolNormalizer;
 
@@ -34,6 +35,45 @@ abstract class AbstractBankEmailNoticeParser implements BankEmailNoticeParserInt
     protected function normalizeText(string $text): string
     {
         return $this->normalizer->normalize($text);
+    }
+
+    /**
+     * Sklopí českou/slovenskou (a běžnou latinkovou) diakritiku na ASCII
+     * („Směr"→„Smer", „Částka"→„Castka", „Kč"→„Kc"). Slouží k diakritiku-
+     * tolerantnímu matchování: přeposlaná avíza chodí občas v legacy kódování
+     * nebo s rozbitou/chybějící diakritikou (#58), takže ani detekce parseru
+     * (`supports()`), ani extrakce polí nesmí stát a padat na jednom konkrétním
+     * accentovaném znaku v patternu. Mapa se sestaví jednou (vč. verzálek).
+     */
+    protected function foldDiacritics(string $text): string
+    {
+        if ($text === '') {
+            return $text;
+        }
+        static $map = null;
+        if ($map === null) {
+            $lower = [
+                'á' => 'a', 'à' => 'a', 'â' => 'a', 'ä' => 'a', 'ã' => 'a', 'å' => 'a',
+                'č' => 'c', 'ć' => 'c', 'ç' => 'c',
+                'ď' => 'd', 'đ' => 'd',
+                'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e', 'ě' => 'e',
+                'í' => 'i', 'ì' => 'i', 'î' => 'i', 'ï' => 'i',
+                'ĺ' => 'l', 'ľ' => 'l', 'ł' => 'l',
+                'ň' => 'n', 'ń' => 'n', 'ñ' => 'n',
+                'ó' => 'o', 'ò' => 'o', 'ô' => 'o', 'ö' => 'o', 'õ' => 'o', 'ø' => 'o',
+                'ŕ' => 'r', 'ř' => 'r',
+                'š' => 's', 'ś' => 's', 'ß' => 'ss',
+                'ť' => 't',
+                'ú' => 'u', 'ù' => 'u', 'û' => 'u', 'ü' => 'u', 'ů' => 'u',
+                'ý' => 'y', 'ÿ' => 'y',
+                'ž' => 'z', 'ź' => 'z', 'ż' => 'z',
+            ];
+            $map = $lower;
+            foreach ($lower as $from => $to) {
+                $map[mb_strtoupper($from, 'UTF-8')] = mb_strtoupper($to, 'UTF-8');
+            }
+        }
+        return strtr($text, $map);
     }
 
     protected function compact(string $value): string
@@ -186,6 +226,67 @@ abstract class AbstractBankEmailNoticeParser implements BankEmailNoticeParserInt
     }
 
     /**
+     * Match odesílatele na doménu banky s podporou PŘEPOSLANÝCH avíz (#161).
+     *
+     * Přímé avízo: `From` hlavička sedí na doménu banky → hotovo.
+     * Přeposlané avízo (FW:) má `From` na adrese uživatele (přeposílatele)
+     * a původní odesílatel je „uvnitř" zprávy. Některé MUA (Outlook) ale do
+     * textové části nevloží přeposlaný `From:` blok — jediná stopa po bance
+     * pak zůstává v patičce/podpisu (např. „napište na info@creditas.cz",
+     * „Vaše Banka CREDITAS"). Proto fallback: když `From` nesedí, hledá se
+     * adresa banky kdekoli v těle (přeposlaná hlavička i patička).
+     *
+     * Tento fallback je OPT-IN per IMAP účet (`allow_forwarded`), defaultně
+     * vypnutý — zapíná se jen pro schránku, do které avíza chodí přeposlaná.
+     * Stejně jako SenderDomain jde o pouhý ROUTING na správný parser — odesílatel
+     * je beztak spoofnutelný. Skutečnou pojistkou zůstává striktní struktura těla
+     * v `supports()` + povinné mapování cílového účtu na účet dodavatele.
+     */
+    protected function senderMatchesDomain(BankEmailNoticeMessage $message, string ...$domains): bool
+    {
+        if (SenderDomain::matches($message->sender, ...$domains)) {
+            return true;
+        }
+        if (!$message->allowForwarded) {
+            return false;
+        }
+        // Volitelné omezení, OD KOHO smí přeposlaná avíza chodit: `From` musí sedět
+        // na nastaveného přeposílatele (adresa nebo doména). Prázdné = libovolný.
+        if ($message->forwardedFrom !== '' && !$this->forwarderMatches($message->sender, $message->forwardedFrom)) {
+            return false;
+        }
+        if (preg_match_all('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+/', $message->text, $m) >= 1) {
+            foreach ($m[0] as $address) {
+                if (SenderDomain::matches($address, ...$domains)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Sedí `From` přeposlané zprávy na nastaveného přeposílatele? Hodnota s „@"
+     * = přesná adresa (case-insensitive, tolerantní k „Jméno <adresa>"), bez „@"
+     * = doména (vč. subdomén přes SenderDomain).
+     */
+    private function forwarderMatches(string $sender, string $forwardedFrom): bool
+    {
+        $forwardedFrom = strtolower(trim($forwardedFrom));
+        if ($forwardedFrom === '') {
+            return true;
+        }
+        if (!str_contains($forwardedFrom, '@')) {
+            return SenderDomain::matches($sender, $forwardedFrom);
+        }
+        $address = strtolower(trim($sender));
+        if (preg_match('/<([^<>]+)>\s*$/', $address, $m) === 1) {
+            $address = trim($m[1]);
+        }
+        return $address === $forwardedFrom;
+    }
+
+    /**
      * Whitelist odesílatelů providera (mezera/čárka/středník oddělené adresy);
      * prázdný = povolit vše. Matchuje přesnou adresu i tvar „Jméno <adresa>".
      */
@@ -203,6 +304,54 @@ abstract class AbstractBankEmailNoticeParser implements BankEmailNoticeParserInt
             }
             if ($sender === $allowed || str_contains($sender, '<' . $allowed . '>')) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Varianta `senderAllowed` s podporou PŘEPOSLANÝCH (FW) avíz (#161) — pro Regex
+     * providery (ČS i custom), které routují podle whitelistu adres místo domény banky.
+     *
+     * Přímé avízo: `From` sedí na whitelist → hotovo. Přeposlané avízo (opt-in
+     * `allow_forwarded`) má `From` přeposílatele, proto se whitelistovaná doména
+     * hledá i v těle (přeposlaná hlavička / patička), volitelně po pinu přeposílatele.
+     * Prázdný whitelist = povolit vše (i přeposlané). Routing-only, viz `senderMatchesDomain`.
+     */
+    protected function senderAllowedForwarded(BankEmailNoticeMessage $message, string $whitelist): bool
+    {
+        if ($this->senderAllowed($message->sender, $whitelist)) {
+            return true;
+        }
+        if (!$message->allowForwarded) {
+            return false;
+        }
+        if ($message->forwardedFrom !== '' && !$this->forwarderMatches($message->sender, $message->forwardedFrom)) {
+            return false;
+        }
+        if (trim($whitelist) === '') {
+            return true;
+        }
+        $domains = [];
+        foreach (preg_split('/[\s,;]+/', strtolower($whitelist)) ?: [] as $allowed) {
+            $allowed = trim($allowed);
+            if ($allowed === '') {
+                continue;
+            }
+            $at = strrpos($allowed, '@');
+            $domain = $at !== false ? substr($allowed, $at + 1) : $allowed;
+            if ($domain !== '') {
+                $domains[] = $domain;
+            }
+        }
+        if ($domains === []) {
+            return false;
+        }
+        if (preg_match_all('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+/', $message->text, $m) >= 1) {
+            foreach ($m[0] as $address) {
+                if (SenderDomain::matches($address, ...$domains)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -244,8 +393,9 @@ abstract class AbstractBankEmailNoticeParser implements BankEmailNoticeParserInt
 
     /**
      * Česká spořitelna nerozlišuje příjem/výdej znaménkem, ale řádkem
-     * „Směr platby: příchozí/odchozí". Odchozí platbu ulož se záporným znaménkem
-     * (konzistentní s GPC), ať se nepáruje proti pohledávkám.
+     * „Směr platby: příchozí/odchozí" (Fio labelem „Výdaj na kontě").
+     * Odchozí platbu ulož se záporným znaménkem (konzistentní s GPC),
+     * ať se nepáruje proti pohledávkám.
      */
     protected function applyDirection(float $amount, string $direction): float
     {
@@ -253,7 +403,7 @@ abstract class AbstractBankEmailNoticeParser implements BankEmailNoticeParserInt
         if ($direction === '') {
             return $amount;
         }
-        if (preg_match('/odchoz|výdej|vydej|debet|odepsán|odepsan|outgoing/u', $direction) === 1) {
+        if (preg_match('/odchoz|výdej|vydej|výdaj|vydaj|debet|odepsán|odepsan|outgoing/u', $direction) === 1) {
             return -abs($amount);
         }
         return abs($amount);

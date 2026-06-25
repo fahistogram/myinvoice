@@ -79,6 +79,90 @@ XML;
         self::assertSame(5.0, $inv['items'][0]['quantity']);
     }
 
+    /**
+     * Uživatelský export z Pohody (VydFaktury.xml) — root je `responsePack`
+     * s `listInvoice` a fakturami v `lst:invoice`, hlavička dál v `inv:`.
+     */
+    private function responsePackExport(): string
+    {
+        return <<<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<rsp:responsePack version="2.0" id="Usr01" state="ok" ico="05687691"
+        xmlns:rsp="http://www.stormware.cz/schema/version_2/response.xsd"
+        xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd"
+        xmlns:lst="http://www.stormware.cz/schema/version_2/list.xsd"
+        xmlns:inv="http://www.stormware.cz/schema/version_2/invoice.xsd">
+  <rsp:responsePackItem version="2.0" id="Usr01" state="ok">
+    <lst:listInvoice version="2.0" state="ok">
+      <lst:invoice version="2.0">
+        <inv:invoiceHeader>
+          <inv:invoiceType>issuedInvoice</inv:invoiceType>
+          <inv:number><typ:numberRequested>26FV001</typ:numberRequested></inv:number>
+          <inv:symVar>26001</inv:symVar>
+          <inv:date>2026-01-04</inv:date>
+          <inv:dateTax>2026-01-04</inv:dateTax>
+          <inv:dateDue>2026-01-18</inv:dateDue>
+          <inv:classificationVAT><typ:id>165</typ:id><typ:ids>UD</typ:ids></inv:classificationVAT>
+          <inv:text>Fakturujeme Vam zbozi:</inv:text>
+          <inv:partnerIdentity>
+            <typ:address>
+              <typ:company>AR SERVIS s.r.o.</typ:company>
+              <typ:city>Jindrichuv Hradec</typ:city>
+              <typ:ico>42408393</typ:ico>
+              <typ:dic>CZ42408393</typ:dic>
+            </typ:address>
+          </inv:partnerIdentity>
+        </inv:invoiceHeader>
+        <inv:invoiceDetail>
+          <inv:invoiceItem>
+            <inv:text>HDD Western Digital</inv:text>
+            <inv:quantity>2.0</inv:quantity>
+            <inv:unit>ks</inv:unit>
+            <inv:rateVAT value="21">high</inv:rateVAT>
+            <inv:homeCurrency>
+              <typ:unitPrice>3086</typ:unitPrice>
+              <typ:price>6172</typ:price>
+              <typ:priceVAT>1296.12</typ:priceVAT>
+            </inv:homeCurrency>
+          </inv:invoiceItem>
+        </inv:invoiceDetail>
+        <inv:invoiceSummary>
+          <inv:homeCurrency>
+            <typ:priceHigh>6172</typ:priceHigh>
+            <typ:priceHighVAT rate="21">1296.12</typ:priceHighVAT>
+          </inv:homeCurrency>
+        </inv:invoiceSummary>
+      </lst:invoice>
+    </lst:listInvoice>
+  </rsp:responsePackItem>
+</rsp:responsePack>
+XML;
+    }
+
+    public function testResponsePackExportParsed(): void
+    {
+        $result = $this->parser->parse($this->responsePackExport());
+        self::assertSame('05687691', $result['supplier_ic']);
+        self::assertCount(1, $result['invoices']);
+
+        $inv = $result['invoices'][0];
+        self::assertSame('invoice', $inv['invoice_type']);
+        self::assertSame('26001', $inv['varsymbol']);
+        self::assertSame('2026-01-04', $inv['issue_date']);
+        self::assertSame('2026-01-18', $inv['due_date']);
+        self::assertFalse($inv['reverse_charge']);
+        self::assertSame('AR SERVIS s.r.o.', $inv['client']['company_name']);
+        self::assertSame('42408393', $inv['client']['ic']);
+        self::assertCount(1, $inv['items']);
+        self::assertSame(3086.0, $inv['items'][0]['unit_price_without_vat']);
+        self::assertSame(21.0, $inv['items'][0]['vat_rate']);
+        self::assertSame(2.0, $inv['items'][0]['quantity']);
+        // Rekapitulace DPH z summary (homeCurrency) — high sazba.
+        self::assertArrayHasKey('21.00', $inv['vat_recap']);
+        self::assertEqualsWithDelta(6172.0, $inv['vat_recap']['21.00']['base'], 0.01);
+        self::assertEqualsWithDelta(1296.12, $inv['vat_recap']['21.00']['vat'], 0.01);
+    }
+
     public function testProformaTypeMapping(): void
     {
         $xml = str_replace(

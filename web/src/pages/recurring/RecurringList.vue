@@ -163,7 +163,7 @@ function gotoClient(clientId: number, e?: MouseEvent) {
           <option value="paused">{{ t('recurring.status.paused') }}</option>
           <option value="expired">{{ t('recurring.status.expired') }}</option>
         </select>
-        <div class="ml-auto flex items-center gap-3">
+        <div class="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 w-full sm:w-auto">
           <div v-if="grandTotalLabel" class="flex items-baseline gap-2">
             <span class="text-sm text-neutral-500">{{ t('recurring.amount_total') }}</span>
             <span class="font-mono text-base font-semibold text-neutral-900"
@@ -172,7 +172,7 @@ function gotoClient(clientId: number, e?: MouseEvent) {
             </span>
           </div>
           <select v-model="sortBy" :title="t('recurring.sort.label')"
-            class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+            class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm flex-1 sm:flex-none min-w-0 max-w-full">
             <option value="next_run">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.next_run') }}</option>
             <option value="client">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.client') }}</option>
             <option value="amount_czk">{{ t('recurring.sort.label') }}: {{ t('recurring.sort.amount_czk') }}</option>

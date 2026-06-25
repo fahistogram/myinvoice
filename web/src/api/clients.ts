@@ -43,6 +43,8 @@ export interface Client {
   is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
+  /** Dodavatel je benzínka — pro automatické rozpoznávání tankování v knize jízd. */
+  is_fuel_station?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
   payment_due_unit?: 'days' | 'month' | null
@@ -190,6 +192,8 @@ export interface ClientPayload {
   is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
+  /** Dodavatel je benzínka — pro automatické rozpoznávání tankování v knize jízd. */
+  is_fuel_station?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
   payment_due_unit?: 'days' | 'month' | null

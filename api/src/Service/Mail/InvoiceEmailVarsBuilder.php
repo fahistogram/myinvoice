@@ -47,7 +47,11 @@ final class InvoiceEmailVarsBuilder
         return [
             'invoice'        => $invoice,
             'client_name'    => $invoice['client_company_name'] ?? '',
-            'amount_to_pay'  => (float) ($invoice['amount_to_pay'] ?? $invoice['total_with_vat']),
+            // Upomínka po částečné úhradě (#89) chce jen zbývající dluh.
+            'amount_to_pay'  => round(
+                (float) ($invoice['amount_to_pay'] ?? $invoice['total_with_vat']) - (float) ($invoice['paid_total'] ?? 0),
+                2,
+            ),
             'days_overdue'   => $daysOverdue,
             'subject'        => $subject,
             'qr_data_uri'    => $this->generateQr($invoice),
@@ -62,12 +66,18 @@ final class InvoiceEmailVarsBuilder
     {
         $type = (string) $invoice['invoice_type'];
         $varsymbol = (string) ($invoice['varsymbol'] ?? '');
-        $amount = (float) ($invoice['amount_to_pay'] ?? $invoice['total_with_vat']);
+        // Částka k úhradě v e-mailu = zbývající dluh — částečné úhrady (#89) se odečítají
+        // (upomínka po částečné platbě musí chtít jen zbytek).
+        $amount = round(
+            (float) ($invoice['amount_to_pay'] ?? $invoice['total_with_vat']) - (float) ($invoice['paid_total'] ?? 0),
+            2,
+        );
 
         $typeLabel = match ($type) {
-            'proforma'    => $locale === 'en' ? 'proforma invoice' : 'zálohovou fakturu',
-            'credit_note' => $locale === 'en' ? 'credit note' : 'opravný daňový doklad',
-            default       => $locale === 'en' ? 'invoice' : 'fakturu',
+            'proforma'     => $locale === 'en' ? 'proforma invoice' : 'zálohovou fakturu',
+            'credit_note'  => $locale === 'en' ? 'credit note' : 'opravný daňový doklad',
+            'tax_document' => $locale === 'en' ? 'tax document for payment received' : 'daňový doklad k přijaté platbě',
+            default        => $locale === 'en' ? 'invoice' : 'fakturu',
         };
 
         // Pozn.: dříve se `intro` skládal s embedovaným <strong>č. {VS}</strong> a v šabloně
@@ -110,8 +120,10 @@ final class InvoiceEmailVarsBuilder
 
     private function generateQr(array $invoice): ?string
     {
+        // QR na zbývající částku — po částečné úhradě (#89) se platí jen zbytek.
+        $remaining = round((float) ($invoice['amount_to_pay'] ?? 0) - (float) ($invoice['paid_total'] ?? 0), 2);
         if (empty($invoice['varsymbol'])) return null;
-        if (($invoice['amount_to_pay'] ?? 0) <= 0) return null;
+        if ($remaining <= 0) return null;
         if (($invoice['status'] ?? '') === 'paid') return null;
         if (($invoice['payment_method'] ?? 'bank_transfer') !== 'bank_transfer') return null;
 
@@ -135,7 +147,7 @@ final class InvoiceEmailVarsBuilder
 
         return $this->qr->generate(
             (string) $invoice['currency'],
-            (float) $invoice['amount_to_pay'],
+            $remaining,
             (string) $invoice['varsymbol'],
             $bank,
             (string) ($supplierName ?: 'MyInvoice'),

@@ -76,8 +76,33 @@ export function statusBadgeClass(status: string): string {
     reminded:  'bg-warning-50 text-warning-600',
     paid:      'bg-success-50 text-success-600',
     cancelled: 'bg-neutral-100 text-neutral-400',
+    // Odvozený platební stav (#89) — zobrazuje se místo lifecycle badge, když nese informaci.
+    partially_paid: 'bg-amber-50 text-amber-700',
+    overpaid:       'bg-purple-50 text-purple-700',
   }
   return classes[status] ?? 'bg-neutral-100 text-neutral-600'
+}
+
+/**
+ * Badge stav k zobrazení: lifecycle status, přepsaný odvozeným platebním stavem
+ * (partially_paid / overpaid), pokud nese informaci navíc (#89).
+ */
+export function displayStatus(status: string, paymentStatus?: string | null): string {
+  if (paymentStatus === 'partially_paid') return 'partially_paid'
+  if (paymentStatus === 'overpaid') return 'overpaid'
+  return status
+}
+
+/**
+ * Drobné barevné odlišení DUZP (tax_date), když se liší od data vystavení:
+ *  - DUZP dříve než vystaveno (nižší)   → amber (text-warning-600)
+ *  - DUZP později než vystaveno (vyšší) → modrá (text-accent-600)
+ *  - shodné / chybějící                 → neutrální
+ * Porovnává ISO řetězce 'YYYY-MM-DD' (lexikograficky = chronologicky), bez parsování.
+ */
+export function taxDateClass(taxDate: string | null | undefined, issueDate: string | null | undefined): string {
+  if (!taxDate || !issueDate || taxDate === issueDate) return 'text-neutral-600'
+  return taxDate < issueDate ? 'text-warning-600' : 'text-accent-600'
 }
 
 export function isOverdue(dueDate: string, status: string): boolean {
