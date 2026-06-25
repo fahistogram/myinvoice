@@ -1,491 +1,247 @@
-/* MyInvoice.cz — CSS pro PDF render faktury (mPDF kompatibilní) */
-/* @page se NEPOUŽÍVÁ — A4 + margins jsou nastaveny v Mpdf konstruktoru. */
+/* MyInvoice.cz — minimalistická faktura (mPDF kompatibilní). */
+/* Text: Satoshi. Čísla: JetBrains Mono. Žádné barevné plochy — jen linky a bílé místo. */
+/* @page se NEPOUŽÍVÁ — A4 + margins jsou v Mpdf konstruktoru. */
 
 body {
-    font-family: 'Inter', sans-serif;
+    font-family: 'satoshi', 'DejaVu Sans', sans-serif;
     font-size: 10pt;
-    color: #15131D;
-    line-height: 1.4;
+    color: #1A1A1A;
+    line-height: 1.5;
     margin: 0;
     padding: 0;
 }
-
 * { box-sizing: border-box; }
 
 /* ─── HLAVIČKA ─── */
 .head {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 7mm;
-    border-bottom: 1.5pt solid #3B2D83;
+    margin-bottom: 9mm;
+    border-bottom: 0.8pt solid #1A1A1A;
 }
-/* Dobropis — červený header pro vizuální odlišení */
-.head.credit-note {
-    border-bottom-color: #D45B5B;
-}
+.head.credit-note { border-bottom-color: #C0392B; }
 .head.credit-note .brand-name,
-.head.credit-note .doc-type {
-    color: #D45B5B;
-}
-.head.cancellation {
-    border-bottom-color: #7A748C;
-}
+.head.credit-note .doc-type { color: #C0392B; }
+.head.cancellation { border-bottom-color: #9B9B9B; }
 .head.cancellation .brand-name,
-.head.cancellation .doc-type {
-    color: #7A748C;
-    text-decoration: line-through;
-}
-.head td { vertical-align: middle; padding-bottom: 4mm; }
+.head.cancellation .doc-type { color: #9B9B9B; text-decoration: line-through; }
+.head td { vertical-align: bottom; padding-bottom: 4mm; }
 td.logo { width: 55%; }
 td.logo img { max-width: 60mm; max-height: 20mm; }
-/* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name) — název je SOUSEDNÍ buňka
-   .head tabulky, ne vnořená tabulka (ta v mPDF rozbíjela border-collapse spodní čáru).
-   Logo-cell se zúží na obsah (width:1%) + padding-right = mezera k názvu. */
-/* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name): dvě sousední buňky .head,
-   žádná vnořená tabulka (ta v mPDF mazala spodní čáru hlavičky). Mezeru dělá pevná
-   šířka buňky loga — mPDF na buňce respektuje `width`, ne padding. */
 td.logo-img-cell { width: 14mm; }
 td.logo-img-cell img { max-width: 13mm; max-height: 18mm; }
-td.logo-name {
-    white-space: nowrap;
-    font-size: 14pt;
-    font-weight: bold;
-    color: #15131D;
-    line-height: 1.2;
-}
+td.logo-name { white-space: nowrap; font-size: 14pt; font-weight: bold; color: #1A1A1A; line-height: 1.2; }
 td.meta { width: 45%; text-align: right; }
 .brand-name {
-    font-size: 16pt;
+    font-size: 17pt;
     font-weight: bold;
-    color: #3B2D83;
+    color: #1A1A1A;
     line-height: 1.1;
     white-space: nowrap;
     letter-spacing: -0.2pt;
 }
 .doc-type {
-    font-family: 'Inter SemiBold', sans-serif;
-    font-size: 13pt;
+    font-size: 10pt;
     font-weight: bold;
-    color: #3B2D83;
-    margin-bottom: 1mm;
+    color: #1A1A1A;
+    margin-bottom: 1.5mm;
     line-height: 1.2;
     white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 1.5pt;
 }
 .varsymbol-big {
-    font-size: 22pt;
+    font-size: 21pt;
     font-weight: bold;
-    color: #15131D;
+    color: #1A1A1A;
     font-family: 'jetbrainsmono', monospace;
     line-height: 1.05;
     letter-spacing: -0.5pt;
 }
-.parent-ref {
-    font-size: 9pt;
-    color: #7A748C;
-    margin-top: 1mm;
-}
+.parent-ref { font-size: 9pt; color: #6B6B6B; margin-top: 1mm; }
 .isdoc-badge {
     display: inline-block;
     margin-top: 2mm;
-    padding: 0.5mm 2mm;
+    padding: 0.4mm 2mm;
     font-size: 7pt;
     font-weight: bold;
-    letter-spacing: 0.3pt;
-    color: #3B2D83;
-    background: #EFEAFF;
-    border: 0.4pt solid #C6BCE8;
-    border-radius: 1.5mm;
+    letter-spacing: 0.5pt;
+    color: #6B6B6B;
+    border: 0.4pt solid #C9C9C9;
     line-height: 1.4;
 }
 
-/* ─── STRANY (dodavatel / odběratel) ─── */
-.parties {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 5mm;
-}
-.parties td {
-    width: 50%;
-    vertical-align: top;
-    padding: 0 6mm 0 0;
-    border: none;
-    background: transparent;
-}
-/* Vzdušné sloupce (styl Websupport) — místo orámovaných boxů jen tenká dělící linka. */
-.parties td.party-right {
-    padding: 0 0 0 6mm;
-    border-left: 0.5pt solid #E7E3EE;
-}
+/* ─── STRANY (dodavatel / odběratel) — dva čisté sloupce, bez podbarvení ─── */
+.parties { width: 100%; border-collapse: collapse; margin-bottom: 7mm; }
+.parties td { width: 50%; vertical-align: top; padding: 0 6mm 0 0; }
+.parties td.party-customer { padding: 0 0 0 6mm; }
 .parties h2 {
-    margin: 0 0 4mm;
-    font-family: 'Inter SemiBold', sans-serif;
-    font-size: 9pt;
+    margin: 0 0 2.5mm;
+    font-size: 8pt;
     text-transform: uppercase;
-    letter-spacing: 1pt;
-    color: #6753AE;
+    letter-spacing: 1.5pt;
+    color: #9B9B9B;
     font-weight: bold;
 }
-.party-name {
-    font-size: 12pt;
-    font-weight: bold;
-    margin-bottom: 1mm;
-    line-height: 1.3;
-    color: #15131D;
-}
+.party-name { font-size: 12pt; font-weight: bold; margin-bottom: 0.5mm; line-height: 1.3; color: #1A1A1A; }
 .ic-dic {
     font-family: 'jetbrainsmono', monospace;
-    font-size: 9pt;
-    color: #5A5470;
-    margin-top: 5mm;
-    line-height: 1.6;
+    font-size: 8.5pt;
+    color: #6B6B6B;
+    margin-top: 4mm;
+    line-height: 1.7;
 }
 
-/* ─── METADATA ─── */
+/* Spacery — mPDF v buňkách neaplikuje margin spolehlivě; &nbsp; + font-size dělá výšku. */
+.spacer-2 { font-size: 4pt; line-height: 1; }
+.spacer-3 { font-size: 6pt; line-height: 1; }
+.spacer-4 { font-size: 9pt; line-height: 1; }
+.spacer-5 { font-size: 12pt; line-height: 1; }
+.nowrap { white-space: nowrap; }
+
+/* ─── METADATA — řádek mezi dvěma tenkými linkami ─── */
 .meta-grid {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 5mm;
+    margin-bottom: 7mm;
     font-size: 9.5pt;
+    border-top: 0.5pt solid #E3E3E3;
+    border-bottom: 0.5pt solid #E3E3E3;
 }
-.meta-grid td {
-    padding: 1.6mm 3mm;
-    vertical-align: top;
-    border-bottom: 0.5pt solid #E7E3EE;
-}
-.meta-grid tr:last-child td {
-    border-bottom: none;
-}
+.meta-grid td { padding: 1.8mm 0; vertical-align: top; }
 td.meta-label {
-    width: 32mm;
-    color: #6753AE;
-    font-size: 8.5pt;
+    width: 30mm;
+    color: #9B9B9B;
+    font-size: 8pt;
     font-weight: bold;
     white-space: nowrap;
-    letter-spacing: 0.2pt;
+    letter-spacing: 0.4pt;
+    text-transform: uppercase;
+    padding-right: 3mm;
 }
-td.meta-value {
-    font-weight: bold;
-    white-space: nowrap;
-}
+td.meta-value { font-weight: bold; white-space: nowrap; padding-right: 6mm; }
 td.meta-value.mono { font-family: 'jetbrainsmono', monospace; }
 
-/* ─── SHRNUTÍ (klíčová data + hero celková částka, styl Websupport) ─── */
-.summary {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 5mm;
-}
-.summary-facts, .summary-total { vertical-align: middle; }
-.summary-facts { width: 60%; padding-right: 6mm; }
-.summary-dates { width: 100%; border-collapse: collapse; }
-.summary-dates td { vertical-align: top; padding-right: 7mm; }
-.sum-k {
-    font-family: 'Inter SemiBold', sans-serif;
-    font-size: 7.5pt;
-    text-transform: uppercase;
-    letter-spacing: 0.6pt;
-    color: #6753AE;
-    font-weight: bold;
-}
-.sum-v {
-    font-size: 11pt;
-    font-weight: bold;
-    color: #15131D;
-    line-height: 1.2;
-    white-space: nowrap;
-}
-/* Hero celková částka — plná modrá plocha vpravo (přebarvuje branding accent). */
-.summary-total {
-    width: 40%;
-    background: #3B2D83;
-    padding: 4mm;
-    text-align: right;
-}
-.sum-total-k {
-    font-family: 'Inter SemiBold', sans-serif;
-    font-size: 8pt;
-    text-transform: uppercase;
-    letter-spacing: 0.8pt;
-    color: #FFFFFF;
-    font-weight: bold;
-}
-.sum-total-v {
-    font-size: 16pt;
-    font-weight: bold;
-    color: #FFFFFF;
-    line-height: 1.2;
-    white-space: nowrap;
-}
-
-/* Univerzální — zákaz wrap pro číselné buňky */
-.nowrap { white-space: nowrap; }
-
-/* Spacery — mPDF v tabulkových buňkách neaplikuje margin/padding na <div> spolehlivě.
-   Používáme &nbsp; obsah + explicit font-size, aby div dostal zaručenou výšku. */
-.spacer-2 { font-size: 6pt; line-height: 1; }
-.spacer-3 { font-size: 9pt; line-height: 1; }
-.spacer-4 { font-size: 12pt; line-height: 1; }
-.spacer-5 { font-size: 15pt; line-height: 1; }
-
-/* ─── POLOŽKY ─── */
-table.items {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 5mm;
-    font-size: 9pt;
-}
-/* Lehká hlavička tabulky (styl Websupport) — modrý text na modré lince, bez plné výplně. */
+/* ─── POLOŽKY — hlavička jen linkou, žádný zebra pruh ─── */
+table.items { width: 100%; border-collapse: collapse; margin-bottom: 6mm; font-size: 9pt; }
 table.items th {
-    background: #FFFFFF;
-    color: #3B2D83;
-    font-family: 'Inter SemiBold', sans-serif;
+    color: #9B9B9B;
     font-size: 8pt;
     text-transform: uppercase;
-    letter-spacing: 0.6pt;
-    padding: 2.5mm 2.5mm;
+    letter-spacing: 0.7pt;
+    padding: 0 2.5mm 2mm;
     text-align: left;
-    font-weight: 700;
-    border-bottom: 1.2pt solid #3B2D83;
+    font-weight: bold;
+    border-bottom: 0.8pt solid #1A1A1A;
 }
-table.items td {
-    padding: 2.8mm 2.5mm;
-    border-bottom: 0.3pt solid #E7E3EE;
-    vertical-align: top;
-}
-table.items tr:nth-child(even) td { background: #FBFAFD; }
+table.items td { padding: 2.6mm 2.5mm; border-bottom: 0.4pt solid #E8E8E8; vertical-align: top; }
 table.items .num { text-align: right; font-family: 'jetbrainsmono', monospace; }
 table.items .center { text-align: center; }
+table.items .vat { font-size: 8.5pt; }
 
 /* ─── SUMACE ─── */
-.totals {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 5mm;
-}
+.totals { width: 100%; border-collapse: collapse; margin-bottom: 6mm; }
 .totals td { vertical-align: top; padding: 0; }
-.totals .left { width: 55%; padding-right: 4mm; }
-.totals .right { width: 45%; }
+.totals .left { width: 52%; padding-right: 8mm; }
+.totals .right { width: 48%; }
 
-table.totals-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 9.5pt;
-}
-table.totals-table td {
-    padding: 1.6mm 3mm;
-}
-td.tot-label {
-    color: #5A5470;
-    text-align: right;
-    font-weight: bold;
-}
-td.tot-num {
-    text-align: right;
-    font-family: 'jetbrainsmono', monospace;
-    width: 38mm;
-    font-weight: bold;
-}
-table.totals-table tr.subtotal td {
-    border-top: 0.5pt solid #D2CCDF;
-    font-weight: 600;
-}
+table.totals-table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+table.totals-table td { padding: 1.5mm 0; }
+td.tot-label { color: #6B6B6B; text-align: right; font-weight: normal; padding-right: 5mm; }
+td.tot-num { text-align: right; font-family: 'jetbrainsmono', monospace; width: 38mm; font-weight: bold; }
+table.totals-table tr.subtotal td { border-top: 0.5pt solid #E3E3E3; }
+table.totals-table tr.discount-row td { color: #6B6B6B; }
+/* Celkem — zvýrazněno jen silnou linkou + velikostí, ne výplní. */
 table.totals-table tr.grand td {
-    background: #3B2D83;
-    color: #FFFFFF;
+    border-top: 0.8pt solid #1A1A1A;
     font-size: 13pt;
     font-weight: bold;
-    padding: 3mm;
+    color: #1A1A1A;
+    padding-top: 2.5mm;
 }
-table.totals-table tr.grand td.tot-label { color: #FFFFFF; }
-table.totals-table tr.advance td { color: #5A5470; }
+table.totals-table tr.grand td.tot-label { color: #1A1A1A; }
+table.totals-table tr.advance td { color: #6B6B6B; }
 table.totals-table tr.advance td.tot-label { font-style: italic; }
 table.totals-table tr.to-pay td {
-    border-top: 1pt solid #3B2D83;
-    background: #F4F2F8;
+    border-top: 0.5pt solid #1A1A1A;
     font-weight: bold;
     font-size: 12pt;
-    color: #3B2D83;
-    padding: 2.5mm 3mm;
+    color: #1A1A1A;
+    padding-top: 2mm;
 }
 table.totals-table tr.rate-note td.rate-note-cell {
     text-align: right;
     font-size: 8.5pt;
-    color: #5A5470;
+    color: #9B9B9B;
     font-style: italic;
     padding-top: 1.5mm;
 }
 
 /* ─── CZK přepočet (cizí měna) ─── */
-table.czk-recap {
-    width: 60%;
-    margin-left: auto;
-    margin-top: 5mm;
-    border-collapse: collapse;
-    font-size: 9pt;
-    background: #F2F2F2;
-}
-table.czk-recap td {
-    padding: 1.4mm 3mm;
-    background: #F2F2F2;
-}
+table.czk-recap { width: 60%; margin-left: auto; margin-top: 5mm; border-collapse: collapse; font-size: 9pt; }
+table.czk-recap td { padding: 1.3mm 0; }
 table.czk-recap td.czk-recap-title {
-    font-size: 9.5pt;
+    font-size: 8.5pt;
     font-weight: bold;
-    color: #3B2D83;
-    border-bottom: 0.5pt solid #C9C0E9;
+    color: #6B6B6B;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+    border-bottom: 0.5pt solid #E3E3E3;
     padding-bottom: 1.5mm;
 }
-.czk-recap-rate {
-    font-weight: normal;
-    color: #5A5470;
-    font-size: 8.5pt;
-    margin-left: 2mm;
-}
-table.czk-recap td.tot-label {
-    color: #5A5470;
-    text-align: right;
-    font-weight: bold;
-}
-table.czk-recap td.tot-num {
-    text-align: right;
-    font-family: 'jetbrainsmono', monospace;
-    width: 32mm;
-    font-weight: bold;
-}
-table.czk-recap tr.subtotal td {
-    border-top: 0.5pt solid #D2CCDF;
-    background: #EAEAEA;
-}
-table.czk-recap tr.grand td {
-    background: #DCDCDC;
-    color: #3B2D83;
-    font-size: 10.5pt;
-    font-weight: bold;
-    padding: 2mm 3mm;
-}
+.czk-recap-rate { font-weight: normal; color: #9B9B9B; font-size: 8.5pt; margin-left: 2mm; }
+table.czk-recap td.tot-label { color: #6B6B6B; text-align: right; font-weight: normal; padding-right: 5mm; }
+table.czk-recap td.tot-num { text-align: right; font-family: 'jetbrainsmono', monospace; width: 32mm; font-weight: bold; }
+table.czk-recap tr.subtotal td { border-top: 0.5pt solid #E3E3E3; }
+table.czk-recap tr.grand td { font-size: 10pt; font-weight: bold; color: #1A1A1A; border-top: 0.6pt solid #1A1A1A; padding-top: 1.5mm; }
 
-/* ─── QR + bank ─── */
-table.bank-frame {
-    width: 100%;
-    border: 0.5pt solid #C9C0E9;
-    border-collapse: collapse;
-    border-radius: 2mm;
-}
-table.bank-frame td {
-    padding: 3mm;
-    font-size: 10pt;
-    line-height: 1.5;
-}
+/* ─── Platební sekce: QR + bankovní spojení vedle sebe, bez panelu ─── */
+.pay-panel { width: 100%; height: 100%; border-collapse: collapse; }
+.pay-panel td { padding: 0 5mm 0 0; font-size: 10pt; line-height: 1.6; vertical-align: top; }
+.pay-panel td.pay-info { padding-right: 0; }
+.pay-panel.pay-panel-paid .bank-label { color: #2E7D46; }
+/* QR — výrazný, hned vlevo. */
+.pay-panel td.pay-qr { width: 38mm; text-align: left; white-space: nowrap; padding: 0; }
+.pay-panel td.pay-qr img { width: 35mm; height: 35mm; }
 .bank-label {
-    font-size: 9pt;
-    text-transform: uppercase;
-    letter-spacing: 0.8pt;
-    color: #6753AE;
-    font-weight: bold;
-    margin-bottom: 4mm;
-    line-height: 1.2;
-}
-.bank-value {
-    font-family: 'jetbrainsmono', monospace;
-    font-weight: bold;
-    color: #15131D;
-    font-size: 9.5pt;
-    line-height: 1.5;
-    white-space: nowrap;
-}
-.bank-meta-line {
-    font-size: 9pt;
-    color: #5A5470;
-    line-height: 1.6;
-}
-
-.qr-box {
-    text-align: center;
-    padding: 2mm;
-    border: 1pt solid #D2CCDF;
-    border-radius: 2mm;
-    background: #FFFFFF;
-}
-.qr-box img { width: 35mm; height: 35mm; }
-.qr-box .qr-label {
     font-size: 8pt;
-    color: #6753AE;
     text-transform: uppercase;
     letter-spacing: 1pt;
-    font-weight: 700;
-    margin-top: 1mm;
-}
-
-/* Notes a poznámky */
-.note {
-    margin: 4mm 0;
-    padding: 3mm;
-    background: #FBFAFD;
-    border-left: 2pt solid #6753AE;
-    font-size: 9pt;
-    color: #403B52;
-}
-.rc-note {
-    background: #FDF6E9;
-    border-left: 2pt solid #E8A547;
-    color: #8B6420;
-    font-weight: 600;
-}
-
-/* Poděkování (styl Websupport) */
-.thanks {
-    margin-top: 7mm;
-    text-align: center;
-    font-family: 'Inter SemiBold', sans-serif;
-    font-size: 12pt;
+    color: #9B9B9B;
     font-weight: bold;
-    letter-spacing: 0.3pt;
-    color: #3B2D83;
+    margin-bottom: 3mm;
+    line-height: 1.2;
 }
+.bank-value { font-family: 'jetbrainsmono', monospace; font-weight: bold; color: #1A1A1A; font-size: 9.5pt; line-height: 1.6; white-space: nowrap; }
+.bank-meta-line { font-size: 9pt; color: #6B6B6B; line-height: 1.6; }
 
-/* Footer */
-.commercial-register {
-    margin-top: 6mm;
-    margin-bottom: -4mm;
-    text-align: center;
-    font-size: 8pt;
-    color: #7A748C;
-    font-family: 'Inter', sans-serif;
-}
+/* ─── Poznámky — jen tenká linka vlevo, bez podbarvení ─── */
+.note { margin: 4mm 0; padding: 0.5mm 0 0.5mm 3.5mm; border-left: 1.5pt solid #C9C9C9; font-size: 9pt; color: #404040; line-height: 1.5; }
+.rc-note { border-left-color: #B7791F; color: #7A5210; font-weight: bold; }
+.proforma-note { font-size: 9pt; color: #6B6B6B; margin: 3mm 0; }
+
+/* ─── Footer — podpis dodavatele + zápis v OR ─── */
 .footer {
-    margin-top: 6mm;
-    padding-top: 3mm;
-    border-top: 0.5pt solid #E7E3EE;
+    margin-top: 10mm;
+    padding-top: 3.5mm;
+    border-top: 0.5pt solid #E3E3E3;
     text-align: center;
-    font-size: 8pt;
-    color: #A7A0BA;
-    font-family: 'Inter', sans-serif;
+    font-size: 8.5pt;
+    color: #8A8A8A;
+    letter-spacing: 0.2pt;
 }
-/* mPDF htmlpagefooter — attribution na patě KAŽDÉ stránky */
-.page-attribution {
-    text-align: center;
-    font-size: 7pt;
-    color: #C5BFD3;
-    font-family: 'Inter', sans-serif;
-}
-.page-attribution a {
-    color: #A7A0BA;
-    text-decoration: none;
-}
+.footer-name { font-weight: bold; color: #1A1A1A; }
+.footer-dot { color: #C9C9C9; }
+.footer a, .footer-link { color: inherit; text-decoration: none; }
+.commercial-register { margin-top: 1.8mm; text-align: center; font-size: 7.5pt; color: #B0B0B0; letter-spacing: 0.15pt; }
+
+/* mPDF htmlpagefooter — attribution na patě stránky (pokud se použije) */
+.page-attribution { text-align: center; font-size: 7pt; color: #C9C9C9; }
+.page-attribution a { color: #B0B0B0; text-decoration: none; }
 
 /* Stránkování — výkaz víceprací na nové straně */
 .page-break { page-break-before: always; }
 
 /* ─── VÝKAZ VÍCEPRACÍ ─── */
-/* Nadpis výkazu (byl inline ve šabloně — vytaženo do třídy kvůli branding override). */
-.wr-title {
-    font-size: 11pt;
-    font-weight: bold;
-    color: #3B2D83;
-    margin-bottom: 1mm;
-}
-/* Proklikávací popis položky faktury → odkaz na stránku s výkazem (podtržený). */
-.wr-link {
-    color: #3B2D83;
-    text-decoration: underline;
-}
+.wr-title { font-size: 11pt; font-weight: bold; color: #1A1A1A; margin-bottom: 1mm; }
+.wr-link { color: #1A1A1A; text-decoration: underline; }
