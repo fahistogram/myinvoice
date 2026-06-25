@@ -119,6 +119,10 @@ final class Bootstrap
                 // #127 — automatické párování (GPC import, e-mailové avízo, cron) musí
                 // poslat děkovný e-mail za úhradu stejně jako ruční mark-paid/manualMatch.
                 $c->get(\MyInvoice\Service\Mail\PaymentThanksMailer::class),
+                // #89 — evidence plateb (exact i částečné úhrady přes invoice_payments)
+                // + auto DRAFT daňového dokladu k přijaté platbě u částečně uhrazené proformy.
+                $c->get(\MyInvoice\Service\Invoice\InvoicePaymentService::class),
+                $c->get(\MyInvoice\Service\Invoice\PaymentTaxDocumentCreator::class),
             ),
 
             // IpMatcher má v konstruktoru volitelný `?Config $config = null`. Autowiring
@@ -127,6 +131,16 @@ final class Bootstrap
             // Za reverse proxy → audit log a brute-force lockout vidí IP proxy místo
             // reálného klienta. Explicitní injekce Configu to opravuje.
             IpMatcher::class       => fn (ContainerInterface $c) => new IpMatcher($c->get(Config::class)),
+
+            // Kniha jízd — registry parserů detailních výpisů tankování. Pořadí = priorita:
+            // konkrétní vendor parsery → AI fallback → univerzální summary (vždy uspěje).
+            // PŘIDÁNÍ NOVÉ TANKOVACÍ SPOLEČNOSTI: vytvoř třídu implements FuelStatementParser
+            // a vlož ji do tohoto pole PŘED AiFuelStatementParser.
+            \MyInvoice\Service\Logbook\Fuel\FuelStatementParserRegistry::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Logbook\Fuel\FuelStatementParserRegistry([
+                $c->get(\MyInvoice\Service\Logbook\Fuel\AxigonStatementParser::class),
+                $c->get(\MyInvoice\Service\Logbook\Fuel\AiFuelStatementParser::class),
+                $c->get(\MyInvoice\Service\Logbook\Fuel\SummaryFuelParser::class),
+            ]),
         ]);
 
         $container = $builder->build();

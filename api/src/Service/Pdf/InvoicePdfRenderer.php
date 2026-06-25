@@ -124,8 +124,8 @@ final class InvoicePdfRenderer
             'format'            => 'A4',
             'margin_top'        => 15,
             'margin_bottom'     => 18,
-            'margin_left'       => 15,
-            'margin_right'      => 15,
+            'margin_left'       => 12,
+            'margin_right'      => 12,
             'tempDir'           => $tmpDir,
             'autoPageBreak'     => true,
             ...PdfFonts::mpdfConfig(),
@@ -225,7 +225,11 @@ final class InvoicePdfRenderer
         //     → drafty bez VS dostanou QR taky (preview pro klienta), remittance fallback
         //   Skip pro zaplacené faktury a pro non-bank-transfer payment_method
         $qrUri = null;
-        $hasAmount = (float) $invoice['amount_to_pay'] > 0;
+        // Částečné úhrady (#89): QR i výzva k platbě znějí na ZBÝVAJÍCÍ částku
+        // (amount_to_pay − paid_total) — znovu stažené/poslané PDF po částečné
+        // úhradě nesmí chtít celou částku. Cache se při změně plateb invaliduje.
+        $remaining = round((float) $invoice['amount_to_pay'] - (float) ($invoice['paid_total'] ?? 0), 2);
+        $hasAmount = $remaining > 0;
         $isCzk = ((string) $invoice['currency']) === 'CZK';
         $hasVs = !empty($invoice['varsymbol']);
         $isPaid = ($invoice['status'] ?? '') === 'paid';
@@ -234,7 +238,7 @@ final class InvoicePdfRenderer
         if ($hasAmount && $bankData !== null && (!$isCzk || $hasVs) && !$isPaid && $isBankTransfer) {
             $qrUri = $this->qr->generate(
                 (string) $invoice['currency'],
-                (float) $invoice['amount_to_pay'],
+                $remaining,
                 (string) ($invoice['varsymbol'] ?? ''),
                 $bankData,
                 (string) ($supplierData['display_name'] ?? $supplierData['company_name'] ?? 'MyInvoice'),
@@ -276,7 +280,10 @@ final class InvoicePdfRenderer
             'work_report'       => $this->workReports->findByInvoice((int) $invoice['id']),
             'date_format'       => $locale === 'en' ? 'M j, Y' : 'j. n. Y',
             'decimal_sep'       => $locale === 'en' ? '.' : ',',
-            'thousand_sep'      => $locale === 'en' ? ',' : ' ',
+            // Nezlomitelná mezera (NBSP, U+00A0) jako oddělovač tisíců — mPDF v úzkých
+            // číselných buňkách (Cena/j, Bez/S DPH) láme i přes white-space:nowrap; NBSP
+            // drží celé číslo „298 833,00" na jednom řádku spolehlivě.
+            'thousand_sep'      => $locale === 'en' ? ',' : "\u{00A0}",
             'css'               => $css,
             'logo_path'         => $logoPath,
             // Opt-in: vedle loga vykreslit i název firmy (migrace 0058). Jen když logo
@@ -400,6 +407,21 @@ final class InvoicePdfRenderer
             $snap = is_string($invoice['bank_snapshot']) ? json_decode($invoice['bank_snapshot'], true) : $invoice['bank_snapshot'];
             if (is_array($snap)) {
                 $row = array_merge($live, $snap);
+                // Snapshot je primární (historický stav účtu), ALE prázdná hodnota ve snapshotu
+                // nesmí přebít neprázdné live pole. Týká se hlavně `bank_name`: starší faktury
+                // se vystavily dřív, než CRPDPH enrichment doplnil název banky do currencies →
+                // snapshot má bank_name='' a array_merge ho nechá vyhrát (banka se netiskne).
+                // Název banky je jen popisek bankovního kódu, takže ho doplníme z live JEN když
+                // jde o stejný účet (shodný bank_code) — jinak by mohl popisovat jiný účet.
+                $sameAccount = (string) ($snap['bank_code'] ?? '') === (string) ($live['bank_code'] ?? '')
+                    && (string) ($snap['iban'] ?? '') === (string) ($live['iban'] ?? '');
+                if ($sameAccount) {
+                    foreach (['bank_name', 'bic'] as $k) {
+                        if (empty($row[$k]) && !empty($live[$k])) {
+                            $row[$k] = $live[$k];
+                        }
+                    }
+                }
             }
         }
         if (empty($row)) return null;
@@ -432,12 +454,14 @@ final class InvoicePdfRenderer
                 'proforma'     => 'Zálohová faktura',
                 'credit_note'  => $isVatPayer ? 'Opravný daňový doklad' : 'Opravná faktura',
                 'cancellation' => 'Storno (interní)',
+                'tax_document' => 'Daňový doklad k přijaté platbě',
             ],
             'en' => [
                 'invoice'      => $isVatPayer ? 'Invoice — Tax document' : 'Invoice',
                 'proforma'     => 'Proforma invoice',
                 'credit_note'  => $isVatPayer ? 'Credit note — Tax adjustment' : 'Credit note',
                 'cancellation' => 'Cancellation (internal)',
+                'tax_document' => 'Tax document for payment received',
             ],
         ];
         return $labels[$locale][$invoice['invoice_type']] ?? $labels['cs'][$invoice['invoice_type']] ?? '';
@@ -450,6 +474,7 @@ final class InvoicePdfRenderer
             'proforma'     => 'Zálohová faktura',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
+            'tax_document' => 'Daňový doklad k platbě',
             default        => 'Faktura',
         };
         return "$t $vs";
@@ -499,7 +524,9 @@ final class InvoicePdfRenderer
                 return $svgAbs;
             }
         }
-        return $abs;
+        // PNG fallback: splácni alfa kanál na bílou — mPDF neumí SMask u truecolor
+        // RGBA PNG a vykreslil by průhledné pozadí černě (issue #152).
+        return PdfLogoFlattener::flattenedPath($abs);
     }
 
     /**
@@ -539,6 +566,34 @@ final class InvoicePdfRenderer
             || !empty($invoice['bank_snapshot']);
         if (!$hasAny) return $invoice;
 
+        return $this->writeSnapshots($invoice);
+    }
+
+    /**
+     * Přepíše snapshoty (supplier/client/bank) z aktuálních live dat — voláno při
+     * admin force-editu VYSTAVENÉ faktury, aby se opravené údaje stran (adresa/IČO/
+     * název odběratele, banka) promítly do nově generovaného PDF.
+     *
+     * Narozdíl od refreshSnapshots() (regenerate cesta, jen drafty) tahle metoda
+     * ZÁMĚRNĚ přepíše snapshot i u issued/sent/paid faktury — je to vědomá oprava
+     * dokladu, kterou UI uživateli avizuje („Změny přepíšou snapshoty"). Auditní
+     * stopu (kdo/kdy/co) zajišťuje volající přes ActivityLogger.
+     */
+    public function rebuildSnapshots(int $invoiceId): void
+    {
+        $invoice = $this->repo->find($invoiceId);
+        if ($invoice === null) return;
+        $this->writeSnapshots($invoice);
+    }
+
+    /**
+     * Postaví snapshoty z live dat a uloží do invoices. Sdílené jádro pro
+     * refreshSnapshots() (drafty) i rebuildSnapshots() (force-edit vystavené).
+     *
+     * @return array  invoice array s aktualizovanými snapshoty (in-memory)
+     */
+    private function writeSnapshots(array $invoice): array
+    {
         try {
             $built = $this->snapshots->build(
                 (int) $invoice['client_id'],
@@ -632,6 +687,7 @@ final class InvoicePdfRenderer
             'proforma'     => 'Proforma',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
+            'tax_document' => 'DanovyDoklad',
             default        => 'Faktura',
         };
         return "$dir/$type-$vs.pdf";

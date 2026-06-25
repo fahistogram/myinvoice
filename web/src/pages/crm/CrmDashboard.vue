@@ -175,6 +175,35 @@ const prev12mKpi      = computed(() => pickKpi(overview.value?.prev_12m))
 const prevYearFullKpi = computed(() => pickKpi(overview.value?.prev_year_full))
 const prevYearYtdKpi  = computed(() => pickKpi(overview.value?.prev_year_ytd))
 
+// Dopředné tržby aktuálního měsíce (koncepty + nespárované proformy) — zatím nevystavené,
+// proto NEjsou v currentMonthKpi.revenue. U „Vše" sčítáme CZK přepočet, jinak nativní měnu.
+const pipelineThisMonth = computed(() => {
+  const rows = overview.value?.current_month_pipeline || []
+  if (currencyFilter.value === ALL_CURRENCIES) {
+    return rows.reduce((a, r) => {
+      a.draft += r.draft_revenue_czk; a.draftCount += r.draft_count
+      a.proforma += r.proforma_revenue_czk; a.proformaCount += r.proforma_count
+      return a
+    }, { draft: 0, draftCount: 0, proforma: 0, proformaCount: 0 })
+  }
+  const row = rows.find(r => r.currency === currencyFilter.value)
+  return {
+    draft: row?.draft_revenue || 0,
+    draftCount: row?.draft_count || 0,
+    proforma: row?.proforma_revenue || 0,
+    proformaCount: row?.proforma_count || 0,
+  }
+})
+// Očekávané tržby = vystavené + koncepty + nespárované proformy.
+const expectedThisMonth = computed(() =>
+  (currentMonthKpi.value?.revenue || 0) + pipelineThisMonth.value.draft + pipelineThisMonth.value.proforma)
+const hasPipeline = computed(() => pipelineThisMonth.value.draft !== 0 || pipelineThisMonth.value.proforma !== 0)
+// Očekávaný zisk = očekávané tržby − náklady (symetrie s dlaždicí Tržby). Náklady jsou
+// jen z ostrých dokladů (koncepty/proformy nákladů do pipeline nevstupují), takže
+// expectedProfit = vystavený zisk + koncepty + nespárované proformy.
+const expectedProfitThisMonth = computed(() =>
+  expectedThisMonth.value - (currentMonthKpi.value?.costs || 0))
+
 // Trend % vs last month
 function trendPct(current: number, last: number): number {
   if (last === 0) return current > 0 ? 100 : 0
@@ -442,15 +471,30 @@ onMounted(loadAll)
             </svg>
           </div>
           <div class="text-2xl font-bold text-neutral-900 font-mono">
-            {{ formatMoney(currentMonthKpi?.revenue || 0, displayCurrency) }}
+            {{ formatMoney(expectedThisMonth, displayCurrency) }}
           </div>
           <div class="text-xs text-neutral-500 mt-1">
-            {{ t('crm.kpi.this_month') }}
+            {{ t('crm.kpi.this_month') }}<span v-if="hasPipeline" class="text-neutral-400"> · {{ t('crm.kpi.expected') }}</span>
             <span v-if="lastMonthKpi" class="ml-2"
-              :class="trendPct(currentMonthKpi?.revenue || 0, lastMonthKpi.revenue) >= 0 ? 'text-success-600' : 'text-danger-500'">
-              {{ trendPct(currentMonthKpi?.revenue || 0, lastMonthKpi.revenue) >= 0 ? '▲' : '▼' }}
-              {{ Math.abs(trendPct(currentMonthKpi?.revenue || 0, lastMonthKpi.revenue)) }}%
+              :class="trendPct(expectedThisMonth, lastMonthKpi.revenue) >= 0 ? 'text-success-600' : 'text-danger-500'">
+              {{ trendPct(expectedThisMonth, lastMonthKpi.revenue) >= 0 ? '▲' : '▼' }}
+              {{ Math.abs(trendPct(expectedThisMonth, lastMonthKpi.revenue)) }}%
             </span>
+          </div>
+          <!-- Rozpad očekávaných tržeb: vystaveno + koncepty + nespárované proformy (jen když jsou dopředné složky) -->
+          <div v-if="hasPipeline" class="text-xs mt-3 pt-2 border-t border-neutral-100 space-y-0.5" :title="t('crm.kpi.pipeline_hint')">
+            <div class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>{{ t('crm.kpi.issued') }} <span class="text-neutral-400">({{ currentMonthKpi?.invoice_count || 0 }} {{ t('crm.kpi.invoices') }})</span></span>
+              <span class="font-mono">{{ formatMoney(currentMonthKpi?.revenue || 0, displayCurrency) }}</span>
+            </div>
+            <div v-if="pipelineThisMonth.draft" class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>+ {{ t('crm.kpi.drafts') }} <span class="text-neutral-400">({{ pipelineThisMonth.draftCount }})</span></span>
+              <span class="font-mono">{{ formatMoney(pipelineThisMonth.draft, displayCurrency) }}</span>
+            </div>
+            <div v-if="pipelineThisMonth.proforma" class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>+ {{ t('crm.kpi.proformas') }} <span class="text-neutral-400">({{ pipelineThisMonth.proformaCount }})</span></span>
+              <span class="font-mono">{{ formatMoney(pipelineThisMonth.proforma, displayCurrency) }}</span>
+            </div>
           </div>
           <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100 space-y-0.5">
             <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_12m_hint')">
@@ -467,7 +511,7 @@ onMounted(loadAll)
                 <span v-if="revYtdYoy.show" class="ml-1" :class="revYtdYoy.cls">{{ revYtdYoy.arrow }}{{ revYtdYoy.abs }}%</span>
               </span>
             </div>
-            <div>{{ currentMonthKpi?.invoice_count || 0 }} {{ t('crm.kpi.invoices') }}</div>
+            <div v-if="!hasPipeline">{{ currentMonthKpi?.invoice_count || 0 }} {{ t('crm.kpi.invoices') }}</div>
           </div>
         </div>
 
@@ -519,14 +563,29 @@ onMounted(loadAll)
             </svg>
           </div>
           <div class="text-2xl font-bold font-mono"
-            :class="(currentMonthKpi?.profit || 0) >= 0 ? 'text-success-600' : 'text-danger-500'">
-            {{ formatMoney(currentMonthKpi?.profit || 0, displayCurrency) }}
+            :class="expectedProfitThisMonth >= 0 ? 'text-success-600' : 'text-danger-500'">
+            {{ formatMoney(expectedProfitThisMonth, displayCurrency) }}
           </div>
           <div class="text-xs text-neutral-500 mt-1">
-            {{ t('crm.kpi.this_month') }}
-            <span v-if="currentMonthKpi && currentMonthKpi.revenue > 0" class="ml-2">
-              · {{ Math.round((currentMonthKpi.profit / currentMonthKpi.revenue) * 100) }}% {{ t('crm.kpi.margin') }}
+            {{ t('crm.kpi.this_month') }}<span v-if="hasPipeline" class="text-neutral-400"> · {{ t('crm.kpi.expected') }}</span>
+            <span v-if="expectedThisMonth > 0" class="ml-2">
+              · {{ Math.round((expectedProfitThisMonth / expectedThisMonth) * 100) }}% {{ t('crm.kpi.margin') }}
             </span>
+          </div>
+          <!-- Rozpad očekávaného zisku: vystavený zisk + koncepty + nespárované proformy (jen když jsou dopředné složky) -->
+          <div v-if="hasPipeline" class="text-xs mt-3 pt-2 border-t border-neutral-100 space-y-0.5" :title="t('crm.kpi.pipeline_hint')">
+            <div class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>{{ t('crm.kpi.issued') }}</span>
+              <span class="font-mono">{{ formatMoney(currentMonthKpi?.profit || 0, displayCurrency) }}</span>
+            </div>
+            <div v-if="pipelineThisMonth.draft" class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>+ {{ t('crm.kpi.drafts') }} <span class="text-neutral-400">({{ pipelineThisMonth.draftCount }})</span></span>
+              <span class="font-mono">{{ formatMoney(pipelineThisMonth.draft, displayCurrency) }}</span>
+            </div>
+            <div v-if="pipelineThisMonth.proforma" class="flex items-center justify-between gap-2 text-neutral-500">
+              <span>+ {{ t('crm.kpi.proformas') }} <span class="text-neutral-400">({{ pipelineThisMonth.proformaCount }})</span></span>
+              <span class="font-mono">{{ formatMoney(pipelineThisMonth.proforma, displayCurrency) }}</span>
+            </div>
           </div>
           <div class="text-xs text-neutral-400 mt-3 pt-2 border-t border-neutral-100 space-y-0.5">
             <div class="flex items-center justify-between gap-2" :title="t('crm.kpi.yoy_12m_hint')">

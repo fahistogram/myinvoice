@@ -1,0 +1,561 @@
+<script setup lang="ts">
+import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useToast } from '@/composables/useToast'
+import { formatDate, formatMonth } from '@/composables/useFormat'
+import {
+  logbookApi, type Car, type Trip, type TripPayload,
+  type TripCategory, type TripImportReport,
+} from '@/api/logbook'
+import { useAuthStore } from '@/stores/auth'
+import FilterBar from '@/components/ui/FilterBar.vue'
+
+const { t, locale } = useI18n()
+const toast = useToast()
+const auth = useAuthStore()
+const props = defineProps<{ resetToken?: number; openNewToken?: number }>()
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry"
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (filterCar.value !== '') n++
+  if (yearFilter.value !== '') n++
+  if (monthFilter.value !== '') n++
+  return n
+})
+
+const trips = ref<Trip[]>([])
+const cars = ref<Car[]>([])
+const categories = ref<TripCategory[]>([])
+const loading = ref(false)
+const filterCar = ref<number | ''>('')
+
+// Filtr rok/měsíc (client-side, default = vše) + stránkování
+const yearFilter = ref<number | ''>('')
+const monthFilter = ref<number | ''>('')
+const page = ref(1)
+const perPage = 25
+const purposes = ref<string[]>([])
+const places = ref<string[]>([])
+
+const yearOptions = computed(() => {
+  const ys = new Set<number>()
+  for (const tr of trips.value) ys.add(Number(tr.trip_date.slice(0, 4)))
+  return [...ys].sort((a, b) => b - a)
+})
+const monthOptions = computed(() => {
+  const loc = locale.value === 'en' ? 'en-US' : 'cs-CZ'
+  return Array.from({ length: 12 }, (_, i) => new Date(2000, i, 1).toLocaleDateString(loc, { month: 'long' }))
+})
+const filteredTrips = computed(() => trips.value.filter((tr) => {
+  if (yearFilter.value && Number(tr.trip_date.slice(0, 4)) !== yearFilter.value) return false
+  if (monthFilter.value && Number(tr.trip_date.slice(5, 7)) !== monthFilter.value) return false
+  return true
+}))
+const totalKm = computed(() => filteredTrips.value.reduce((s, tr) => s + tr.distance_km, 0))
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredTrips.value.length / perPage)))
+const pagedTrips = computed(() => filteredTrips.value.slice((page.value - 1) * perPage, page.value * perPage))
+const groups = computed(() => {
+  const map = new Map<string, { month: string; trips: Trip[]; km: number }>()
+  for (const tr of pagedTrips.value) {
+    const m = tr.trip_date.slice(0, 7)
+    if (!map.has(m)) map.set(m, { month: m, trips: [], km: 0 })
+    const g = map.get(m)!
+    g.trips.push(tr); g.km += tr.distance_km
+  }
+  return [...map.values()]
+})
+
+watch(yearFilter, (y) => { if (!y) monthFilter.value = '' })
+watch([yearFilter, monthFilter], () => { page.value = 1 })
+watch(totalPages, (tp) => { if (page.value > tp) page.value = tp })
+
+const open = ref(false)
+const saving = ref(false)
+const draft = reactive<TripPayload & { id: number }>({
+  id: 0, car_id: 0, trip_date: new Date().toISOString().slice(0, 10), time_start: '', time_end: '',
+  odometer_start: null, odometer_end: null, distance_km: null, category_id: null,
+  purpose: '', origin: '', destination: '', note: '',
+})
+
+const computedDistance = computed(() => {
+  const s = draft.odometer_start, e = draft.odometer_end
+  if (s != null && e != null && Number(e) >= Number(s)) return Number(e) - Number(s)
+  return null
+})
+
+async function load() {
+  loading.value = true
+  try {
+    const params: Record<string, string | number> = {}
+    if (filterCar.value) params.car_id = filterCar.value
+    ;[trips.value, cars.value, categories.value] = await Promise.all([
+      logbookApi.listTrips(params),
+      logbookApi.listCars(false), // vždy fresh kvůli last_odometer
+      categories.value.length ? Promise.resolve(categories.value) : logbookApi.listCategories(false),
+    ])
+    logbookApi.tripPurposes().then(p => { purposes.value = p }).catch(() => {})
+    logbookApi.tripPlaces().then(p => { places.value = p }).catch(() => {})
+  } finally { loading.value = false; maybeOpenNew() }
+}
+onMounted(load)
+
+// Otevření modalu „nová jízda" z rychlé akce / „+" v menu (LogbookPage bumpne token).
+// Čekáme na dokončení load(), aby byl seznam aut k dispozici pro předvyplnění.
+const wantNew = ref(false)
+watch(() => props.openNewToken, () => { wantNew.value = true; maybeOpenNew() })
+function maybeOpenNew() {
+  if (!wantNew.value || loading.value) return
+  wantNew.value = false
+  if (cars.value.length) newTrip()
+  else toast.error(t('logbook.no_cars_hint'))
+}
+
+// Předvyplnění tachometru zahájení posledním známým konečným stavem auta (jen nový záznam).
+watch(() => draft.car_id, (carId) => {
+  if (draft.id) return
+  const car = cars.value.find(c => c.id === Number(carId))
+  if (car) draft.odometer_start = car.last_odometer ?? null
+})
+
+// Provázání tachometr ↔ ujeto obousměrně: pole, které uživatel naposledy edituje
+// (konec / ujeto), dopočítá to druhé ze začátku. Bez smyčky — dopočet je programový
+// (nespouští @input), a změnu začátku řešíme zvlášť watchem.
+function numOrNull(v: unknown): number | null {
+  return v != null && (v as string) !== '' && !Number.isNaN(Number(v)) ? Number(v) : null
+}
+// e (z @input) má aktuálně zadanou hodnotu — čteme ji přímo, ať nezáleží na pořadí
+// vůči v-model handleru (jinak by se dopočet opožďoval o znak). Bez e (z watche) čteme draft.
+function recomputeEndFromDistance(e?: Event) {
+  const start = numOrNull(draft.odometer_start)
+  const dist = numOrNull(e ? (e.target as HTMLInputElement).value : draft.distance_km)
+  if (start !== null && dist !== null && dist > 0) draft.odometer_end = start + Math.round(dist)
+}
+function recomputeDistanceFromEnd(e?: Event) {
+  const start = numOrNull(draft.odometer_start)
+  const end = numOrNull(e ? (e.target as HTMLInputElement).value : draft.odometer_end)
+  if (start !== null && end !== null && end >= start) draft.distance_km = end - start
+}
+// Změna začátku (předvyplnění / přepnutí auta): dopočítej dle toho, co je vyplněné.
+watch(() => draft.odometer_start, () => {
+  if (numOrNull(draft.distance_km) !== null) recomputeEndFromDistance()
+  else if (numOrNull(draft.odometer_end) !== null) recomputeDistanceFromEnd()
+})
+
+// Reset filtrů na default při kliku na menu (LogbookPage bumpne resetToken).
+watch(() => props.resetToken, () => {
+  filterCar.value = ''
+  yearFilter.value = ''
+  monthFilter.value = ''
+  page.value = 1
+  load()
+})
+
+function newTrip() {
+  const defCar = cars.value.find(c => c.is_default) ?? cars.value[0]
+  Object.assign(draft, {
+    id: 0, car_id: defCar?.id ?? 0, trip_date: new Date().toISOString().slice(0, 10),
+    time_start: '', time_end: '', odometer_start: defCar?.last_odometer ?? null, odometer_end: null, distance_km: null,
+    category_id: categories.value[0]?.id ?? null, purpose: '', origin: '', destination: '', note: '',
+  })
+  open.value = true
+}
+
+function editTrip(tr: Trip) {
+  Object.assign(draft, {
+    id: tr.id, car_id: tr.car_id, trip_date: tr.trip_date, time_start: tr.time_start ?? '', time_end: tr.time_end ?? '',
+    odometer_start: tr.odometer_start, odometer_end: tr.odometer_end, distance_km: tr.distance_km,
+    category_id: tr.category_id, purpose: tr.purpose ?? '', origin: tr.origin ?? '', destination: tr.destination ?? '', note: tr.note ?? '',
+  })
+  open.value = true
+}
+
+async function save() {
+  if (!draft.car_id) { toast.error(t('logbook.trip_car_required')); return }
+  saving.value = true
+  try {
+    const payload: TripPayload = {
+      car_id: Number(draft.car_id), trip_date: draft.trip_date,
+      time_start: draft.time_start || null, time_end: draft.time_end || null,
+      odometer_start: draft.odometer_start != null && draft.odometer_start !== ('' as any) ? Number(draft.odometer_start) : null,
+      odometer_end: draft.odometer_end != null && draft.odometer_end !== ('' as any) ? Number(draft.odometer_end) : null,
+      distance_km: draft.distance_km != null && draft.distance_km !== ('' as any) ? Number(draft.distance_km) : null,
+      category_id: draft.category_id ? Number(draft.category_id) : null,
+      purpose: draft.purpose || null, origin: draft.origin || null, destination: draft.destination || null, note: draft.note || null,
+    }
+    if (draft.id) await logbookApi.updateTrip(draft.id, payload)
+    else await logbookApi.createTrip(payload)
+    open.value = false
+    toast.success(t('common.saved'))
+    await load()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message ?? t('common.error'))
+  } finally { saving.value = false }
+}
+
+async function removeTrip(tr: Trip) {
+  if (!confirm(t('logbook.confirm_delete_trip'))) return
+  try { await logbookApi.deleteTrip(tr.id); toast.success(t('common.deleted')); await load() }
+  catch (e: any) { toast.error(e?.response?.data?.error?.message ?? t('common.error')) }
+}
+
+// ── Import CSV/XLSX ─────────────────────────────────────────────
+const importOpen = ref(false)
+const importing = ref(false)
+const importReport = ref<TripImportReport | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+async function onImportFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  importing.value = true
+  importReport.value = null
+  try {
+    importReport.value = await logbookApi.importTrips(file)
+    if (importReport.value.created > 0) await load()
+    toast.success(t('logbook.import_done', { n: importReport.value.created }))
+  } catch (err: any) {
+    toast.error(err?.response?.data?.error?.message ?? t('logbook.import_failed'))
+  } finally {
+    importing.value = false
+    if (fileInput.value) fileInput.value.value = ''
+  }
+}
+
+function downloadTemplate() {
+  const header = 'datum;cas;auto;km_zacatek;km_konec;ujeto;ucel;odkud;kam;kategorie'
+  const example = '01.06.2026;08:30;;100000;100150;;Schůzka s klientem;Praha;Brno;business'
+  const blob = new Blob(['﻿' + header + '\n' + example + '\n'], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = 'kniha-jizd-vzor.csv'
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// ── Export XLSX / PDF ───────────────────────────────────────────
+const exportOpen = ref(false)
+const exporting = ref(false)
+const _year = new Date().getFullYear()
+const exportFrom = ref(`${_year}-01-01`)
+const exportTo = ref(`${_year}-12-31`)
+const exportCar = ref<number | ''>('')
+
+function openExport() { exportCar.value = filterCar.value; exportOpen.value = true }
+
+async function downloadExport(format: 'xlsx' | 'pdf') {
+  exporting.value = true
+  try {
+    const params: Record<string, string | number> = {}
+    if (exportFrom.value) params.date_from = exportFrom.value
+    if (exportTo.value) params.date_to = exportTo.value
+    if (exportCar.value) params.car_id = exportCar.value
+    const r = await logbookApi.exportTrips(format, params)
+    const cd = (r.headers['content-disposition'] as string) || ''
+    const m = /filename="?([^"]+)"?/.exec(cd)
+    const filename = m ? m[1] : `kniha-jizd.${format}`
+    const url = URL.createObjectURL(r.data as Blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    toast.error(t('logbook.export_failed'))
+  } finally { exporting.value = false }
+}
+
+function fmtKm(n: number): string { return n.toLocaleString('cs-CZ', { maximumFractionDigits: 1 }) }
+</script>
+
+<template>
+  <section>
+    <FilterBar :active-count="activeFilterCount">
+        <select v-model="filterCar" @change="load" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option value="">{{ t('logbook.all_cars') }}</option>
+          <option v-for="c in cars" :key="c.id" :value="c.id">{{ c.registration }}{{ c.name ? ` — ${c.name}` : '' }}</option>
+        </select>
+        <select v-model="yearFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option :value="''">{{ t('logbook.all_years') }}</option>
+          <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
+        </select>
+        <select v-model="monthFilter" :disabled="yearFilter === ''" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm disabled:opacity-50">
+          <option :value="''">{{ t('logbook.all_months') }}</option>
+          <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
+        </select>
+        <button @click="openExport" :disabled="trips.length === 0"
+          class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5 disabled:opacity-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
+          {{ t('logbook.export') }}
+        </button>
+        <button v-if="auth.canWrite" @click="importOpen = true; importReport = null"
+          class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 4v12m0-12l-4 4m4-4l4 4"/></svg>
+          {{ t('logbook.import') }}
+        </button>
+      <template #actions>
+        <button v-if="auth.canWrite" @click="newTrip" :disabled="cars.length === 0"
+          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5 disabled:opacity-50">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m6-6H6"/></svg>
+          {{ t('logbook.trip_new') }}
+        </button>
+      </template>
+    </FilterBar>
+
+    <div v-if="cars.length === 0 && !loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('logbook.no_cars_hint') }}</div>
+    <div v-else-if="loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('common.loading') }}</div>
+    <div v-else-if="filteredTrips.length === 0" class="text-center text-neutral-500 py-12 text-sm">{{ t('logbook.no_trips') }}</div>
+
+    <template v-else>
+      <div class="text-xs text-neutral-500 mb-3">{{ t('logbook.trips_summary', { count: filteredTrips.length, km: fmtKm(totalKm) }) }}</div>
+
+      <section v-for="g in groups" :key="g.month" class="mb-5">
+        <header class="flex items-center justify-between bg-neutral-50 border border-neutral-200 rounded-t-lg px-4 py-2.5">
+          <div class="flex items-center gap-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-700">{{ formatMonth(g.month) }}</h2>
+            <span class="text-xs text-neutral-500">{{ g.trips.length }}</span>
+          </div>
+          <span class="text-xs font-mono font-semibold text-neutral-700">{{ fmtKm(g.km) }} km</span>
+        </header>
+
+        <!-- Desktop -->
+        <div class="hidden md:block bg-surface border border-t-0 border-neutral-200 rounded-b-lg overflow-hidden">
+          <table class="w-full text-sm table-fixed">
+            <colgroup>
+              <col class="w-32" /><col class="w-20" /><col /><col /><col class="w-24" /><col class="w-20" /><col class="w-52" />
+            </colgroup>
+            <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+              <tr>
+                <th class="px-3 py-2 text-left font-medium">{{ t('logbook.date') }}</th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('logbook.car') }}</th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('logbook.route') }}</th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('logbook.purpose') }}</th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('logbook.category') }}</th>
+                <th class="px-3 py-2 text-right font-medium">{{ t('logbook.distance_km') }}</th>
+                <th class="px-3 py-2 w-px"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-neutral-100">
+              <tr v-for="tr in g.trips" :key="tr.id" class="hover:bg-neutral-50">
+                <td class="px-3 py-2 whitespace-nowrap">{{ formatDate(tr.trip_date) }}<span v-if="tr.time_start" class="block text-xs text-neutral-400">{{ tr.time_start }}</span></td>
+                <td class="px-3 py-2 font-mono text-xs">{{ tr.car_registration }}</td>
+                <td class="px-3 py-2">{{ [tr.origin, tr.destination].filter(Boolean).join(' → ') || '—' }}</td>
+                <td class="px-3 py-2">{{ tr.purpose || '—' }}</td>
+                <td class="px-3 py-2">
+                  <span v-if="tr.category_label" class="text-xs px-1.5 py-0.5 rounded" :class="tr.category_is_private ? 'bg-warning-50 text-warning-600' : 'bg-success-50 text-success-600'">{{ tr.category_label }}</span>
+                  <span v-else class="text-neutral-400">—</span>
+                </td>
+                <td class="px-3 py-2 text-right font-mono">{{ fmtKm(tr.distance_km) }}</td>
+                <td class="px-3 py-2">
+                  <div v-if="auth.canWrite" class="flex justify-end gap-1.5">
+                    <button @click="editTrip(tr)" class="cursor-pointer inline-flex items-center gap-1 h-7 px-2 text-xs border border-neutral-300 rounded-md hover:bg-neutral-50">
+                      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828z"/></svg>
+                      {{ t('common.edit') }}
+                    </button>
+                    <button @click="removeTrip(tr)" class="cursor-pointer inline-flex items-center gap-1 h-7 px-2 text-xs border border-neutral-300 text-danger-600 rounded-md hover:bg-danger-50">
+                      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
+                      {{ t('common.delete') }}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Mobile karty -->
+        <div class="md:hidden bg-surface border border-t-0 border-neutral-200 rounded-b-lg divide-y divide-neutral-100 overflow-hidden">
+          <div v-for="tr in g.trips" :key="`m-${tr.id}`" class="px-4 py-3">
+            <div class="flex items-baseline justify-between gap-2">
+              <span class="font-medium text-neutral-900">{{ formatDate(tr.trip_date) }}<span v-if="tr.time_start" class="text-neutral-400 text-xs ml-1">{{ tr.time_start }}</span></span>
+              <span class="font-mono text-sm">{{ fmtKm(tr.distance_km) }} km</span>
+            </div>
+            <div class="text-sm text-neutral-700 mt-0.5">{{ [tr.origin, tr.destination].filter(Boolean).join(' → ') || '—' }}</div>
+            <div class="flex items-baseline justify-between gap-2 mt-1 text-xs text-neutral-500">
+              <span class="truncate">{{ tr.purpose || '—' }} · {{ tr.car_registration }}</span>
+              <span v-if="tr.category_label" class="shrink-0 px-1.5 py-0.5 rounded" :class="tr.category_is_private ? 'bg-warning-50 text-warning-600' : 'bg-success-50 text-success-600'">{{ tr.category_label }}</span>
+            </div>
+            <div v-if="auth.canWrite" class="flex gap-2 mt-2">
+              <button @click="editTrip(tr)" class="cursor-pointer inline-flex items-center gap-1 h-7 px-2 text-xs border border-neutral-300 rounded-md hover:bg-neutral-50">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828z"/></svg>
+                {{ t('common.edit') }}
+              </button>
+              <button @click="removeTrip(tr)" class="cursor-pointer inline-flex items-center gap-1 h-7 px-2 text-xs border border-neutral-300 text-danger-600 rounded-md hover:bg-danger-50 ml-auto">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
+                {{ t('common.delete') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Stránkování -->
+      <div v-if="totalPages > 1" class="flex items-center justify-center gap-3 mt-4">
+        <button @click="page--" :disabled="page <= 1" class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 inline-flex items-center gap-1">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <span class="text-sm text-neutral-600">{{ t('logbook.page_of', { page, pages: totalPages }) }}</span>
+        <button @click="page++" :disabled="page >= totalPages" class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 inline-flex items-center gap-1">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </template>
+
+    <!-- Modal: trip -->
+    <div v-if="open" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <form @submit.prevent="save" class="p-5 space-y-4">
+          <h2 class="text-lg font-semibold">{{ draft.id ? t('logbook.trip_edit') : t('logbook.trip_new') }}</h2>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.car') }} *</label>
+              <select v-model.number="draft.car_id" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                <option v-for="c in cars" :key="c.id" :value="c.id">{{ c.registration }}{{ c.name ? ` — ${c.name}` : '' }}</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.date') }} *</label>
+              <input v-model="draft.trip_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.time_start') }}</label>
+              <input v-model="draft.time_start" type="time" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.time_end') }}</label>
+              <input v-model="draft.time_end" type="time" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.odometer_start') }}</label>
+              <input v-model.number="draft.odometer_start" type="number" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.odometer_end') }}</label>
+              <input v-model.number="draft.odometer_end" type="number" min="0" @input="recomputeDistanceFromEnd" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.distance_km') }}</label>
+              <input v-model.number="draft.distance_km" type="number" min="0" step="0.1" @input="recomputeEndFromDistance"
+                :placeholder="computedDistance != null ? String(computedDistance) : ''"
+                class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <p class="text-xs text-neutral-400 mt-0.5">{{ t('logbook.distance_hint') }}</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.category') }}</label>
+              <select v-model="draft.category_id" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                <option :value="null">—</option>
+                <option v-for="c in categories" :key="c.id" :value="c.id">{{ c.label }}</option>
+              </select>
+            </div>
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.purpose') }}</label>
+              <input v-model="draft.purpose" type="text" maxlength="255" list="trip-purposes" autocomplete="off"
+                :placeholder="t('logbook.purpose_placeholder')" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+              <datalist id="trip-purposes">
+                <option v-for="p in purposes" :key="p" :value="p" />
+              </datalist>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.origin') }}</label>
+              <input v-model="draft.origin" type="text" maxlength="255" list="trip-places" autocomplete="off" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.destination') }}</label>
+              <input v-model="draft.destination" type="text" maxlength="255" list="trip-places" autocomplete="off" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+            <datalist id="trip-places">
+              <option v-for="p in places" :key="p" :value="p" />
+            </datalist>
+          </div>
+          <div class="flex justify-end gap-2 pt-2">
+            <button type="button" @click="open = false" class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              {{ t('common.cancel') }}
+            </button>
+            <button type="submit" :disabled="saving" class="cursor-pointer h-9 px-4 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md disabled:opacity-50 inline-flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+              {{ t('common.save') }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: import -->
+    <div v-if="importOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 space-y-4">
+        <h2 class="text-lg font-semibold">{{ t('logbook.import_title') }}</h2>
+        <p class="text-sm text-neutral-500">{{ t('logbook.import_hint') }}</p>
+        <div class="flex items-center gap-3">
+          <button @click="fileInput?.click()" :disabled="importing"
+            class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded-md disabled:opacity-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 4v12m0-12l-4 4m4-4l4 4"/></svg>
+            {{ importing ? t('common.loading') : t('logbook.choose_file') }}
+          </button>
+          <button @click="downloadTemplate"
+            class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
+            {{ t('logbook.download_template') }}
+          </button>
+          <input ref="fileInput" type="file" accept=".csv,.xlsx,.xls" class="hidden" @change="onImportFile" />
+        </div>
+        <div v-if="importReport" class="text-sm border border-neutral-200 rounded-md p-3 max-h-60 overflow-y-auto">
+          <p class="font-medium mb-1">{{ t('logbook.import_result', { created: importReport.created, failed: importReport.failed }) }}</p>
+          <p v-if="importReport.new_categories && importReport.new_categories.length" class="text-xs text-emerald-700 mt-1">
+            {{ t('logbook.import_new_categories', { list: importReport.new_categories.join(', ') }) }}
+          </p>
+          <ul v-if="importReport.failed > 0" class="text-xs text-danger-600 space-y-0.5 mt-1">
+            <li v-for="r in importReport.rows.filter(r => r.status === 'failed')" :key="r.line">{{ t('logbook.row') }} {{ r.line }}: {{ r.reason }}</li>
+          </ul>
+        </div>
+        <div class="flex justify-end">
+          <button @click="importOpen = false" class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            {{ t('common.close') }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: export -->
+    <div v-if="exportOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-lg shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-5 space-y-4">
+        <h2 class="text-lg font-semibold">{{ t('logbook.export_title') }}</h2>
+        <p class="text-sm text-neutral-500">{{ t('logbook.export_hint') }}</p>
+        <div>
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.car') }}</label>
+          <select v-model="exportCar" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+            <option :value="''">{{ t('logbook.all_cars_grouped') }}</option>
+            <option v-for="c in cars" :key="c.id" :value="c.id">{{ c.registration }}{{ c.name ? ` — ${c.name}` : '' }}</option>
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.date_from') }}</label>
+            <input v-model="exportFrom" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.date_to') }}</label>
+            <input v-model="exportTo" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+        </div>
+        <div class="flex flex-wrap justify-end gap-2 pt-2 border-t border-neutral-100">
+          <button @click="exportOpen = false" class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            {{ t('common.cancel') }}
+          </button>
+          <button @click="downloadExport('xlsx')" :disabled="exporting"
+            class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
+            XLSX
+          </button>
+          <button @click="downloadExport('pdf')" :disabled="exporting"
+            class="cursor-pointer h-9 px-4 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md disabled:opacity-50 inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
+            PDF
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+</template>

@@ -8,7 +8,7 @@ formáty hromadného exportu **vystavených faktur** a per-faktura export
 > Pokud chceš účetní za daný měsíc předat **vše najednou v jednom ZIP** (vystavené
 > i přijaté faktury, výpisy z účtu a knihu DPH, roztříděné do složek a s daňově
 > korektním zařazením do období), použij **Hromadný export** v sekci Daně — viz
-> [Hromadný export (ZIP)](32_Hromadny_export.md). Exporty níže
+> [Hromadný export (ZIP)](34_Hromadny_export.md). Exporty níže
 > jsou cílené na jeden formát / jeden typ dokladu.
 
 | Formát | Pro koho | Co obsahuje |
@@ -123,10 +123,11 @@ zakázka se podle `project_number` najde nebo automaticky vytvoří.
 
 ### 15.3.5 ISDOC v PDF příloze (3.6.2+)
 
-Při generování PDF faktury se ISDOC XML přibalí jako PDF/A-3 attachment
-(`/Names /EmbeddedFiles` + `/AF` v catalog). Účetní programy si data
-extrahují přímo z PDF — stačí přeposlat jediný soubor. Pod variabilním
-symbolem se v PDF zobrazí vizuální `ISDOC` badge.
+Samotné PDF je konformní **PDF/A-3b** (ISO 19005-3, viz
+[§ 11.2.2](11_Faktura_PDF.md#1122-pdfa-3b-archivni-format)). Při generování se
+do něj ISDOC XML přibalí jako příloha (PDF/A-3 associated file). Účetní
+programy si data extrahují přímo z PDF — stačí přeposlat jediný soubor. Pod
+variabilním symbolem se v PDF zobrazí vizuální `ISDOC` badge.
 
 - Vkládá se jen pro **CZK faktury s přiděleným VS**.
 - Lze vypnout per-dodavatel v *Nastavení → Dodavatel → Vkládat ISDOC XML
@@ -325,7 +326,7 @@ z globálního kurzu.
   měsíc.
 - **Vše v jednom balíčku** — když účetní chce za měsíc kompletní podklad
   (vystavené + přijaté faktury + výpisy + kniha DPH najednou), použij raději
-  [Hromadný export (ZIP)](32_Hromadny_export.md) v sekci Daně —
+  [Hromadný export (ZIP)](34_Hromadny_export.md) v sekci Daně —
   vyřeší zařazení do období daňově korektně a roztřídí vše do pojmenovaných
   složek.
 - **ISDOC, Pohoda, Stereo** — pokud si nejsi jistý, který formát použít,

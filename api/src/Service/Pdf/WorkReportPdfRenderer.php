@@ -67,7 +67,9 @@ final class WorkReportPdfRenderer
             'locale'         => $locale,
             'date_format'    => $locale === 'en' ? 'M j, Y' : 'j. n. Y',
             'decimal_sep'    => $locale === 'en' ? '.' : ',',
-            'thousand_sep'   => $locale === 'en' ? ',' : ' ',
+            // NBSP (U+00A0) oddělovač tisíců — drží číslo na jednom řádku v mPDF
+            // (white-space:nowrap mPDF v úzkých buňkách nedodrží). Sjednoceno s fakturou.
+            'thousand_sep'   => $locale === 'en' ? ',' : "\u{00A0}",
             'css'            => '',
             'logo_path'      => $logoPath,
             'logo_show_name' => $logoPath !== null && !empty($supplier['pdf_logo_show_name']),

@@ -57,8 +57,10 @@ cmd/docker-update.sh
 
 Skript v registry módu sám zavolá `docker compose pull app` (stáhne nový
 image z GHCR), restartuje stack a doběhne pending migrace. Volumes (DB data)
-zůstávají zachovány. Mód detekuje automaticky — pokud nemáš `.git/`
-nebo `build:` blok v compose, jede přes `pull`.
+zůstávají zachovány. Režim **detekuje z image běžícího kontejneru**:
+`ghcr.io/...` → registry (`pull`), lokální build → source (`git pull` + rebuild).
+Když stack zrovna neběží, ale máš lokálně stažený GHCR image, bere to taky jako
+registry. Přebít lze `MYINVOICE_UPDATE_MODE=registry|source`.
 
 Nový image se publikuje automaticky při každém release tagu `v*.*.*`,
 takže aktualizace je otázkou jednoho příkazu.
@@ -67,9 +69,9 @@ takže aktualizace je otázkou jednoho příkazu.
 > Aktualizace** stav verze + tlačítko *Aktualizovat*, které pull image
 > + restart spustí přes host-side watcher. Detaily včetně instalace
 > watcheru jako systemd unit / Scheduled Task → [§ 3.9 Update watcher](#39-update-watcher-jednoclick-upgrade-z-ui-volitelne)
-> nebo kapitola [Aktualizace](38_Aktualizace.md).
+> nebo kapitola [Aktualizace](40_Aktualizace.md).
 > Pro denní kontrolu nové verze nezapomeň naplánovat
-> `php api/bin/cron-version-check.php` (1× denně, viz [Aktualizace](38_Aktualizace.md)).
+> `php api/bin/cron-version-check.php` (1× denně, viz [Aktualizace](40_Aktualizace.md)).
 
 > **WSL2 / Linux po klonu:** pokud `./cmd/docker-ghcr.sh` hlásí
 > `Permission denied` nebo `/usr/bin/env: 'bash\r': No such file…`,
@@ -105,8 +107,8 @@ Skript `docker-install` postupně:
    randomized `app.pepper` + `secret_encryption_key`, dev-friendly cookies pro
    HTTP loopback)
 3. Postaví image `myinvoice:latest` (multi-stage: Vue build → composer →
-   PHP 8.5 + Apache)
-4. Spustí stack: **app** (Apache:80 → host:8080) + **db** (MariaDB 11)
+   PHP 8.5 + nginx + php-fpm z `Dockerfile.alpine`)
+4. Spustí stack: **app** (nginx:80 → host:8080) + **db** (MariaDB 11)
 5. Počká, až bude DB healthy, a spustí migrace
 
 ## 3.3 Varianta C — bez klonování repa (jen Docker)
@@ -241,7 +243,7 @@ log/, storage/, private/dkim/ **i `cfg.local.php`** — per-instance konfigurace
 z setup wizardu tak přežije image update. Viz **[§ 3.5.3 Single-volume úložiště](#353-single-volume-uloziste)** níže.
 Pokud upgraduješ z 3.5.x nebo staršího 3-volume layoutu, `cmd/docker-update.{sh,ps1}`
 detekuje starý layout a před `up -d` automaticky spustí
-`cmd/docker-migrate-volumes.{sh,ps1}` — viz [§ 38.5](38_Aktualizace.md#385-migrace-na-single-volume-layout-35x-360).
+`cmd/docker-migrate-volumes.{sh,ps1}` — viz [§ 40.5](40_Aktualizace.md#405-migrace-na-single-volume-layout-35x-360).
 
 **`cfg.docker.php` mount je nově volitelný** — image obsahuje stub `cfg.php`
 (`<?php return [];`) a vše lze předat přes ENV (12-factor). Pro full-ENV deploy
@@ -299,7 +301,7 @@ docker volume ls | grep myinvoice                           # vidíš pouze app-
 
 **Nikdy nepřepínej layout bez migrace** — aplikace by nahlížela do prázdného
 `/data` a tvářila se, že data zmizela. `cmd/docker-update.{sh,ps1}` to dělá
-automaticky před `up -d`. Detaily v [§ 38.5 Migrace na single-volume layout](38_Aktualizace.md#385-migrace-na-single-volume-layout-35x-360).
+automaticky před `up -d`. Detaily v [§ 40.5 Migrace na single-volume layout](40_Aktualizace.md#405-migrace-na-single-volume-layout-35x-360).
 
 Shrnutí: `cmd/docker-migrate-volumes.{sh,ps1}` snapshotne `cfg.local.php`
 z běžícího kontejneru, zkopíruje data ze starých volumes do nového `app-data`
@@ -315,7 +317,7 @@ docker run --rm \
   alpine tar czf /backup/myinvoice-data-$(date +%F).tar.gz -C /data .
 ```
 
-Plus dump MariaDB (viz [§ 38.7 Záloha a obnova](38_Aktualizace.md)) — to jsou dohromady **dvě entity** k zálohování (db + app-data).
+Plus dump MariaDB (viz [§ 40.7 Záloha a obnova](40_Aktualizace.md)) — to jsou dohromady **dvě entity** k zálohování (db + app-data).
 
 ## 3.6 Daily ops
 
@@ -343,9 +345,9 @@ a v `cfg.docker.php` nastav `redis.enabled => true`. Restart appky.
 
 ## 3.8 HTTPS / TLS terminace
 
-Docker stack sám TLS nedělá — Apache uvnitř kontejneru poslouchá na portu 80
-(HTTP) a mapuje se na host port `8080`. Pokud potřebuješ HTTPS (LAN server,
-produkce, doménové jméno), postav před stack reverse proxy s TLS terminací.
+Docker stack sám TLS nedělá — web server (nginx) uvnitř kontejneru poslouchá na
+portu 80 (HTTP) a mapuje se na host port `8080`. Pokud potřebuješ HTTPS (LAN
+server, produkce, doménové jméno), postav před stack reverse proxy s TLS terminací.
 
 **Symptom špatné konfigurace:** prohlížeč hodí `SSL_ERROR_RX_RECORD_TOO_LONG`
 (Firefox) nebo `ERR_SSL_PROTOCOL_ERROR` (Chrome) — znamená to, že browser mluví
@@ -436,10 +438,15 @@ bash cmd/docker-update-watcher.sh
 ```
 
 ```powershell
-# Windows PowerShell
+# Windows — spusť tím PowerShellem, který máš (uprav cd na SVOU instalační cestu)
 cd C:\inetpub\myinvoice
-powershell -NoProfile -ExecutionPolicy Bypass -File cmd\docker-update-watcher.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File cmd\docker-update-watcher.ps1
+# nemáš-li PowerShell 7, použij místo `pwsh` příkaz `powershell` (Windows PS 5.1)
 ```
+
+> 🛈 Watcher si vlastní update spouští **tímtéž** PowerShell hostem, pod kterým
+> běží (`pwsh` i `powershell`), a cesty řeší z umístění skriptu — funguje proto
+> i z jiného adresáře a na strojích jen s PowerShell 7 (`pwsh`).
 
 Vidíš `[watcher] start, polling storage/upgrade-requested.json inside
 container every 30s` — od té chvíle hlídá flag. Klikni v UI
@@ -474,11 +481,17 @@ Logy: `journalctl -u myinvoice-update-watcher -f`.
 #### Windows — Scheduled Task (produkce)
 
 ```powershell
+# Uprav cestu k SVÉ instalaci. Máš-li jen Windows PowerShell 5.1, nahraď
+# `pwsh.exe` za `powershell.exe`.
 schtasks /create /tn "MyInvoice Update Watcher" `
-  /tr "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\inetpub\myinvoice\cmd\docker-update-watcher.ps1" `
+  /tr "pwsh.exe -NoProfile -ExecutionPolicy Bypass -File C:\inetpub\myinvoice\cmd\docker-update-watcher.ps1" `
   /sc onstart /ru SYSTEM /rl HIGHEST
 schtasks /run /tn "MyInvoice Update Watcher"
 ```
+
+> 🛈 `pwsh.exe` musí být v PATH (dává ji tam instalátor PowerShell 7). Pokud ji
+> Scheduled Task nenajde, zadej plnou cestu `C:\Program Files\PowerShell\7\pwsh.exe`,
+> nebo použij `powershell.exe` (PS 5.1).
 
 Stav úlohy: `schtasks /query /tn "MyInvoice Update Watcher" /v /fo list`.
 
@@ -486,9 +499,183 @@ Stav úlohy: `schtasks /query /tn "MyInvoice Update Watcher" /v /fo list`.
 
 Watcher jen reaguje na *kliknutí*. Aby admin **viděl**, že je dostupná
 nová verze (badge v patičce + status na `/admin/update`), musí běžet
-denní cron `cmd/cron-version-check.(sh/cmd)` — viz [Aktualizace](38_Aktualizace.md).
+denní cron `cmd/cron-version-check.(sh/cmd)` — viz [Aktualizace](40_Aktualizace.md).
 
 #### Plné detaily
 
 Recovery při zaseknutém upgradu, test workflow z `master`, externí
-monitoring přes `/api/version` → kapitola [Aktualizace](38_Aktualizace.md).
+monitoring přes `/api/version` → kapitola [Aktualizace](40_Aktualizace.md).
+
+## 3.10 Image: alpine/nginx (default) + Debian fallback
+
+Pro hosting s omezeným diskem a pamětí je **default image alpine/nginx** —
+běží na `php:8.5-fpm-alpine` + **nginx** + **php-fpm** místo Debian/Apache.
+Funkčně je identický (stejné API, `.htaccess` přeložený 1:1 do nginx configu),
+jen výrazně štíhlejší:
+
+| Metrika                         | Debian/Apache (fallback) | **Alpine/nginx (default)** |
+|---------------------------------|---------------|--------------|
+| Velikost image (`docker image inspect .Size`) | ~293 MB | **~92 MB** (−69 %) |
+| RAM aplikace (idle)             | desítky MB (Apache prefork) | **~26 MB** (php-fpm ondemand) |
+| Web server                      | Apache + `.htaccess` | nginx |
+
+GHCR `:latest` (i `:X.Y.Z`, `:X.Y`) je nově **alpine**. Lokální build
+(`docker compose build`) staví taky alpine z `Dockerfile.alpine`.
+
+### Migrace existující instalace = nic navíc
+
+`/data` i DB volume jsou **plně kompatibilní** mezi variantami (www-data má
+v obou uid 33). Existující Debian instalace se proto zmigruje **sama při
+příštím updatu**:
+
+```bash
+cmd/docker-update.sh        # registry: pull :latest (= alpine) + recreate; data zůstanou
+```
+
+### Debian fallback (rollback)
+
+Kdybys narazil na problém s alpine, vrať se na Debian/Apache (`Dockerfile`
+zůstává v repu, CI ho jen nepublikuje):
+
+```bash
+# registry (GHCR): pinni starší version tag — ≤ v4.31.0 jsou ještě Debian
+#   v docker-compose.production.yml změň :latest na :4.31.0, pak pull + up -d
+
+# source: postav Debian image lokálně z původního Dockerfile
+docker build -f Dockerfile -t myinvoice:latest .
+docker compose up -d
+```
+
+### RAM tuning
+
+Pro stroje s ~512 MB–1 GB RAM lze sáhnout na tyto proměnné (alpine entrypoint
+je čte při startu):
+
+```bash
+PHP_FPM_MAX_CHILDREN=4    # méně php-fpm workerů (každý ~30–60 MB); default 8
+OPCACHE_MEMORY=64         # menší opcache shared paměť v MB; default 128
+```
+
+MariaDB tuning je už v obou compose souborech: `performance-schema=OFF`
+(~100–200 MB méně RAM), buffer pool 128 MB (RAM) a **redo log 48 MB** místo
+defaultních 96 MB (~50 MB méně na disku — fresh MariaDB data dir tak spadne
+z ~173 MB na ~120 MB; vlastní data faktur jsou jen jednotky MB). Pro nejmenší
+stroje přidej do `.env`:
+
+```bash
+DB_INNODB_BUFFER_POOL=64M   # RAM (buffer pool)
+DB_INNODB_LOG_SIZE=32M      # disk (redo log) — ušetří dalších ~16 MB
+```
+
+> 🛈 MariaDB redo log se při startu s jinou velikostí bezpečně přesází (po čistém
+> shutdownu), data zůstávají. Změna se projeví při příštím recreatnutí db kontejneru.
+
+### Úklid starých image (uvolnění disku)
+
+Po updatech zůstávají osiřelé image. `docker-update` sám uklidí dangling
+vrstvy; staré **tagované** verze smaž explicitně:
+
+```bash
+cmd/docker-prune-images.sh --dry-run   # napřed vypiš, co by smazal
+cmd/docker-prune-images.sh             # smaže obsolete (běžící + compose image chrání)
+```
+
+## 3.11 Instalace přes Portainer / Dockge (GUI, bez příkazové řádky)
+
+Protože je image veřejný na GHCR, jde MyInvoice nasadit i čistě přes webové
+GUI správce kontejnerů — **bez klonování repa, bez SSH, bez `cfg.docker.php`**.
+Veškerá konfigurace se předává proměnnými prostředí (12-factor).
+
+K tomu slouží samostatný compose **`docker-compose.portainer.yml`** (nemá
+`build:` ani bind-mount cfg souboru — jen `image:` z GHCR a `environment:`).
+
+> 🔑 **Povinné proměnné** (vygeneruj a poznač si):
+>
+> ```bash
+> openssl rand -base64 28   # → DB_PASSWORD
+> openssl rand -base64 28   # → DB_ROOT_PASSWORD
+> openssl rand -base64 32   # → MYINVOICE_PEPPER
+> openssl rand -base64 32   # → MYINVOICE_SECRET_KEY (doporučené, jinak fallback z pepperu)
+> ```
+
+### 3.11.1 Portainer — App Template (one-click)
+
+Nejjednodušší cesta. Přidej katalog šablon a nasaď z formuláře:
+
+1. **Settings → App Templates → URL** vlož:
+   ```
+   https://raw.githubusercontent.com/radekhulan/myinvoice/master/portainer-template.json
+   ```
+   a ulož.
+2. **App Templates** → najdi dlaždici **MyInvoice.cz** → klikni.
+3. Vyplň proměnné (povinné DB hesla + pepper; ostatní mají rozumný default) →
+   **Deploy the stack**.
+4. Otevři **http://&lt;host&gt;:8080** → doběhne [setup wizard](06_Setup_wizard.md).
+
+Portainer si compose stáhne z repa sám (`repository.stackfile =
+docker-compose.portainer.yml`), pulne image z GHCR a spustí stack. DB migrace
+se spustí automaticky při startu kontejneru.
+
+### 3.11.2 Portainer — ruční Stack (web editor)
+
+Když nechceš přidávat katalog šablon:
+
+1. **Stacks → Add stack → Web editor**.
+2. Vlož obsah `docker-compose.portainer.yml` (zkopíruj z
+   [repa](https://github.com/radekhulan/myinvoice/blob/master/docker-compose.portainer.yml)).
+3. Dole v **Environment variables** přidej proměnné (`DB_PASSWORD`,
+   `DB_ROOT_PASSWORD`, `MYINVOICE_PEPPER`, případně `MYINVOICE_SECRET_KEY`,
+   `APP_PORT`) → **Deploy the stack**.
+
+Alternativně **Add stack → Repository**: URL `https://github.com/radekhulan/myinvoice`,
+Compose path `docker-compose.portainer.yml`.
+
+### 3.11.3 Dockge
+
+Dockge drží stacky jako reálné soubory na disku, takže pasuje na compose 1:1:
+
+1. **+ Compose** → název stacku (např. `myinvoice`).
+2. Do editoru vlož `docker-compose.portainer.yml`.
+3. Do `.env` panelu doplň proměnné:
+   ```env
+   DB_PASSWORD=...
+   DB_ROOT_PASSWORD=...
+   MYINVOICE_PEPPER=...
+   MYINVOICE_SECRET_KEY=...
+   APP_PORT=8080
+   ```
+4. **Save → Start**. Logy a interaktivní terminál máš přímo v Dockge.
+
+### 3.11.4 HTTPS / produkce
+
+Default compose jede HTTP-friendly cookies (`MYINVOICE_SESSION_COOKIE_SECURE=false`,
+`MYINVOICE_SESSION_COOKIE_NAME=myinvoice_session`) — login funguje hned přes
+`http://host:8080`. Jakmile dáš před stack **HTTPS reverse proxy**
+(viz [§ 3.8](#38-https-tls-terminace)), přepni v proměnných:
+
+```env
+MYINVOICE_APP_URL=https://faktury.firma.cz
+MYINVOICE_SESSION_COOKIE_SECURE=true
+MYINVOICE_SESSION_COOKIE_NAME=__Host-myinvoice_session
+```
+
+a stack překresli (Portainer: *Update the stack* / Dockge: *Restart*). Proxy musí
+posílat `X-Forwarded-Proto: https`, jinak vznikne redirect loop.
+
+### 3.11.5 Aktualizace v GUI
+
+Nová verze = pull novějšího image + recreate, migrace doběhnou při startu:
+
+- **Portainer:** Stacks → MyInvoice → **Update the stack** se zapnutým
+  *Re-pull image and redeploy* (u App Template / git stacku *Pull and redeploy*).
+- **Dockge:** tlačítko **Update** u stacku.
+
+> 💡 V produkci radši **pinni konkrétní verzi** (v compose změň
+> `:latest` na `:4.34.3`) a aktualizuj vědomě — u účetní aplikace nedoporučuju
+> slepý auto-update přes Watchtower na `:latest`. In-app upgrade z UI (Systém →
+> Aktualizace) i host watcher z [§ 3.9](#39-update-watcher-jednoclick-upgrade-z-ui-volitelne)
+> jsou pro Portainer/Dockge zbytečné — update je tu otázkou jednoho tlačítka.
+
+> 🛈 **Redis (volitelné):** stack má `redis` službu pod profilem `redis`.
+> Pro zapnutí přidej do proměnných `MYINVOICE_REDIS_ENABLED=true` a
+> `MYINVOICE_REDIS_HOST=redis` a nasaď s aktivním profilem.

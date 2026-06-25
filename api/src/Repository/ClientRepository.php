@@ -143,7 +143,7 @@ final class ClientRepository
         // Cache `client_revenue_cache` — primární řádek vybíráme přes c.currency_default_id
         $sql = "SELECT c.id, c.supplier_id, c.company_name, c.ic, c.dic, c.tax_number, c.main_email, c.language,
                        c.currency_default_id, cur.code AS currency_default,
-                       c.reverse_charge, c.is_vat_payer, c.is_customer, c.is_vendor,
+                       c.reverse_charge, c.is_vat_payer, c.is_customer, c.is_vendor, c.is_fuel_station,
                        c.auto_send_reminders,
                        c.payment_due_default, c.payment_due_unit, c.hourly_rate,
                        c.default_expense_category_id, c.default_revenue_category_id,
@@ -238,11 +238,11 @@ final class ClientRepository
         $sql = 'INSERT INTO clients
             (supplier_id, company_name, first_name, last_name, ic, dic, tax_number, street, city, zip, country_id,
              main_email, phone, language, currency_default_id, reverse_charge, is_vat_payer,
-             is_customer, is_vendor,
+             is_customer, is_vendor, is_fuel_station,
              auto_send_reminders, payment_due_default, payment_due_unit, hourly_rate, note,
              default_expense_category_id, default_revenue_category_id,
              invoice_number_format, proforma_number_format, credit_note_number_format, invoice_number_period)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         $stmt = $this->db->pdo()->prepare($sql);
         $stmt->execute([
             $supplierId,
@@ -268,6 +268,7 @@ final class ClientRepository
             isset($data['is_vat_payer']) ? ((int) (bool) $data['is_vat_payer']) : 1,
             $isCustomer,
             $isVendor,
+            array_key_exists('is_fuel_station', $data) ? ((int) (bool) $data['is_fuel_station']) : 0,
             array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1,
             isset($data['payment_due_default']) ? (int) $data['payment_due_default'] : null,
             $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
@@ -393,6 +394,7 @@ final class ClientRepository
                 street = ?, city = ?, zip = ?, country_id = ?,
                 main_email = ?, phone = ?, language = ?, currency_default_id = ?,
                 reverse_charge = ?, is_vat_payer = COALESCE(?, is_vat_payer), is_customer = ?, is_vendor = ?,
+                is_fuel_station = COALESCE(?, is_fuel_station),
                 auto_send_reminders = ?, payment_due_default = ?, payment_due_unit = ?,
                 hourly_rate = ?, note = ?, default_expense_category_id = ?, default_revenue_category_id = ?,
                 invoice_number_format = ?, proforma_number_format = ?,
@@ -419,6 +421,7 @@ final class ClientRepository
             array_key_exists('is_vat_payer', $data) ? ((int) (bool) $data['is_vat_payer']) : null,
             $newIsCustomer,
             $newIsVendor,
+            array_key_exists('is_fuel_station', $data) ? ((int) (bool) $data['is_fuel_station']) : null,
             array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1,
             isset($data['payment_due_default']) ? (int) $data['payment_due_default'] : null,
             $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
@@ -599,6 +602,7 @@ final class ClientRepository
         if (array_key_exists('is_vat_payer', $row)) $row['is_vat_payer'] = (bool) $row['is_vat_payer'];
         if (array_key_exists('is_customer', $row)) $row['is_customer'] = (bool) $row['is_customer'];
         if (array_key_exists('is_vendor', $row))   $row['is_vendor']   = (bool) $row['is_vendor'];
+        if (array_key_exists('is_fuel_station', $row)) $row['is_fuel_station'] = (bool) $row['is_fuel_station'];
         if (array_key_exists('auto_send_reminders', $row)) {
             $row['auto_send_reminders'] = (bool) $row['auto_send_reminders'];
         }

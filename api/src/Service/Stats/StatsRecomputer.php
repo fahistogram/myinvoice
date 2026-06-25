@@ -38,10 +38,10 @@ final class StatsRecomputer
 
             $stmt = $pdo->prepare(
                 "SELECT i.currency_id,
-                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note')
+                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                                   THEN CASE WHEN s.is_vat_payer = 1 THEN i.total_without_vat ELSE i.total_with_vat END
                                   ELSE 0 END) AS revenue,
-                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note')
+                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                                   THEN 1 ELSE 0 END) AS cnt,
                         MAX(COALESCE(i.tax_date, i.issue_date)) AS last_date
                    FROM invoices i
@@ -89,10 +89,10 @@ final class StatsRecomputer
 
             $stmt = $pdo->prepare(
                 "SELECT i.currency_id,
-                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note')
+                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                                   THEN CASE WHEN s.is_vat_payer = 1 THEN i.total_without_vat ELSE i.total_with_vat END
                                   ELSE 0 END) AS revenue,
-                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note')
+                        SUM(CASE WHEN i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                                   THEN 1 ELSE 0 END) AS cnt,
                         MAX(COALESCE(i.tax_date, i.issue_date)) AS last_date
                    FROM invoices i

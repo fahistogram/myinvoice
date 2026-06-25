@@ -1,8 +1,38 @@
 import { api } from './client'
 
-export type InvoiceType = 'invoice' | 'proforma' | 'credit_note' | 'cancellation'
+export type InvoiceType = 'invoice' | 'proforma' | 'credit_note' | 'cancellation' | 'tax_document'
 export type InvoiceStatus = 'draft' | 'issued' | 'sent' | 'reminded' | 'paid' | 'cancelled'
 export type ApprovalStatus = 'none' | 'requested' | 'approved' | 'rejected'
+/** Odvozený platební stav (#89) — počítá se z paid_total vs. amount_to_pay; null pro draft/cancelled. */
+export type PaymentStatus = 'unpaid' | 'partially_paid' | 'paid' | 'overpaid'
+
+/** Evidovaná platba faktury (#89). */
+export interface InvoicePayment {
+  id: number
+  invoice_id: number
+  paid_on: string
+  amount: number
+  currency: string
+  variable_symbol: string | null
+  bank_reference: string | null
+  note: string | null
+  source: 'manual' | 'mark_paid' | 'bank' | 'legacy'
+  bank_transaction_id: number | null
+  bank_statement_id?: number | null
+  bank_counterparty_name?: string | null
+  tax_document_invoice_id: number | null
+  tax_document_varsymbol?: string | null
+  tax_document_status?: InvoiceStatus | null
+  created_at: string
+}
+
+export interface InvoicePaymentsResponse {
+  payments: InvoicePayment[]
+  paid_total: number
+  amount_to_pay: number
+  remaining: number
+  payment_status: PaymentStatus | null
+}
 
 /** Nespárovaná zálohová faktura (proforma) nabídnutá k propojení s daňovým dokladem. */
 export interface AdvanceCandidate {
@@ -94,6 +124,9 @@ export interface Invoice {
   payment_method: PaymentMethod
   auto_send_reminders: boolean
   amount_to_pay: number
+  /** Suma evidovaných plateb (#89); zbývá k úhradě = amount_to_pay - paid_total. */
+  paid_total: number
+  payment_status?: PaymentStatus | null
   total_without_vat: number
   total_vat: number
   total_with_vat: number
@@ -190,6 +223,8 @@ export interface InvoiceListItem {
   total_with_vat: number
   advance_paid_amount: number
   amount_to_pay: number
+  paid_total?: number
+  payment_status?: PaymentStatus | null
   status: InvoiceStatus
   payment_method: PaymentMethod
   sent_at: string | null
@@ -306,6 +341,20 @@ export const invoicesApi = {
     return api.get<{ data: MonthGroup[]; meta: InvoiceListMeta }>('/invoices', { params }).then(r => r.data)
   },
 
+  /**
+   * Plochý seznam OTEVŘENÝCH (nezaplacených) vystavených faktur a proforem pro picker
+   * (např. kotva sloučené úhrady v bankovním párování). Vrací max `limit` položek
+   * seřazených dle splatnosti. Hledá fulltextem (varsymbol + jméno klienta).
+   */
+  searchOpen: (q: string, limit = 20): Promise<InvoiceListItem[]> =>
+    invoicesApi.listGrouped({
+      q,
+      status: ['issued', 'sent', 'reminded'],
+      type: ['invoice', 'proforma'],
+      unpaid_only: true,
+      per_page: limit,
+    }).then(r => r.data.flatMap(g => g.invoices)),
+
   exportCsv: (filters: ListFilters = {}) => {
     const params = new URLSearchParams()
     if (filters.q) params.set('q', filters.q)
@@ -348,6 +397,34 @@ export const invoicesApi = {
     }).then(r => r.data),
   unmarkPaid: (id: number) =>
     api.post<Invoice>(`/invoices/${id}/unmark-paid`, {}).then(r => r.data),
+  // Evidence plateb / částečné úhrady (#89)
+  listPayments: (id: number) =>
+    api.get<InvoicePaymentsResponse>(`/invoices/${id}/payments`).then(r => r.data),
+  createPayment: (id: number, payload: {
+    amount: number
+    paid_on?: string
+    variable_symbol?: string | null
+    bank_reference?: string | null
+    note?: string | null
+    send_payment_thanks?: boolean
+  }) =>
+    api.post<{
+      invoice: Invoice
+      payments: InvoicePayment[]
+      payment: InvoicePayment
+      became_paid: boolean
+      remaining: number
+      payment_thanks?: { status: 'sent' | 'skipped' | 'failed'; reason?: string } | null
+    }>(`/invoices/${id}/payments`, payload).then(r => r.data),
+  deletePayment: (id: number, paymentId: number) =>
+    api.delete<{ invoice: Invoice; payments: InvoicePayment[]; became_unpaid: boolean; remaining: number }>(
+      `/invoices/${id}/payments/${paymentId}`,
+    ).then(r => r.data),
+  // Daňový doklad k přijaté platbě (DUZP = datum platby) — DRAFT, idempotentní
+  createPaymentTaxDocument: (id: number, paymentId: number) =>
+    api.post<{ tax_document_id: number; payments: InvoicePayment[] }>(
+      `/invoices/${id}/payments/${paymentId}/tax-document`,
+    ).then(r => r.data),
   cancel: (id: number, mode: 'internal' | 'credit_note', reason: string = '') =>
     api.post<{ cancellation_id?: number; credit_note_id?: number; edit_url?: string; invoice?: Invoice }>(
       `/invoices/${id}/cancel`,
@@ -506,6 +583,10 @@ export const invoicesApi = {
     api.put<WorkReport>(`/invoices/${invoiceId}/work-report`, payload, {
       params: force ? { force: 1 } : undefined,
     }).then(r => r.data),
+  saveWorkReportMaterials: (invoiceId: number, payload: WorkReportMaterialsPayload, force = false) =>
+    api.put<WorkReport>(`/invoices/${invoiceId}/work-report/materials`, payload, {
+      params: force ? { force: 1 } : undefined,
+    }).then(r => r.data),
   deleteWorkReport: (invoiceId: number, force = false) =>
     api.delete<{ deleted: true }>(`/invoices/${invoiceId}/work-report`, {
       params: force ? { force: 1 } : undefined,
@@ -534,6 +615,17 @@ export interface WorkReportItem {
   order_index: number
 }
 
+export interface WorkReportMaterial {
+  id?: number
+  description: string
+  quantity: number
+  unit: string
+  /** Cena/MJ v cenové konvenci dokladu (prices_include_vat). */
+  unit_price: number
+  total_amount?: number
+  order_index: number
+}
+
 export interface WorkReport {
   id: number
   invoice_id: number
@@ -541,17 +633,37 @@ export interface WorkReport {
   title: string
   total_hours: number
   total_amount: number
+  /** Sazba DPH práce (12/21); null = fallback default faktury. */
+  vat_rate_id: number | null
+  material_title: string | null
+  material_total: number
+  material_vat_rate_id: number | null
   items: WorkReportItem[]
+  materials: WorkReportMaterial[]
 }
 
 export interface WorkReportPayload {
   project_id: number | null
   title: string
+  vat_rate_id?: number | null
   items: Array<{
     description: string
     work_date?: string | null
     hours: number
     rate: number
+    order_index: number
+  }>
+}
+
+export interface WorkReportMaterialsPayload {
+  project_id: number | null
+  material_title: string
+  material_vat_rate_id: number | null
+  materials: Array<{
+    description: string
+    quantity: number
+    unit: string
+    unit_price: number
     order_index: number
   }>
 }

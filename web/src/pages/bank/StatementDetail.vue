@@ -2,20 +2,29 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, RouterLink, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { bankApi, type BankStatementDetail, type BankTransaction, type MatchCandidate } from '@/api/bank'
+import { bankApi, type BankStatementDetail, type BankTransaction, type MatchCandidate, type SplitSuggestion } from '@/api/bank'
 import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
 import VendorPicker from '@/components/purchase/VendorPicker.vue'
+import SearchableSelect from '@/components/ui/SearchableSelect.vue'
+import { invoicesApi } from '@/api/invoices'
 import ClientFormModal from '@/components/modals/ClientFormModal.vue'
 import type { Client } from '@/api/clients'
 import { useAuthStore } from '@/stores/auth'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const toast = useToast()
 const router = useRouter()
 const auth = useAuthStore()
+
+// E-mailová avíza jsou měsíční agregát (statement_date = 1. den měsíce) → název měsíce.
+function monthLabel(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'cs-CZ', { month: 'long', year: 'numeric' })
+}
 
 const route = useRoute()
 const statement = ref<BankStatementDetail | null>(null)
@@ -36,6 +45,17 @@ const matchError = ref<string>('')
 // Návrhy ke spárování dle částky ±14 dní (vydané i přijaté faktury).
 const matchCandidates = ref<MatchCandidate[]>([])
 const loadingCandidates = ref(false)
+// Návrhy sloučené úhrady: kombinace faktur jednoho klienta, jejichž součet = platba.
+const splitSuggestions = ref<SplitSuggestion[]>([])
+const loadingSplit = ref(false)
+const splitWindow = ref(7)
+// Kotva: konkrétní vybraná faktura, kolem které se dohledá zbytek (téhož klienta).
+type AnchorOption = { value: number; label: string; secondary?: string }
+const anchorInvoiceId = ref<number | null>(null)
+const anchorOptions = ref<AnchorOption[]>([])
+const anchorSelected = ref<AnchorOption | null>(null)
+const anchorLoading = ref(false)
+let anchorSearchTimer: ReturnType<typeof setTimeout> | null = null
 
 // Vytvoření konceptu přijaté faktury z odchozí (záporné) platby.
 const createTx = ref<BankTransaction | null>(null)
@@ -139,6 +159,72 @@ function startMatch(tx: BankTransaction) {
     .then(list => { if (matchingTx.value === tx.id) matchCandidates.value = list })
     .catch(() => {})
     .finally(() => { loadingCandidates.value = false })
+  // Návrhy sloučené úhrady (jen příchozí platba — klient zaplatil víc faktur naráz)
+  splitSuggestions.value = []
+  splitWindow.value = 7
+  anchorInvoiceId.value = null
+  anchorOptions.value = []
+  anchorSelected.value = null
+  if (tx.amount > 0) loadSplitSuggestions(tx, 7)
+}
+
+function loadSplitSuggestions(tx: BankTransaction, window: number, anchorId?: number | null) {
+  loadingSplit.value = true
+  bankApi.splitSuggestions(tx.id, { window, invoiceId: anchorId ?? undefined })
+    .then(r => {
+      if (matchingTx.value === tx.id) {
+        splitSuggestions.value = r.suggestions
+        splitWindow.value = r.window
+      }
+    })
+    .catch(() => {})
+    .finally(() => { loadingSplit.value = false })
+}
+
+function widenSplitWindow() {
+  if (!matchCtx.value) return
+  loadSplitSuggestions(matchCtx.value, Math.min(60, splitWindow.value + 7), anchorInvoiceId.value)
+}
+
+// Našeptávač kotvy: otevřené vystavené faktury (fulltext varsymbol + klient).
+function onAnchorSearch(q: string) {
+  if (anchorSearchTimer) clearTimeout(anchorSearchTimer)
+  const query = q.trim()
+  if (query.length < 2) { anchorOptions.value = []; return }
+  anchorLoading.value = true
+  anchorSearchTimer = setTimeout(() => {
+    invoicesApi.searchOpen(query, 20)
+      .then(list => {
+        anchorOptions.value = list.map(i => ({
+          value: i.id,
+          label: `${i.varsymbol || '#' + i.id} — ${i.client_company_name}`,
+          secondary: `${formatMoney(i.amount_to_pay - (i.paid_total ?? 0), i.currency)} · ${formatDate(i.due_date || i.issue_date)}`,
+        }))
+      })
+      .catch(() => { anchorOptions.value = [] })
+      .finally(() => { anchorLoading.value = false })
+  }, 220)
+}
+
+function onAnchorSelect(id: number | null) {
+  anchorInvoiceId.value = id
+  anchorSelected.value = id !== null
+    ? (anchorOptions.value.find(o => o.value === id) ?? anchorSelected.value)
+    : null
+  if (!matchCtx.value) return
+  loadSplitSuggestions(matchCtx.value, splitWindow.value, id)
+}
+
+async function confirmSuggestion(s: SplitSuggestion) {
+  if (!matchingTx.value) return
+  matchError.value = ''
+  try {
+    await bankApi.matchMultiple(matchingTx.value, s.invoices.map(i => i.id))
+    matchingTx.value = null
+    await load()
+  } catch (e: any) {
+    matchError.value = apiErrorMessage(e, t('bank.match_failed'))
+  }
 }
 
 async function confirmCandidate(c: MatchCandidate) {
@@ -207,8 +293,14 @@ async function rematchStatement() {
 
   <div v-else-if="statement">
     <RouterLink to="/bank" class="text-sm text-neutral-600 hover:text-neutral-900">{{ t('bank.back') }}</RouterLink>
-    <h1 class="text-2xl font-semibold mt-1">
-      {{ t('bank.statement_title', { number: statement.statement_number, date: formatDate(statement.statement_date) }) }}
+    <h1 class="text-2xl font-semibold mt-1 flex items-center gap-2 flex-wrap">
+      <span v-if="statement.source === 'email_notice'" :title="t('bank.email_notice_hint')"
+        class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        {{ t('bank.email_notice_badge') }}
+      </span>
+      <span v-if="statement.source === 'email_notice'">{{ t('bank.email_notice_statement_title', { month: monthLabel(statement.statement_date) }) }}</span>
+      <span v-else>{{ t('bank.statement_title', { number: statement.statement_number, date: formatDate(statement.statement_date) }) }}</span>
     </h1>
     <p class="text-sm text-neutral-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
       <span>{{ t('bank.account') }}<span class="font-mono">{{ statement.account_number }}</span></span>
@@ -217,7 +309,9 @@ async function rematchStatement() {
       <span>· {{ statement.file_name }}</span>
     </p>
 
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 mb-4">
+    <!-- Zůstatky a celky nese jen nahraný výpis (GPC); e-mailová avíza jsou měsíční
+         souhrn jednotlivých plateb bez průběžného zůstatku → boxy by byly prázdné. -->
+    <div v-if="statement.source !== 'email_notice'" class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 mb-4">
       <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
         <div class="text-xs text-neutral-500 uppercase">{{ t('bank.prev_balance') }}</div>
         <div class="text-lg font-mono">{{ formatMoney(statement.prev_balance, statement.currency ?? 'CZK') }}</div>
@@ -314,12 +408,21 @@ async function rematchStatement() {
               <div v-if="tx.description" class="text-neutral-500 truncate max-w-xs">{{ tx.description }}</div>
             </td>
             <td class="px-3 py-2 text-xs">
-              <RouterLink v-if="tx.matched_invoice_id" :to="`/invoices/${tx.matched_invoice_id}`"
-                class="text-primary-600 hover:underline">
-                {{ tx.matched_varsymbol || `#${tx.matched_invoice_id}` }}
-              </RouterLink>
-              <span v-else class="text-neutral-400">—</span>
-              <div v-if="tx.matched_client_name" class="text-neutral-500 text-xs">{{ tx.matched_client_name }}</div>
+              <template v-if="(tx.matched_invoices?.length ?? 0) > 1">
+                <RouterLink v-for="mi in tx.matched_invoices" :key="mi.invoice_id" :to="`/invoices/${mi.invoice_id}`"
+                  class="text-primary-600 hover:underline block">
+                  {{ mi.varsymbol || `#${mi.invoice_id}` }}
+                </RouterLink>
+                <div v-if="tx.matched_invoices?.[0]?.client_name" class="text-neutral-500 text-xs">{{ tx.matched_invoices[0].client_name }}</div>
+              </template>
+              <template v-else>
+                <RouterLink v-if="tx.matched_invoice_id" :to="`/invoices/${tx.matched_invoice_id}`"
+                  class="text-primary-600 hover:underline">
+                  {{ tx.matched_varsymbol || `#${tx.matched_invoice_id}` }}
+                </RouterLink>
+                <span v-else class="text-neutral-400">—</span>
+                <div v-if="tx.matched_client_name" class="text-neutral-500 text-xs">{{ tx.matched_client_name }}</div>
+              </template>
             </td>
             <td class="px-3 py-2 text-center">
               <span class="text-xs px-2 py-0.5 rounded font-medium" :class="statusBadge(tx.match_status)">
@@ -379,7 +482,14 @@ async function rematchStatement() {
             <div class="font-mono text-neutral-600 truncate">{{ tx.counterparty_account }}<span v-if="tx.counterparty_bank">/{{ tx.counterparty_bank }}</span></div>
             <div v-if="tx.description" class="text-neutral-500 truncate">{{ tx.description }}</div>
           </div>
-          <div v-if="tx.matched_invoice_id" class="text-xs">
+          <div v-if="(tx.matched_invoices?.length ?? 0) > 1" class="text-xs">
+            <RouterLink v-for="mi in tx.matched_invoices" :key="mi.invoice_id" :to="`/invoices/${mi.invoice_id}`"
+              class="text-primary-600 hover:underline font-mono mr-2">
+              {{ mi.varsymbol || `#${mi.invoice_id}` }}
+            </RouterLink>
+            <span v-if="tx.matched_invoices?.[0]?.client_name" class="text-neutral-500">{{ tx.matched_invoices[0].client_name }}</span>
+          </div>
+          <div v-else-if="tx.matched_invoice_id" class="text-xs">
             <RouterLink :to="`/invoices/${tx.matched_invoice_id}`"
               class="text-primary-600 hover:underline font-mono">
               {{ tx.matched_varsymbol || `#${tx.matched_invoice_id}` }}
@@ -455,6 +565,64 @@ async function rematchStatement() {
                   </span>
                   <span class="text-xs text-neutral-400 block">{{ formatDate(c.due_date || c.issue_date) }}</span>
                 </span>
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Sloučená úhrada: kombinace faktur jednoho klienta sečtené na částku platby -->
+        <div v-if="matchCtx && matchCtx.amount > 0" class="mb-4">
+          <div class="flex items-center justify-between gap-2 mb-1">
+            <div class="text-sm font-medium text-neutral-700">{{ t('bank.split_title') }}</div>
+            <button v-if="splitWindow < 60" type="button" @click="widenSplitWindow"
+              class="cursor-pointer text-xs text-primary-600 hover:underline whitespace-nowrap">
+              {{ t('bank.split_widen', { days: Math.min(60, splitWindow + 7) }) }}
+            </button>
+          </div>
+          <p class="text-xs text-neutral-400 mb-1.5">{{ t('bank.split_hint', { days: splitWindow }) }}</p>
+
+          <!-- Kotva: vyber jednu fakturu, dohledá se zbytek téhož klienta -->
+          <div class="mb-2">
+            <SearchableSelect
+              :model-value="anchorInvoiceId"
+              :options="anchorOptions"
+              :selected-option="anchorSelected"
+              :remote="true"
+              :loading="anchorLoading"
+              :placeholder="t('bank.split_anchor_placeholder')"
+              :loading-label="t('common.loading')"
+              :no-results-label="t('bank.no_candidates')"
+              @search="onAnchorSearch"
+              @update:model-value="(v) => onAnchorSelect(v as number | null)" />
+            <p v-if="anchorInvoiceId" class="text-xs text-primary-600 mt-1">{{ t('bank.split_anchor_active') }}</p>
+          </div>
+
+          <div v-if="loadingSplit" class="text-xs text-neutral-500 py-2">{{ t('common.loading') }}</div>
+          <div v-else-if="splitSuggestions.length === 0" class="text-xs text-neutral-400 py-2">{{ t('bank.split_none') }}</div>
+          <ul v-else class="space-y-2">
+            <li v-for="(s, idx) in splitSuggestions" :key="idx" class="border border-neutral-200 rounded-md p-2.5">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-sm font-medium truncate">{{ s.client_name || t('bank.split_unknown_client') }}</span>
+                <span class="font-mono text-sm"
+                  :class="Math.abs(s.total - Math.abs(matchCtx.amount)) < 1 ? 'text-success-600' : 'text-neutral-600'">
+                  {{ formatMoney(s.total, s.currency) }}
+                </span>
+              </div>
+              <ul class="text-xs text-neutral-500 space-y-0.5 mb-2">
+                <li v-for="inv in s.invoices" :key="inv.id" class="flex items-center justify-between gap-2">
+                  <span class="font-mono truncate">
+                    {{ inv.ref || `#${inv.id}` }}
+                    <span class="text-neutral-400 ml-1">· {{ formatDate(inv.due_date || inv.issue_date) }}</span>
+                  </span>
+                  <span class="font-mono whitespace-nowrap">
+                    {{ formatMoney(inv.amount, inv.currency) }}
+                    <span v-if="inv.converted != null" class="text-neutral-400"> ≈ {{ formatMoney(inv.converted, s.currency) }}</span>
+                  </span>
+                </li>
+              </ul>
+              <button type="button" @click="confirmSuggestion(s)"
+                class="cursor-pointer w-full h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">
+                {{ t('bank.split_match', { count: s.count }) }}
               </button>
             </li>
           </ul>

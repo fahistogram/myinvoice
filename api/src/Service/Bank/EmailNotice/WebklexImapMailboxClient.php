@@ -34,11 +34,13 @@ final class WebklexImapMailboxClient implements ImapMailboxClientInterface
                     uid: method_exists($message, 'getUid') ? (int) $message->getUid() : null,
                     messageId: trim((string) $message->getMessageId()) ?: null,
                     date: $date,
-                    sender: $this->decodeMimeHeader((string) $message->getFrom()),
-                    subject: $this->decodeMimeHeader((string) $message->getSubject()),
+                    sender: MimeHeaderDecoder::decode((string) $message->getFrom()),
+                    subject: MimeHeaderDecoder::decode((string) $message->getSubject()),
                     text: $this->normalizer->normalize($body),
                     raw: $rawBody,
                     authResults: $this->authenticationResults($message),
+                    allowForwarded: (bool) ($settings['allow_forwarded'] ?? false),
+                    forwardedFrom: trim((string) ($settings['forwarded_from'] ?? '')),
                 );
             }
             return $out;
@@ -155,27 +157,6 @@ final class WebklexImapMailboxClient implements ImapMailboxClientInterface
             'IMAP složka nebyla nalezena: ' . $path
             . ($available !== [] ? '. Dostupné složky: ' . implode(', ', $available) : '.')
         );
-    }
-
-    private function decodeMimeHeader(string $value): string
-    {
-        $value = trim($value);
-        if ($value === '') {
-            return '';
-        }
-        if (function_exists('iconv_mime_decode')) {
-            $decoded = @iconv_mime_decode($value, ICONV_MIME_DECODE_CONTINUE_ON_ERROR, 'UTF-8');
-            if (is_string($decoded) && trim($decoded) !== '') {
-                return trim($decoded);
-            }
-        }
-        if (function_exists('mb_decode_mimeheader')) {
-            $decoded = @mb_decode_mimeheader($value);
-            if (is_string($decoded) && trim($decoded) !== '') {
-                return trim($decoded);
-            }
-        }
-        return $value;
     }
 
     /**

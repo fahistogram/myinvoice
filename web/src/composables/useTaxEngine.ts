@@ -104,8 +104,10 @@ export function compare(p: EngineProfile, income: number, c: TaxConstantsData): 
 }
 
 export interface Crossing { key: string; val: number; will: boolean; month: number | null }
+export interface SecondarySocial { threshold: number; profit: number; will: boolean; month: number | null }
 export interface PredictResult {
-  run: number; proj: number; cross: Crossing[]; deferMonth: number | null; ytd: number; months: number
+  run: number; proj: number; profit: number; cross: Crossing[]
+  secondary: SecondarySocial | null; deferMonth: number | null; ytd: number; months: number
 }
 
 export function predict(p: EngineProfile, ytd: number, months: number, c: TaxConstantsData): PredictResult {
@@ -128,5 +130,21 @@ export function predict(p: EngineProfile, ytd: number, months: number, c: TaxCon
   const v = cross.find(x => x.key === 'vatLow')
   const deferMonth = v && v.will && v.month! >= 11 && v.month! <= 12 ? v.month : null
 
-  return { run, proj, cross, deferMonth, ytd, months }
+  // Projekce ZISKU (příjmy − výdaje) pro limit vedlejší činnosti — výdaje dle profilu,
+  // stejně jako regular(). Rozhodná částka se měří proti zisku, ne proti příjmu.
+  const projExpenses = p.use_actual_expenses
+    ? Math.max(0, p.actual_expenses || 0)
+    : Math.min(proj * p.activity_rate / 100, c.expense_caps[p.activity_rate])
+  const profit = Math.max(0, proj - projExpenses)
+
+  // Vedlejší SVČ: rozhodná částka pro povinnou účast na důchodovém pojištění.
+  let secondary: SecondarySocial | null = null
+  const threshold = c.social_secondary_participation_threshold
+  if (p.is_secondary && threshold) {
+    const will = profit >= threshold
+    const profitRun = profit / 12
+    secondary = { threshold, profit, will, month: will && profitRun > 0 ? Math.ceil(threshold / profitRun) : null }
+  }
+
+  return { run, proj, profit, cross, secondary, deferMonth, ytd, months }
 }

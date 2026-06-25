@@ -114,7 +114,10 @@ export const authApi = {
 
   /** Sample data generator po setup wizardu (jen pokud DB nemá data). */
   setupSample: () =>
-    api.post<{ clients: number; projects: number; invoices: number; credit_notes: number }>(
+    api.post<{
+      clients: number; projects: number; invoices: number; credit_notes: number
+      cars: number; trips: number; fuelings: number
+    }>(
       '/auth/setup-sample',
     ).then((r) => r.data),
 

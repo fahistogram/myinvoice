@@ -69,6 +69,25 @@ final class IssueInvoiceAction
         if ($invoice['invoice_type'] === 'cancellation') {
             return Json::error($response, 'invalid_type', 'Storno nedostává varsymbol.', 422);
         }
+        // Daňový doklad k přijaté platbě nelze vystavit, když už k proformě existuje
+        // (nestornovaný) finál — jeho § 37a odpočty jsou zafixované a stejná úplata
+        // by se zdanila podruhé. Draft DD smaž, nebo nejdřív stornuj finál.
+        if ($invoice['invoice_type'] === 'tax_document' && (int) ($invoice['parent_invoice_id'] ?? 0) > 0) {
+            $fin = $this->db->pdo()->prepare(
+                "SELECT 1 FROM invoices
+                  WHERE parent_invoice_id = ? AND invoice_type = 'invoice' AND status <> 'cancelled'
+                  LIMIT 1"
+            );
+            $fin->execute([(int) $invoice['parent_invoice_id']]);
+            if ($fin->fetchColumn() !== false) {
+                return Json::error(
+                    $response,
+                    'final_exists',
+                    'K zálohové faktuře už existuje finální doklad — daňový doklad k platbě by úplatu zdanil podruhé. Smaž tento koncept.',
+                    409,
+                );
+            }
+        }
 
         // Pokud projekt vyžaduje schválení výkazu A faktura má výkaz, musí být approved.
         // Faktury bez výkazu (např. fixní paušál) lze vystavit i u projektu s requires_approval.
@@ -144,7 +163,13 @@ final class IssueInvoiceAction
                 json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
                 $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
                 $autoPaid ? 'paid' : 'issued',
-                $autoPaid ? $invoice['issue_date'] : null,
+                // Daňový doklad k přijaté platbě: paid_at = den přijetí úplaty (tax_date/DUZP),
+                // ne den vystavení dokladu — kasové reporty mají vidět skutečné inkaso.
+                $autoPaid
+                    ? ($invoice['invoice_type'] === 'tax_document'
+                        ? ($invoice['tax_date'] ?? $invoice['issue_date'])
+                        : $invoice['issue_date'])
+                    : null,
                 $id,
             ]);
         } catch (\PDOException $e) {

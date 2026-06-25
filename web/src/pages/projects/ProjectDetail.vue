@@ -11,9 +11,12 @@ import { formatMoney, formatDate, statusLabel, typeLabel, statusBadgeClass, isOv
 import MonthlyRevenueChart from '@/components/charts/MonthlyRevenueChart.vue'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
+import SendWorkReportLinkModal from '@/components/modals/SendWorkReportLinkModal.vue'
+import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
 const toast = useToast()
 const auth = useAuthStore()
+const showWrLinkModal = ref(false)
 
 const route = useRoute()
 const router = useRouter()
@@ -110,6 +113,29 @@ async function deleteProject() {
     toast.error(e?.response?.data?.error?.message || t('project.delete_failed'))
   }
 }
+
+// ─── Lišta akcí (sdílená ActionBar) — sjednocuje horní toolbar i spodní lištu ───
+const projectActions = computed<ActionItem[]>(() => {
+  const p = project.value
+  if (!p) return []
+  const w = auth.canWrite
+  return [
+    { key: 'new-invoice', label: t('project.new_invoice'), icon: 'plus', tier: 'primary', variant: 'primary',
+      show: p.status === 'active' && w, to: `/invoices/new?client_id=${p.client_id}&project_id=${p.id}` },
+    { key: 'edit', label: t('project.edit_project'), icon: 'edit', tier: 'secondary', variant: 'success',
+      show: w, to: `/projects/${p.id}/edit` },
+    { key: 'client', label: t('project.client_detail'), icon: 'user', tier: 'secondary', variant: 'warning',
+      to: `/clients/${p.client_id}` },
+    { key: 'edit-client', label: t('project.edit_client'), icon: 'edit', tier: 'overflow', variant: 'neutral',
+      show: w, to: `/clients/${p.client_id}/edit` },
+    { key: 'wr-link', label: t('workReportTracking.button'), icon: 'link', tier: 'overflow', variant: 'primary',
+      show: w, run: () => { showWrLinkModal.value = true } },
+    { key: 'delete', label: t('common.delete'), icon: 'trash', tier: 'overflow', variant: 'danger',
+      show: canDelete.value && w, run: deleteProject },
+    { key: 'archive', label: t('common.archive'), icon: 'archive', tier: 'advanced', variant: 'warning',
+      show: w, run: archive },
+  ]
+})
 </script>
 
 <template>
@@ -137,34 +163,7 @@ async function deleteProject() {
           </span>
         </div>
       </div>
-      <div class="flex flex-wrap gap-2 md:justify-end">
-        <RouterLink v-if="auth.canWrite" :to="`/projects/${project.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('project.edit_project') }}
-        </RouterLink>
-        <RouterLink v-if="(project.status === 'active') && auth.canWrite"
-          :to="`/invoices/new?client_id=${project.client_id}&project_id=${project.id}`"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-          {{ t('project.new_invoice') }}
-        </RouterLink>
-        <RouterLink v-if="auth.canWrite" :to="`/clients/${project.client_id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM12 14a7 7 0 0 0-7 7h14a7 7 0 0 0-7-7z"/></svg>
-          {{ t('project.edit_client') }}
-        </RouterLink>
-        <button v-if="auth.canWrite" @click="archive"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 1 1 0-4h14a2 2 0 1 1 0 4M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/></svg>
-          {{ t('common.archive') }}
-        </button>
-        <button v-if="(canDelete) && auth.canWrite" @click="deleteProject"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 rounded-md text-danger-500 hover:bg-danger-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-danger-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
-          {{ t('common.delete') }}
-        </button>
-      </div>
+      <ActionBar :actions="projectActions" />
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -360,5 +359,7 @@ async function deleteProject() {
       </div>
     </div>
     <LinkedDocumentsPanel v-if="project" class="mt-4 block" entity-type="project" :entity-id="project.id" />
+
+    <SendWorkReportLinkModal v-if="project" :open="showWrLinkModal" scope="project" :entity-id="project.id" @close="showWrLinkModal = false" />
   </div>
 </template>

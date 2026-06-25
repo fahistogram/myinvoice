@@ -22,7 +22,8 @@ const createError = ref('')
 const form = ref({
   name: '',
   supplier_id: null as number | null,
-  scope: 'read_write' as 'read' | 'read_write',
+  // Default least-privilege — sladěno s backendem (CreateTokenAction).
+  scope: 'read' as 'read' | 'read_write',
   expires_at: '' as string,
   totp_code: '',
 })
@@ -50,7 +51,7 @@ function openCreate() {
   form.value = {
     name: '',
     supplier_id: suppliers.currentSupplierId || null,
-    scope: 'read_write',
+    scope: 'read',
     expires_at: '',
     totp_code: '',
   }

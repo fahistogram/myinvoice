@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Action\Admin;
 
 use MyInvoice\Http\Json;
+use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Service\Cron\CronCatalog;
@@ -20,7 +21,10 @@ use Psr\Http\Message\ServerRequestInterface as Request;
  */
 final class CronJobsAction
 {
-    public function __construct(private readonly Connection $db) {}
+    public function __construct(
+        private readonly Connection $db,
+        private readonly Config $config,
+    ) {}
 
     public function __invoke(Request $request, Response $response): Response
     {
@@ -69,6 +73,12 @@ final class CronJobsAction
         $now = time();
         $rows = [];
         foreach ($catalog as $job) {
+            // Podmíněné úlohy (bank scan, scan inbox) skryj, dokud není nastaven
+            // jejich adresář v cfg — bez něj scan jen tiše skipuje, takže nemá smysl
+            // je v přehledu hlásit jako "nikdy neběžela".
+            if (!$this->jobConfigured($job)) {
+                continue;
+            }
             $script = (string) $job['script'];
             $stmt->execute([$script, $script]);
             $last = $stmt->fetch(\PDO::FETCH_ASSOC) ?: null;
@@ -126,5 +136,22 @@ final class CronJobsAction
             'jobs'        => $rows,
             'server_time' => date('c'),
         ]);
+    }
+
+    /**
+     * Úloha s `requires_config` je "konfigurovaná" jen když je cfg klíč nastaven
+     * na existující adresář (stejná podmínka jako cron skript, který scan jinak
+     * tiše přeskočí). Úlohy bez `requires_config` jsou vždy konfigurované.
+     *
+     * @param array<string,mixed> $job
+     */
+    private function jobConfigured(array $job): bool
+    {
+        $key = $job['requires_config'] ?? null;
+        if ($key === null) {
+            return true;
+        }
+        $path = trim((string) $this->config->get((string) $key, ''));
+        return $path !== '' && is_dir($path);
     }
 }

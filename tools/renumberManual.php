@@ -120,6 +120,21 @@ function rewriteContent(string $content, array $self, array $map): string {
         $content = rewriteLinksToFile($content, $obase, $oi);
     }
 
+    // Same-file (in-page) kotvy `](#NNN-...)` — odkaz uvnitř TÉŽE kapitoly nemá název
+    // souboru, takže ho rewriteLinksToFile nechytí, ale číslo kapitoly je v kotvě zapečené
+    // (např. `3.8` → `#38-...`). Přečíslujeme prefix kotvy podle vlastního labelu.
+    $oldDigits = preg_replace('/\D/', '', $self['old_label']);
+    $newDigits = preg_replace('/\D/', '', $self['new_label']);
+    if ($oldDigits !== '' && $oldDigits !== $newDigits) {
+        // `](#26` i `](#26-`/`](#268-…` (sekce) — leading číslo kapitoly nahradíme.
+        // Lookahead [-\d] zajistí, že měníme jen prefix kotvy s číslem kapitoly.
+        $content = preg_replace(
+            '/\]\(#' . preg_quote($oldDigits, '/') . '(?=[-\d])/u',
+            '](#' . $newDigits,
+            $content
+        );
+    }
+
     return $content;
 }
 

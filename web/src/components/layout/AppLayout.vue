@@ -102,6 +102,7 @@ const ICONS = {
   codebooks:  'M19 11H5m14 0a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2m14 0V9a2 2 0 0 0-2-2M5 11V9a2 2 0 0 1 2-2m0 0V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2M7 7h10',
   imports:    'M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-8l-4-4m0 0l-4 4m4-4v12',
   exports:    'M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4',
+  payment_orders: 'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 0 0 3-3V8a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3z',
   users:      'M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a3 3 0 0 1 5.356-1.857M15 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z',
   email:      'M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z',
   sent_email: 'M6 12L3.269 3.126A59.768 59.768 0 0 1 21.485 12 59.77 59.77 0 0 1 3.27 20.876L5.999 12Zm0 0h7.5',
@@ -113,6 +114,8 @@ const ICONS = {
   help:       'M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827V14m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
   ai:         'M13 10V3L4 14h7v7l9-11h-7z',
   documents:  'M7 21h10a2 2 0 0 0 2-2V9.414a1 1 0 0 0-.293-.707l-5.414-5.414A1 1 0 0 0 12.586 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2zM9 13h6m-6 4h6',
+  logbook:    'M5 13l1.4-4.2A2 2 0 0 1 8.3 7.5h7.4a2 2 0 0 1 1.9 1.3L19 13m-14 0h14m-14 0v4a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-4M7.5 16h.01M16.5 16h.01',
+  fuel:       'M4 21h9M6 21V5a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v16M6 11h7M15 7l2.5 2.5a2 2 0 0 1 .5 1.4V17a1.5 1.5 0 0 0 3 0V10l-2-2',
   // Daně sekce — různé ikony pro každý report
   tax_dph:    'M3 10h18M3 14h18M5 21V3a1 1 0 011-1h12a1 1 0 011 1v18M9 7h6M9 11h6M9 15h6',
   tax_kh:     'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
@@ -151,6 +154,7 @@ const navSections = computed<NavSection[]>(() => {
       items: [
         { to: '/purchase-invoices',          label: t('nav.purchase_invoices'),  icon: ICONS.purchase, newTo: '/purchase-invoices/new' },
         { to: '/clients?role=vendors',       label: t('nav.vendors'),            icon: ICONS.suppliers, newTo: '/clients/new?role=vendor' },
+        { to: '/purchase-invoices/payment-orders', label: t('nav.payment_orders'), icon: ICONS.payment_orders },
         { to: '/purchase-invoices/export',   label: t('nav.purchase_export'),    icon: ICONS.exports },
         ...(isAdmin ? [{ to: '/admin/import?tab=purchase',  label: t('nav.imports_purchase'), icon: ICONS.imports }] : []),
         ...(isAdmin ? [{ to: '/admin/integrations?tab=ai',  label: t('nav.ai_import'),        icon: ICONS.ai }] : []),
@@ -171,6 +175,7 @@ const navSections = computed<NavSection[]>(() => {
       accent: 'neutral',
       items: [
         { to: '/documents', label: t('nav.documents'), icon: ICONS.documents },
+        { to: '/logbook', label: t('nav.logbook'), icon: ICONS.logbook, newTo: '/logbook?tab=trips&new=trip' },
       ],
     },
     {
@@ -238,6 +243,8 @@ const quickActions = computed(() => [
   { to: '/clients/new',           label: t('nav.quick_client'),    icon: ICONS.clients },
   { to: '/clients/new?role=vendor', label: t('nav.quick_vendor'), icon: ICONS.suppliers },
   { to: '/purchase-invoices/new', label: t('nav.quick_purchase'), icon: ICONS.purchase },
+  { to: '/logbook?tab=trips&new=trip', label: t('nav.quick_trip'),    icon: ICONS.logbook },
+  { to: '/logbook?tab=fuel&new=fuel',  label: t('nav.quick_fueling'), icon: ICONS.fuel },
 ])
 
 /** Ploché položky menu pro globální search (našeptávač skáče přímo na body menu). */
@@ -636,10 +643,10 @@ onMounted(async () => {
           </a>
           <span aria-hidden="true">·</span>
           <button type="button" @click="supportOpen = true"
-                  class="cursor-pointer hover:text-neutral-700">{{ t('support.author_link') }}</button>
+                  class="cursor-pointer text-primary-600 hover:text-primary-700 font-medium">{{ t('support.author_link') }}</button>
           <span aria-hidden="true">·</span>
           <button type="button" @click="featureOpen = true"
-                  class="cursor-pointer hover:text-neutral-700">{{ t('support.feature_link') }}</button>
+                  class="cursor-pointer text-primary-600 hover:text-primary-700 font-medium">{{ t('support.feature_link') }}</button>
         </footer>
       </div>
     </div>

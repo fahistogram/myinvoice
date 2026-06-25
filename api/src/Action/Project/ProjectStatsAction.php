@@ -38,7 +38,7 @@ final class ProjectStatsAction
                FROM invoices i
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
-                AND i.status != 'cancelled' AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.status != 'cancelled' AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
            GROUP BY cur.code
            ORDER BY COUNT(*) DESC
               LIMIT 1"
@@ -82,7 +82,7 @@ final class ProjectStatsAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
            GROUP BY p.id, p.name, c.company_name
              HAVING revenue > 0
@@ -133,7 +133,7 @@ final class ProjectStatsAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
            GROUP BY p.id, p.name, c.company_name
              HAVING revenue > 0
@@ -173,7 +173,7 @@ final class ProjectStatsAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN ($place)
            GROUP BY year, cur.code
            ORDER BY year DESC, total DESC"

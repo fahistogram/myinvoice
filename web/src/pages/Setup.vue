@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 
@@ -7,6 +7,7 @@ const { t, locale } = useI18n()
 import AppShell from '@/components/layout/AppShell.vue'
 import { useAuthStore } from '@/stores/auth'
 import { authApi, type SetupPayload } from '@/api/auth'
+import { bankNameByCode, isKnownBankName } from '@/utils/czBankCodes'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -20,7 +21,10 @@ const admin = ref({ name: '', email: '', password: '', password_confirm: '' })
 const requireTotp = ref(false)
 const skipSupplier = ref(false)
 const generateSample = ref(false)
-const sampleResult = ref<{ clients: number; projects: number; invoices: number; credit_notes: number } | null>(null)
+const sampleResult = ref<{
+  clients: number; projects: number; invoices: number; credit_notes: number
+  cars: number; trips: number; fuelings: number
+} | null>(null)
 const sampleError = ref('')
 const supplier = ref({
   company_name: '',
@@ -56,6 +60,15 @@ const aresMessage = ref<{ type: 'success' | 'error'; text: string } | null>(null
 const bankLoading = ref(false)
 const bankMessage = ref<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null)
 const bankAccounts = ref<import('@/api/clients').CrpDphAccount[]>([])
+
+// Auto-doplnění názvu banky podle kódu (číselník ČNB). Přepíše jen prázdný
+// nebo z číselníku pocházející název — ručně zadaný text nepřepisuje.
+watch(() => supplier.value.bank_code, (code) => {
+  const name = bankNameByCode(code)
+  if (name && (!supplier.value.bank_name || isKnownBankName(supplier.value.bank_name))) {
+    supplier.value.bank_name = name
+  }
+})
 
 function applyBankAccount(acc: import('@/api/clients').CrpDphAccount) {
   if (acc.iban) {

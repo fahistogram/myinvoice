@@ -132,6 +132,7 @@ async function cancelJob(j: MonthlyExportJob) {
 }
 
 async function deleteJob(j: MonthlyExportJob) {
+  if (!confirm(t('reports.monthly_export.job.delete_confirm'))) return
   try {
     await reportsApi.monthlyExportDeleteJob(j.id)
   } catch (e) {
