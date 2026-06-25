@@ -462,6 +462,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cmd\docker-update.ps1</code>
             {{ t('updates.how_native_title') }}
           </h3>
           <p class="text-sm text-neutral-600 mt-1.5 leading-relaxed">{{ t('updates.how_native_desc') }}</p>
+          <p class="text-sm text-neutral-600 mt-3 leading-relaxed">{{ t('updates.how_native_setup') }}</p>
+          <pre class="mt-2 rounded-md bg-neutral-900 text-neutral-100 p-3 text-xs leading-relaxed overflow-x-auto"><code># Linux / macOS
+cd /opt/myinvoice
+bash cmd/native-update-watcher.sh
+
+# Windows (PowerShell)
+cd C:\inetpub\myinvoice
+powershell -NoProfile -ExecutionPolicy Bypass -File cmd\native-update-watcher.ps1</code></pre>
+          <p class="text-sm text-neutral-600 mt-3 leading-relaxed">{{ t('updates.how_native_manual_hint') }}</p>
           <pre class="mt-2 rounded-md bg-neutral-900 text-neutral-100 p-3 text-xs leading-relaxed overflow-x-auto"><code># Klasický postup (vyžaduje Composer + Node + pnpm na hostu)
 git fetch --tags
 git checkout v{{ status.latest ?? 'X.Y.Z' }}

@@ -234,9 +234,24 @@ docker run --rm -v myinvoice_app-storage:/old:ro -v myinvoice_app-data:/new alpi
 
 ## 38.6 Aktualizace v UI — nativní instalace
 
-Pro nativní deployment (sdílený hosting / VPS bez Dockeru) UI
-zatím **neimplementuje** automatický download release
-tarballu — pouze ti ukáže copy-paste příkazy:
+Pro nativní deployment (VPS / dedikovaný server bez Dockeru, instalovaný
+přes `git clone`) funguje **Aktualizovat** stejně jako u Dockeru — přes
+host-side watcher.
+
+V **Systém → Aktualizace** klikni na **„Aktualizovat na vX.Y.Z"**. Aplikace
+zapíše flag soubor `upgrade-requested.json` do `storage/` (resp.
+`${MYINVOICE_DATA_DIR}/storage/`, pokud je ENV nastavená) a UI začne pollovat.
+**Vlastní upgrade provádí watcher** — proces běžící na hostu pod *tvým*
+uživatelem (ne pod web serverem), který má v PATH `git` / `php` / `composer` /
+`pnpm` a zápisová práva k repu.
+
+> ℹ️ **Proč watcher a ne přímo web server?** PHP web proces (typicky `www-data`)
+> obvykle nemá práva k `git checkout` / `composer` / `pnpm build`, nemá je
+> v PATH, a `pnpm build` trvá déle než HTTP timeout. Watcher pod tvým účtem to
+> řeší čistě a bezpečně — web server žádný shell nespouští.
+
+Watcher spustí `cmd/native-update.{sh,ps1}`, který provede přesně to, co bys
+dělal ručně:
 
 ```bash
 git fetch --tags
@@ -248,25 +263,124 @@ php tools/exportManualToPdf.php
 php api/bin/migrate.php
 ```
 
-Vyžaduje na hostu **PHP CLI + Composer + Node + pnpm**. Pokud Composer/
-Node nemáš (typicky sdílený hosting), je nejjednodušší cesta:
+Vyžaduje na hostu **PHP CLI + Composer + Node + pnpm**. Pokud je nemáš
+(typicky sdílený hosting), použij production bundle — viz § 38.6.4.
+
+### 38.6.1 Test režim (jednorázově, ve foregroundu)
+
+Než nainstaluješ watcher jako daemon, otestuj ho ručně:
+
+```bash
+# Linux / macOS
+cd /opt/myinvoice
+bash cmd/native-update-watcher.sh
+```
+
+```powershell
+# Windows
+cd C:\inetpub\myinvoice
+powershell -NoProfile -ExecutionPolicy Bypass -File cmd\native-update-watcher.ps1
+```
+
+Vidíš `[watcher] start, polling .../storage/upgrade-requested.json every 30s`.
+Klikni v UI **„Aktualizovat"** a do 30 s watcher flag zachytí, spustí
+`native-update.{sh,ps1}`, výsledek zapíše do `storage/upgrade-result.json`.
+Watcher zastav `Ctrl+C`.
+
+### 38.6.2 Instalace watcheru jako daemon (na produkci)
+
+#### Linux — systemd unit
+
+```bash
+sudo tee /etc/systemd/system/myinvoice-update-watcher.service <<'EOF'
+[Unit]
+Description=MyInvoice native update watcher
+After=network.target
+
+[Service]
+Type=simple
+User=myinvoice
+WorkingDirectory=/opt/myinvoice
+# systemd ma minimalni PATH — doplň cesty ke git/php/composer/pnpm/node:
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/myinvoice/cmd/native-update-watcher.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now myinvoice-update-watcher
+```
+
+`User=` a `WorkingDirectory=` nastav na účet a cestu své instalace. **PATH je
+klíčový** — pokud máš `pnpm`/`composer`/`node` jinde (nvm, `~/.local/share/pnpm`),
+přidej je do `Environment=PATH=...`, jinak update selže na „command not found".
+Logy: `journalctl -u myinvoice-update-watcher -f`.
+
+Alternativa bez systemd — **cron @reboot** (login shell `bash -lc` zajistí plný PATH):
+
+```cron
+@reboot cd /opt/myinvoice && bash -lc 'cmd/native-update-watcher.sh' >> storage/watcher.log 2>&1
+```
+
+#### Windows — Scheduled Task
+
+```powershell
+schtasks /create /tn "MyInvoice Native Update Watcher" `
+  /tr "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\inetpub\myinvoice\cmd\native-update-watcher.ps1" `
+  /sc onstart /ru "DOMENA\ucet" /rl HIGHEST
+
+# Spusť hned (ne až po restartu)
+schtasks /run /tn "MyInvoice Native Update Watcher"
+```
+
+Účet (`/ru`) musí mít v PATH git/php/composer/pnpm a zápis do složky instalace.
+
+### 38.6.3 Co watcher dělá
+
+1. Každých 30 s zkontroluje `storage/upgrade-requested.json`.
+2. Když ho najde → přečte `target_version`, přejmenuje na
+   `upgrade-inflight.json` (zámek proti double-triggeru).
+3. Spustí `cmd/native-update.{sh,ps1} <target>` — checkout tagu, composer,
+   pnpm build, regenerace manuálu, migrace.
+4. Výsledek (success/fail + cesta k logu) zapíše do
+   `storage/upgrade-result.json` a smaže inflight.
+5. Plný log běhu: `storage/upgrade-YYYYMMDDTHHMMSSZ.log`.
+6. UI každých 5 s pollne `/api/admin/update/status` a zobrazí
+   „Upgrade úspěšně dokončen" / „Upgrade selhal" s message.
+
+Interval pollování změníš přes ENV `MYINVOICE_WATCHER_INTERVAL` (sekundy).
+
+### 38.6.4 Bez Composer / Node — production bundle
+
+Pokud na hostu nemáš Composer/Node (sdílený hosting), nativní watcher
+nepoužiješ. Místo toho:
 
 1. Stáhni **production bundle** z release page:
    `https://github.com/radekhulan/myinvoice/releases/tag/vX.Y.Z` →
-   asset `myinvoice-X.Y.Z.tar.gz`. Tarball má všechno potřebné už
-   vyrobené (vendor, web/dist, manual). SHA-256 checksum je v
-   `myinvoice-X.Y.Z.tar.gz.sha256`.
-2. Rozbal přes web rozhraní hostingu nebo SSH:
+   asset `myinvoice-X.Y.Z.tar.gz` (má už vyrobené `vendor`, `web/dist`,
+   `manual`). SHA-256 checksum je v `myinvoice-X.Y.Z.tar.gz.sha256`.
+2. Rozbal přes SSH nebo web rozhraní hostingu:
    ```bash
    tar -xzf myinvoice-X.Y.Z.tar.gz --strip-components=1 \
      --exclude='cfg.php' --exclude='cfg.local.php' \
      --exclude='storage' --exclude='private' --exclude='log'
    ```
-3. Spusť migraci přes hosting cron / SSH:
-   `php api/bin/migrate.php`
+3. Spusť migraci: `php api/bin/migrate.php`
 
-> 🛈 Phase 2 (plánováno na příští minor release) doplní automatický
-> download bundle + extrakci přímo z UI tlačítka, takže krok 1+2 odpadne.
+### 38.6.5 Pokud watcher neběží
+
+UI flag soubor zapíše, ale nikdo ho nezpracuje. Stav „Upgrade probíhá…" se
+po ~15 min sám zruší (TTL self-healing), nebo ho odblokuješ tlačítkem
+**„Zrušit / odblokovat"**. Update pak spusť na hostu ručně:
+
+```bash
+cd /opt/myinvoice
+bash cmd/native-update.sh            # nebo cílová verze: bash cmd/native-update.sh 4.40.1
+rm -f storage/upgrade-requested.json storage/upgrade-inflight.json
+```
 
 ## 38.7 Co když upgrade selže
 
@@ -287,9 +401,12 @@ Typické příčiny:
 Container s aplikací se restartoval, ale data v DB volume zůstávají
 nedotčena.
 
-### Nativní
+### Nativní watcher
 
-Když selže `composer install` nebo `pnpm build`, soubory v `api/vendor/`
+Watcher zapíše `storage/upgrade-result.json` se `status: "failed"` a plný log
+do `storage/upgrade-YYYYMMDDTHHMMSSZ.log`. UI ho zobrazí — v logu je přesný
+krok, který selhal (typicky `composer install` / `pnpm build` kvůli chybějícímu
+nástroji v PATH, síti, nebo verzi). Když selže build, soubory v `api/vendor/`
 nebo `web/dist/` mohou být v inkonzistentním stavu. Recovery:
 
 ```bash

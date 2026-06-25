@@ -695,7 +695,7 @@
     "env_docker": "Docker",
     "env_native": "Native installation",
     "queued_title": "Upgrade queued",
-    "queued_desc": "Host-side watcher (cmd/docker-update-watcher.(sh/ps1)) will apply it. If the watcher is not running, run cmd/docker-update.(sh/ps1) manually on the host.",
+    "queued_desc": "You'll see the status below — the page refreshes itself. A host-side watcher applies the actual upgrade; if it isn't running, start it on the host (see “How upgrades work” below).",
     "manual_required_title": "Run on the host (native installation)",
     "in_progress_title": "Upgrade in progress…",
     "in_progress_desc": "Flag file exists, the host-side watcher is processing it. The result will appear here when finished.",
@@ -715,10 +715,12 @@
     "how_it_works": "How upgrades work",
     "how_docker_title": "Docker installation",
     "how_docker_desc": "Clicking 'Update' writes a flag file `storage/upgrade-requested.json`. A host-side watcher (`cmd/docker-update-watcher.(sh/ps1)` as systemd unit / Scheduled Task) picks it up and runs `cmd/docker-update.(sh/ps1)` — pulling the new image, restarting the stack, running migrations. The result and log appear on this page.",
-    "how_docker_setup": "If the watcher is not yet installed, follow § 19.4 of the manual (systemd unit on Linux, Scheduled Task on Windows). Without the watcher, run on the host manually after clicking 'Update':",
+    "how_docker_setup": "If the watcher is not yet installed, follow § 38.4 of the manual (systemd unit on Linux, Scheduled Task on Windows). Without the watcher, run on the host manually after clicking 'Update':",
     "how_native_title": "Native installation",
-    "how_native_desc": "For native deployments (shared hosting / VPS without Docker) the UI in this version does not download the tarball automatically — instead it shows exact copy-paste commands after you click 'Update'. Requires PHP CLI + Composer + Node + pnpm on the host. If those are unavailable, use the production bundle from the release page (full deployable tar.gz):",
-    "manual_link": "Details in the manual — § 19 Updates"
+    "how_native_desc": "Clicking 'Update' writes a flag file `storage/upgrade-requested.json`. A watcher running on the host under your user account (`cmd/native-update-watcher.(sh/ps1)` as a systemd unit / cron @reboot / Scheduled Task) picks it up and runs `cmd/native-update.(sh/ps1)` — git checkout of the target tag, composer install, pnpm build, manual regeneration and DB migration. The result and log appear on this page. Requires PHP CLI + Composer + Node + pnpm on the host.",
+    "how_native_setup": "If the watcher is not yet installed, follow § 38.6 of the manual (systemd unit / cron on Linux, Scheduled Task on Windows). You can test it once in the foreground:",
+    "how_native_manual_hint": "Without the watcher, run the equivalent steps on the host manually after clicking 'Update' (or use the production bundle without Composer / Node):",
+    "manual_link": "Details in the manual — § 38 Updates"
   },
   "auth": {
     "login": "Sign in", "login_title": "Sign in", "login_subtitle": "Sign in to your account",

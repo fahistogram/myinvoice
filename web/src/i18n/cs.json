@@ -695,7 +695,7 @@
     "env_docker": "Docker",
     "env_native": "Nativní instalace",
     "queued_title": "Upgrade zařazen do fronty",
-    "queued_desc": "Host-side watcher (cmd/docker-update-watcher.(sh/ps1)) ho aplikuje. Pokud watcher neběží, spusť na hostu ručně: cmd/docker-update.(sh/ps1).",
+    "queued_desc": "Stav uvidíš níže — stránka se sama obnovuje. Vlastní upgrade aplikuje host-side watcher; pokud neběží, spusť ho na hostu (viz „Jak upgrade funguje“ níže).",
     "manual_required_title": "Pro nativní instalaci spusť na hostu",
     "in_progress_title": "Upgrade probíhá…",
     "in_progress_desc": "Flag soubor existuje, watcher na hostu ho zpracovává. Po dokončení se zde objeví výsledek.",
@@ -715,10 +715,12 @@
     "how_it_works": "Jak upgrade funguje",
     "how_docker_title": "Docker instalace",
     "how_docker_desc": "Klik na 'Aktualizovat' zapíše flag soubor `storage/upgrade-requested.json`. Mimo container běžící watcher (`cmd/docker-update-watcher.(sh/ps1)` jako systemd unit / Scheduled Task) ho zachytí a spustí `cmd/docker-update.(sh/ps1)` — pull nové image, restart stacku, migrace. Výsledek + log se objeví na této stránce.",
-    "how_docker_setup": "Pokud watcher ještě nemáš nainstalovaný, postupuj podle § 19.4 v manuálu (systemd unit pro Linux, Scheduled Task pro Windows). Bez watcheru spusť po kliku na 'Aktualizovat' na hostu ručně:",
+    "how_docker_setup": "Pokud watcher ještě nemáš nainstalovaný, postupuj podle § 38.4 v manuálu (systemd unit pro Linux, Scheduled Task pro Windows). Bez watcheru spusť po kliku na 'Aktualizovat' na hostu ručně:",
     "how_native_title": "Nativní instalace",
-    "how_native_desc": "Pro nativní deployment (sdílený hosting / VPS bez Dockeru) UI v této verzi nepouští download tarballu automaticky — místo toho ti po kliku na 'Aktualizovat' ukáže přesné copy-paste příkazy. Vyžaduje na hostu PHP CLI + Composer + Node + pnpm. Pokud nejsou k dispozici, použij production bundle z release page (kompletní deployable tar.gz):",
-    "manual_link": "Detaily v manuálu — § 19 Aktualizace"
+    "how_native_desc": "Klik na 'Aktualizovat' zapíše flag soubor `storage/upgrade-requested.json`. Watcher běžící na hostu pod tvým uživatelem (`cmd/native-update-watcher.(sh/ps1)` jako systemd unit / cron @reboot / Scheduled Task) ho zachytí a spustí `cmd/native-update.(sh/ps1)` — git checkout cílového tagu, composer install, pnpm build, regenerace manuálu a migrace DB. Výsledek + log se objeví na této stránce. Vyžaduje na hostu PHP CLI + Composer + Node + pnpm.",
+    "how_native_setup": "Pokud watcher ještě nemáš nainstalovaný, postupuj podle § 38.6 v manuálu (systemd unit / cron pro Linux, Scheduled Task pro Windows). Otestovat ho můžeš jednorázově ve foregroundu:",
+    "how_native_manual_hint": "Bez watcheru spusť ekvivalentní kroky po kliku na 'Aktualizovat' na hostu ručně (nebo použij production bundle bez Composer / Node):",
+    "manual_link": "Detaily v manuálu — § 38 Aktualizace"
   },
   "auth": {
     "login": "Přihlásit", "login_title": "Přihlášení", "login_subtitle": "Přihlaste se ke svému účtu",

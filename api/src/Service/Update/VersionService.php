@@ -149,11 +149,13 @@ final class VersionService
     }
 
     /**
-     * Trigger upgrade. Pro Docker zapíše flag soubor — host-side watcher
-     * (`cmd/docker-update-watcher.{sh,ps1}`) ho zachytí a spustí
-     * `docker-update.{sh,ps1}`. Pro nativní zatím vrací instrukci.
+     * Trigger upgrade. Docker i nativní instalace sdílejí stejný mechanismus:
+     * UI zapíše flag soubor `storage/upgrade-requested.json`, který zpracuje
+     * host-side watcher — Docker `cmd/docker-update-watcher.{sh,ps1}`, nativní
+     * `cmd/native-update-watcher.{sh,ps1}`. Watcher má (na rozdíl od web serveru)
+     * přístup k git/composer/pnpm resp. `docker compose` a zápisová práva k repu.
      *
-     * @return array<string,mixed>  result se status / message / instruction
+     * @return array<string,mixed>  result se status / message
      */
     public function triggerUpgrade(?string $targetVersion, string $requestedByEmail): array
     {
@@ -168,51 +170,37 @@ final class VersionService
             ];
         }
 
-        if ($env === 'docker') {
-            $flag = $this->upgradeFlagPath();
-            $payload = [
-                'target_version'      => $target,
-                'requested_by_email'  => $requestedByEmail,
-                'requested_at'        => date(\DateTimeInterface::ATOM),
-            ];
-            if (!is_dir(dirname($flag))) {
-                @mkdir(dirname($flag), 0755, true);
-            }
-            $ok = @file_put_contents($flag, json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-            if ($ok === false) {
-                return [
-                    'status'  => 'error',
-                    'message' => 'Nelze zapsat flag soubor pro upgrade ('
-                        . $flag . '). Zkontroluj práva storage/.',
-                ];
-            }
-            // Smaž starý result, ať UI ukáže "in progress"
-            @unlink($this->upgradeResultPath());
+        $flag = $this->upgradeFlagPath();
+        $payload = [
+            'target_version'     => $target,
+            'requested_by_email' => $requestedByEmail,
+            'requested_at'       => date(\DateTimeInterface::ATOM),
+            'environment'        => $env,
+        ];
+        if (!is_dir(dirname($flag))) {
+            @mkdir(dirname($flag), 0755, true);
+        }
+        $ok = @file_put_contents($flag, json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        if ($ok === false) {
             return [
-                'status'         => 'queued',
-                'message'        => 'Požadavek na upgrade na v' . $target . ' byl zařazen. '
-                    . 'Aplikuje host-side watcher (cmd/docker-update-watcher.{sh,ps1}).',
-                'environment'    => 'docker',
-                'target_version' => $target,
+                'status'  => 'error',
+                'message' => 'Nelze zapsat flag soubor pro upgrade ('
+                    . $flag . '). Zkontroluj práva storage/.',
             ];
         }
+        // Smaž starý result, ať UI ukáže "in progress" a ne minulý výsledek.
+        @unlink($this->upgradeResultPath());
 
-        // Nativní auto-update zatím přes copy-paste instrukci. Phase 2
-        // doplní download production bundle z GitHub release a extrakci.
+        $watcher = $env === 'docker'
+            ? 'cmd/docker-update-watcher.{sh,ps1}'
+            : 'cmd/native-update-watcher.{sh,ps1}';
+
         return [
-            'status'      => 'manual_required',
-            'environment' => 'native',
+            'status'         => 'queued',
+            'environment'    => $env,
             'target_version' => $target,
-            'message'     => 'Pro nativní instalaci spusť na hostu:',
-            'instructions' => [
-                'git fetch --tags',
-                'git checkout v' . $target,
-                'cd api && composer install --no-dev && cd ..',
-                'cd web && pnpm install && pnpm build && cd ..',
-                'php tools/generateManualHtml.php',
-                'php tools/exportManualToPdf.php',
-                'php api/bin/migrate.php',
-            ],
+            'message'        => 'Požadavek na upgrade na v' . $target . ' byl zařazen. '
+                . 'Aplikuje ho host-side watcher (' . $watcher . ').',
         ];
     }
 
@@ -231,16 +219,26 @@ final class VersionService
     private const UPGRADE_FLAG_TTL = 900; // 15 min
 
     /**
-     * Probíhá upgrade? Self-healing: samotná existence flag souboru nestačí —
-     * flag se zruší (a vrátí false), pokud:
+     * Probíhá upgrade? „Probíhá" = buď čeká ve frontě (upgrade-requested.json,
+     * watcher ho ještě nezvedl), nebo už ho watcher zpracovává
+     * (upgrade-inflight.json — watcher flag přejmenuje před spuštěním update
+     * skriptu). Kontrola inflightu je nutná pro nativní instalaci: tam se PHP
+     * při upgradu nerestartuje, takže bez ní by „Upgrade probíhá…" zmizelo hned,
+     * jakmile watcher flag zvedne, a UI by přestalo pollovat před výsledkem.
+     *
+     * Self-healing: samotná existence souboru nestačí — zruší se (a vrátí false), pokud:
      *   a) je cílová verze už nasazená (current >= target) — upgrade proběhl mimo
      *      aplikaci, typicky ručně přes terminál, takže flag nikdo nezpracoval, nebo
-     *   b) flag je starší než TTL — host-side watcher zřejmě neběží/spadl.
+     *   b) soubor je starší než TTL — host-side watcher zřejmě neběží/spadl.
      * Tím se UI nezasekne na „Upgrade probíhá…" donekonečna.
      */
     public function isUpgradeInProgress(): bool
     {
+        // Preferuj requested (ve frontě); jinak inflight (watcher už pracuje).
         $flag = $this->upgradeFlagPath();
+        if (!is_file($flag)) {
+            $flag = $this->upgradeInflightPath();
+        }
         if (!is_file($flag)) {
             return false;
         }
@@ -248,9 +246,10 @@ final class VersionService
         $payload = json_decode((string) @file_get_contents($flag), true);
         $payload = is_array($payload) ? $payload : [];
         $target  = isset($payload['target_version']) ? (string) $payload['target_version'] : null;
+        $env     = isset($payload['environment']) ? (string) $payload['environment'] : $this->detectEnvironment();
         $current = $this->getCurrentVersion();
 
-        // a) cílová verze už nasazená → upgrade hotový (mimo watcher). Flag tiše zruš.
+        // a) cílová verze už nasazená → upgrade hotový (mimo watcher). Soubor tiše zruš.
         if ($target !== null && $current !== 'unknown' && version_compare($current, $target, '>=')) {
             @unlink($flag);
             return false;
@@ -263,6 +262,9 @@ final class VersionService
         }
         if (time() - $requestedTs > self::UPGRADE_FLAG_TTL) {
             @unlink($flag);
+            $watcher = $env === 'docker'
+                ? 'cmd/docker-update-watcher.{sh,ps1}'
+                : 'cmd/native-update-watcher.{sh,ps1}';
             // Informativní result, ať uživatel ví, proč to skončilo (a že watcher možná neběží).
             if (!is_file($this->upgradeResultPath())) {
                 @file_put_contents($this->upgradeResultPath(), json_encode([
@@ -271,7 +273,7 @@ final class VersionService
                     'applied_at'     => date(\DateTimeInterface::ATOM),
                     'message'        => 'Požadavek na upgrade vypršel — dokončení se nepodařilo potvrdit. '
                         . 'Pokud aktualizuješ ručně přes terminál, je to v pořádku; jinak zkontroluj, '
-                        . 'že na hostu běží watcher (cmd/docker-update-watcher.{sh,ps1}).',
+                        . 'že na hostu běží watcher (' . $watcher . ').',
                 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
             }
             return false;
@@ -288,15 +290,27 @@ final class VersionService
      */
     public function cancelUpgrade(): array
     {
-        $flag = $this->upgradeFlagPath();
-        $existed = is_file($flag);
-        @unlink($flag);
+        // Zruš obě fáze — čekající (requested) i rozpracovanou (inflight). Inflight
+        // může zůstat po spadlém watcheru, jinak by se native upgrade jevil jako věčně probíhající.
+        $existed = false;
+        foreach ([$this->upgradeFlagPath(), $this->upgradeInflightPath()] as $f) {
+            if (is_file($f)) {
+                $existed = true;
+            }
+            @unlink($f);
+        }
         return ['status' => 'ok', 'cleared' => $existed];
     }
 
     public function upgradeFlagPath(): string
     {
         return $this->stateBaseDir() . '/storage/upgrade-requested.json';
+    }
+
+    /** Watcher přejmenuje flag sem těsně před spuštěním update skriptu (zámek + „probíhá"). */
+    public function upgradeInflightPath(): string
+    {
+        return $this->stateBaseDir() . '/storage/upgrade-inflight.json';
     }
 
     public function upgradeResultPath(): string

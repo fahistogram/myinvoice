@@ -45,7 +45,7 @@ export const updateApi = {
   /** Admin — vynucený fresh fetch z GitHubu. */
   refresh: () => api.post<UpdateStatus>('/admin/update/refresh').then((r) => r.data),
 
-  /** Admin — zařadit upgrade do fronty (Docker) nebo dostat instrukce (nativní). */
+  /** Admin — zařadit upgrade do fronty (flag soubor zpracuje host-side watcher; Docker i nativní). */
   trigger: (target_version?: string) =>
     api
       .post<UpdateTriggerResponse>('/admin/update/trigger', { target_version: target_version ?? null })
