@@ -9,13 +9,7 @@
 </head>
 <body>
 
-{# ─── PAGE FOOTER (každá stránka) — attribution ─── #}
-<htmlpagefooter name="attribution">
-  <div class="page-attribution">
-    {% if locale == 'en' %}Powered by <a href="https://myinvoice.cz/">MyInvoice.cz</a> invoicing system{% else %}Používá fakturační systém <a href="https://myinvoice.cz/">MyInvoice.cz</a>{% endif %}
-  </div>
-</htmlpagefooter>
-<sethtmlpagefooter name="attribution" value="on" />
+{# attribution footer odebrán — bez MyInvoice brandingu na dokladu #}
 
 {# ─── HLAVIČKA ─── #}
 <table class="head{% if invoice.invoice_type == 'credit_note' %} credit-note{% elseif invoice.invoice_type == 'cancellation' %} cancellation{% endif %}">
